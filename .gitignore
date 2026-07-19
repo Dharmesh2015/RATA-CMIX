@@ -1,0 +1,9 @@
+scripts/
+cmix
+remap
+pgo_data/
+progress.log
+run/
+changes.v2
+logs
+"tools/upx" 
