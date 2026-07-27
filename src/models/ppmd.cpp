@@ -173,7 +173,16 @@ int StartSubAllocator( qword SASize ) {
     if (ftruncate(fd, t) == -1) {
       exit(EXIT_FAILURE);
     }
-    HeapStart = (byte*) mmap(NULL, t, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    // Exact donor discovery forks two predictors from the same byte boundary.
+    // MAP_PRIVATE gives each branch copy-on-write PPM state. The accepted
+    // compressor remains MAP_SHARED and retains the cmix-lex RSS behavior.
+#if FX4_DONOR_FORK_DISCOVERY
+    const int map_flags = MAP_PRIVATE | MAP_NORESERVE;
+#else
+    const int map_flags = MAP_SHARED;
+#endif
+    HeapStart = (byte*) mmap(
+        NULL, t, PROT_READ|PROT_WRITE, map_flags, fd, 0);
     if(HeapStart == MAP_FAILED){
       exit(EXIT_FAILURE);
     }
@@ -1464,10 +1473,12 @@ void PPMD::ByteUpdate() {
   probs_ /= probs_.sum();
   tree_context_ = 1;
   if (mmap_to_disk) {
+#if !FX4_DONOR_FORK_DISCOVERY
     if (counter_ - last_mmap_remap_counter_ >= kMmapRemapIntervalBytes) {
       DropPpmHeapResidency(ppmd_model_.get());
       last_mmap_remap_counter_ = counter_;
     }
+#endif
   }
 }
 

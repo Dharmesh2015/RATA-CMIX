@@ -12,6 +12,8 @@
 #include "coder/encoder.h"
 #include "coder/decoder.h"
 #include "predictor.h"
+#include "donor_plan.h"
+#include "donor_fork_discovery.h"
 
 #include "readalike_prepr/article_reorder.h"
 #include "readalike_prepr/self_extract.h"
@@ -20,13 +22,11 @@
 #include "r1_reorder_transform.h"
 #include "fx4_config.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <algorithm>
+#include <cstdint>
 
 namespace {
-  const int kMinVocabFileSize = 10000;
+const int kMinVocabFileSize = 10000;
 }
 
 int Help() {
@@ -59,12 +59,13 @@ size_t getFileSize(const std::string& path) {
 }
 
 void WriteHeader(unsigned long long length, const std::vector<bool>& vocab,
-    bool dictionary_used, std::ofstream* os) {
+    bool dictionary_used, bool donor_plan_used, std::ofstream* os) {
   for (int i = 4; i >= 0; --i) {
     char c = length >> (8*i);
     if (i == 4) {
-      c &= 0x7F;
+      c &= 0x3F;
       if (dictionary_used) c |= 0x80;
+      if (donor_plan_used) c |= 0x40;
     }
     os->put(c);
   }
@@ -87,7 +88,8 @@ void WriteStorageHeader(FILE* out, bool dictionary_used) {
 }
 
 void ReadHeader(std::ifstream* is, unsigned long long* length,
-    bool* dictionary_used, std::vector<bool>* vocab) {
+    bool* dictionary_used, bool* donor_plan_used,
+    std::vector<bool>* vocab) {
   *length = 0;
   for (int i = 0; i <= 4; ++i) {
     *length <<= 8;
@@ -95,7 +97,8 @@ void ReadHeader(std::ifstream* is, unsigned long long* length,
     if (i == 0) {
       if (c&0x80) *dictionary_used = true;
       else *dictionary_used = false;
-      c &= 0x7F;
+      *donor_plan_used = (c & 0x40) != 0;
+      c &= 0x3F;
     }
     *length += c;
   }
@@ -133,8 +136,9 @@ void ClearOutput() {
   fflush(stderr);
 #endif
 }
-void Compress(unsigned long long input_bytes, std::ifstream* is,
-    std::ofstream* os, unsigned long long* output_bytes, Predictor* p) {
+bool Compress(unsigned long long input_bytes, std::ifstream* is,
+    std::ofstream* os, unsigned long long* output_bytes, Predictor* p,
+    DonorPlan* donor_plan) {
   Encoder e(os, p);
 #if FX4_PROGRESS_LOG
   FILE* progress = fopen("./progress.log", "w");
@@ -144,6 +148,22 @@ void Compress(unsigned long long input_bytes, std::ifstream* is,
   ClearOutput();
   std::vector<char> buffer(FX4_IO_BUFFER_BYTES);
   unsigned long long pos = 0;
+#if FX4_DONOR_PLAN
+  const char* stats_path = std::getenv("FX4_REGION_STATS");
+  std::ofstream stats;
+  if (stats_path && *stats_path) {
+    stats.open(stats_path, std::ios::out | std::ios::trunc);
+    if (!stats.is_open()) return false;
+    stats << "region,donor_seed_offset,cumulative_before,cumulative_after,"
+             "payload_bytes\n";
+  }
+  size_t region_start = e.OutputSize();
+  uint32_t current_region = 0;
+  const char* stop_text = std::getenv("FX4_DONOR_STOP_AFTER_REGIONS");
+  const uint32_t stop_after_regions = stop_text && *stop_text
+      ? static_cast<uint32_t>(std::strtoul(stop_text, nullptr, 10))
+      : 0;
+#endif
   while (pos < input_bytes) {
     const size_t chunk = static_cast<size_t>(
         std::min<unsigned long long>(buffer.size(), input_bytes - pos));
@@ -151,10 +171,36 @@ void Compress(unsigned long long input_bytes, std::ifstream* is,
     const size_t got = static_cast<size_t>(is->gcount());
     if (got == 0) break;
     for (size_t i = 0; i < got; ++i, ++pos) {
+#if FX4_DONOR_PLAN
+      if (pos != 0 && pos % DonorPlan::kChunkSize == 0) {
+        const size_t region_end = e.OutputSize();
+        if (stats.is_open()) {
+          stats << current_region << ','
+                << (donor_plan
+                    ? donor_plan->DonorOffset(current_region)
+                    : DonorPlan::kNoDonor)
+                << ',' << region_start << ',' << region_end << ','
+                << (region_end - region_start) << '\n';
+        }
+        ++current_region;
+        region_start = region_end;
+        if (stop_after_regions != 0 &&
+            current_region >= stop_after_regions) {
+          if (stats.is_open()) stats.flush();
+          fprintf(stderr, "FX4 donor staged run stopped after %u regions\n",
+              current_region);
+          return false;
+        }
+      }
+      if (donor_plan && !donor_plan->ReplayAt(pos, p)) return false;
+#endif
       unsigned char c = static_cast<unsigned char>(buffer[i]);
       for (int j = 7; j >= 0; --j) {
         e.Encode((c >> j) & 1);
       }
+#if FX4_DONOR_PLAN
+      if (donor_plan) donor_plan->CaptureByte(pos, c);
+#endif
       if (pos >= next_progress) {
         double frac = 100.0 * pos / input_bytes;
 #if FX4_STDERR_PROGRESS
@@ -169,6 +215,17 @@ void Compress(unsigned long long input_bytes, std::ifstream* is,
     }
   }
   e.Flush();
+#if FX4_DONOR_PLAN
+  if (stats.is_open()) {
+    const size_t region_end = e.OutputSize();
+    stats << current_region << ','
+          << (donor_plan
+              ? donor_plan->DonorOffset(current_region)
+              : DonorPlan::kNoDonor)
+          << ',' << region_start << ',' << region_end << ','
+          << (region_end - region_start) << '\n';
+  }
+#endif
   *output_bytes = os->tellp();
 #if FX4_PROGRESS_LOG
   if (progress) fclose(progress);
@@ -177,9 +234,10 @@ void Compress(unsigned long long input_bytes, std::ifstream* is,
   fprintf(stderr, "\rprogress: 100.00%%");
   fflush(stderr);
 #endif
+  return pos == input_bytes && os->good();
 }
-void Decompress(unsigned long long output_length, std::ifstream* is,
-                std::ofstream* os, Predictor* p) {
+bool Decompress(unsigned long long output_length, std::ifstream* is,
+                std::ofstream* os, Predictor* p, DonorPlan* donor_plan) {
   Decoder d(is, p);
   const unsigned long long progress_step = 1 + (output_length / FX4_PROGRESS_STEPS);
   unsigned long long next_progress = 0;
@@ -187,11 +245,19 @@ void Decompress(unsigned long long output_length, std::ifstream* is,
   output.reserve(FX4_IO_BUFFER_BYTES);
   ClearOutput();
   for (unsigned long long pos = 0; pos < output_length; ++pos) {
+#if FX4_DONOR_PLAN
+    if (donor_plan && !donor_plan->ReplayAt(pos, p)) return false;
+#endif
     int byte = 1;
     while (byte < 256) {
       byte += byte + d.Decode();
     }
     output.push_back(static_cast<char>(byte));
+#if FX4_DONOR_PLAN
+    if (donor_plan) {
+      donor_plan->CaptureByte(pos, static_cast<uint8_t>(byte));
+    }
+#endif
     if (output.size() >= FX4_IO_BUFFER_BYTES) {
       os->write(output.data(), static_cast<std::streamsize>(output.size()));
       output.clear();
@@ -212,6 +278,7 @@ void Decompress(unsigned long long output_length, std::ifstream* is,
   fprintf(stderr, "\rprogress: 100.00%%");
   fflush(stderr);
 #endif
+  return os->good();
 }
 
 bool Store(const std::string& input_path, const std::string& temp_path,
@@ -269,11 +336,13 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     fclose(temp_out);
   }
 
+
   if (post_wrt_side_path &&
       !r1_reorder::ReorderEncodedTailFile(temp_path, post_wrt_side_path)) {
     fprintf(stderr, "payload_lex encoded-tail reorder failed\n");
     return false;
   }
+
 
   std::ifstream temp_in(temp_path, std::ios::in | std::ios::binary);
   if (!temp_in.is_open()) return false;
@@ -293,10 +362,53 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     temp_in.seekg(0, std::ios::beg);
   }
 
-  WriteHeader(temp_bytes, vocab, dictionary != NULL, &data_out);
+
+  DonorPlan* active_donor_plan = nullptr;
+#if FX4_DONOR_PLAN
+  DonorPlan donor_plan;
+  const char* donor_plan_path = std::getenv("FX4_DONOR_PLAN");
+  if (donor_plan_path && *donor_plan_path) {
+    if (!donor_plan.LoadExternal(donor_plan_path, temp_bytes)) {
+      fprintf(stderr, "invalid FX4_DONOR_PLAN: %s\n", donor_plan_path);
+      return false;
+    }
+    if (!donor_plan.empty()) active_donor_plan = &donor_plan;
+  }
+#endif
+
+#if FX4_DONOR_FORK_DISCOVERY
+  const char* discovery_results =
+      std::getenv("FX4_DONOR_DISCOVERY_RESULTS");
+  if (discovery_results && *discovery_results && active_donor_plan) {
+    temp_in.close();
+    data_out.close();
+    remove(output_path.c_str());
+    uint64_t discovery_output_bytes = 0;
+    const bool discovery_ok = RunDonorForkDiscovery(
+        temp_path, output_path, temp_bytes, vocab, dictionary,
+        enable_preprocess, active_donor_plan, &discovery_output_bytes);
+    *output_bytes = discovery_output_bytes;
+    remove(output_path.c_str());
+    remove(temp_path.c_str());
+    return discovery_ok;
+  }
+#endif
+
+  WriteHeader(temp_bytes, vocab, dictionary != NULL,
+      active_donor_plan != nullptr, &data_out);
+#if FX4_DONOR_PLAN
+  if (active_donor_plan && !active_donor_plan->WriteArchive(&data_out)) {
+    fprintf(stderr, "cannot write FX4 donor plan\n");
+    return false;
+  }
+#endif
   Predictor p(vocab);
   if (enable_preprocess) preprocessor::Pretrain(&p, dictionary);
-  Compress(temp_bytes, &temp_in, &data_out, output_bytes, &p);
+  if (!Compress(temp_bytes, &temp_in, &data_out, output_bytes, &p,
+      active_donor_plan)) {
+    fprintf(stderr, "FX4 entropy compression failed\n");
+    return false;
+  }
   temp_in.close();
   data_out.close();
   remove(temp_path.c_str());
@@ -315,8 +427,10 @@ bool RunDecompression(const std::string& input_path,
   *input_bytes = data_in.tellg();
   data_in.seekg(0, std::ios::beg);
   std::vector<bool> vocab(256, false);
-  bool dictionary_used;
-  ReadHeader(&data_in, output_bytes, &dictionary_used, &vocab);
+  bool dictionary_used = false;
+  bool donor_plan_used = false;
+  ReadHeader(&data_in, output_bytes, &dictionary_used, &donor_plan_used,
+      &vocab);
   if (!dictionary_used && dictionary != NULL) return false;
   if (dictionary_used && dictionary == NULL) return false;
 
@@ -337,16 +451,36 @@ bool RunDecompression(const std::string& input_path,
     return true;
   }
   {
+    DonorPlan* active_donor_plan = nullptr;
+#if FX4_DONOR_PLAN
+    DonorPlan donor_plan;
+    if (donor_plan_used) {
+      if (!donor_plan.ReadArchive(&data_in, *output_bytes)) {
+        fprintf(stderr, "invalid FX4 donor plan in archive\n");
+        return false;
+      }
+      active_donor_plan = &donor_plan;
+    }
+#else
+    if (donor_plan_used) {
+      fprintf(stderr, "archive requires donor-enabled FX4 build\n");
+      return false;
+    }
+#endif
+
     Predictor p(vocab);
     if (dictionary_used) preprocessor::Pretrain(&p, dictionary);
 
     std::ofstream temp_out(temp_path, std::ios::out | std::ios::binary);
     if (!temp_out.is_open()) return false;
-
-    Decompress(*output_bytes, &data_in, &temp_out, &p);
+    if (!Decompress(*output_bytes, &data_in, &temp_out, &p,
+        active_donor_plan)) {
+      fprintf(stderr, "FX4 entropy decompression failed\n");
+      return false;
+    }
+    temp_out.close();
     p.FreeFxcmMemory();
     data_in.close();
-    temp_out.close();
   }
   malloc_trim(0);
   if (post_wrt_side_path) {
@@ -356,6 +490,7 @@ bool RunDecompression(const std::string& input_path,
       return false;
     }
   }
+
 
   FILE* temp_in = fopen(temp_path.c_str(), "rb");
   if (!temp_in) return false;
@@ -478,6 +613,9 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
         dictionary, &input_bytes, &output_bytes, ".r1_payload_lex_side")) {
       return Help();
     }
+#if FX4_DONOR_FORK_DISCOVERY
+    if (DonorForkDiscoveryCompleted()) return 0;
+#endif
 
     // construct a selfextracting decompressor binary
     // archive9 = decomp_binary(upxed) + comp_dict + cmix_output + header.dat

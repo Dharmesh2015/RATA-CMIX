@@ -49,11 +49,32 @@
 #endif
 
 #ifndef FX4_LSTM_LEARNING_RATE
-#define FX4_LSTM_LEARNING_RATE 0.03f
+#define FX4_LSTM_LEARNING_RATE 0.055f
 #endif
 
 #ifndef FX4_LSTM_GRADIENT_CLIP
 #define FX4_LSTM_GRADIENT_CLIP 10.0f
+#endif
+
+// Baseline-anchored correction over existing PPMd, LSTM and FXCM predictions.
+// It uses only decoder-visible stream state and has no archive side data.
+#ifndef FX4_DONOR_PLAN
+#define FX4_DONOR_PLAN 0
+#endif
+
+// Linux-only exact donor discovery. This is never enabled in the accepted
+// compressor: it forks at recipient boundaries so baseline and donor trials
+// start from identical predictor state.
+#ifndef FX4_DONOR_FORK_DISCOVERY
+#define FX4_DONOR_FORK_DISCOVERY 0
+#endif
+
+#ifndef FX4_SPECIALIST_CORRECTOR
+#define FX4_SPECIALIST_CORRECTOR 1
+#endif
+
+#ifndef FX4_SPECIALIST_LEARNING_RATE
+#define FX4_SPECIALIST_LEARNING_RATE 0.0005f
 #endif
 
 #endif

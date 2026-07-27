@@ -1,6 +1,7 @@
 #ifndef PREDICTOR_H
 #define PREDICTOR_H
 
+#include "fx4_config.h"
 #include "mixer/sigmoid.h"
 #include "mixer/mixer-input.h"
 #include "mixer/mixer.h"
@@ -34,6 +35,7 @@
 #include <memory>
 #include <optional>
 #include <array>
+#include <cstdint>
 
 class Predictor {
  public:
@@ -55,6 +57,12 @@ class Predictor {
   void AddMatch();
   void AddDoubleIndirect();
   void AddMixers();
+#if FX4_SPECIALIST_CORRECTOR
+  unsigned int SpecialistStreamClass() const;
+  float PredictSpecialist(float base_probability, float ppmd_logit,
+      float lstm_logit, float fxcm_logit);
+  void PerceiveSpecialist(int bit);
+#endif
 
   llvm::SmallVector<Indirect<Nonstationary>, 32> indirect_ns_models_; // non-stationary
   llvm::SmallVector<Indirect<RunMap>, 1> indirect_r_models_; // run map
@@ -76,6 +84,19 @@ class Predictor {
   std::optional<ByteMixer> byte_mixer_;
   std::vector<bool> vocab_;
   FXCM fxcm_model_;
+#if FX4_SPECIALIST_CORRECTOR
+  static constexpr unsigned int kSpecialistCoarseContexts = 64;
+  static constexpr unsigned int kSpecialistContexts = 1024;
+  static constexpr unsigned int kSpecialistFeatures = 5;
+  std::array<std::array<float, kSpecialistFeatures>,
+      kSpecialistContexts> specialist_weights_{};
+  std::array<std::array<float, kSpecialistFeatures>,
+      kSpecialistCoarseContexts> specialist_coarse_weights_{};
+  std::array<float, kSpecialistContexts> specialist_error_{};
+  std::array<float, kSpecialistFeatures> specialist_inputs_{};
+  unsigned int specialist_coarse_context_ = 0;
+  unsigned int specialist_context_ = 0;
+  float specialist_probability_ = 0.5f;
+#endif
 };
-
 #endif

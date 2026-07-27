@@ -10,7 +10,18 @@ DICTIONARY="$ROOT_DIR/dictionary/english.dic"
 ARTICLE_ORDER="$ROOT_DIR/src/readalike_prepr/data/new_article_order"
 SEED="$(printenv SEED 2>/dev/null || printf 923)"
 UPDATE_LIMIT="$(printenv UPDATE_LIMIT 2>/dev/null || printf 3000)"
-CFLAGS_DEFINES="-DSEED=$SEED -DUPDATE_LIMIT=$UPDATE_LIMIT -DNDEBUG"
+DONOR="$(printenv DONOR 2>/dev/null || printf 0)"
+DONOR_DISCOVERY="$(printenv DONOR_DISCOVERY 2>/dev/null || printf 0)"
+if [[ "$DONOR_DISCOVERY" == 1 ]]; then
+  DONOR=1
+fi
+CFLAGS_DEFINES="-DSEED=$SEED -DUPDATE_LIMIT=$UPDATE_LIMIT -DNDEBUG -DFX4_LSTM_MID_BRIDGE=2"
+if [[ "$DONOR" == 1 ]]; then
+  CFLAGS_DEFINES="$CFLAGS_DEFINES -DFX4_DONOR_PLAN=1"
+fi
+if [[ "$DONOR_DISCOVERY" == 1 ]]; then
+  CFLAGS_DEFINES="$CFLAGS_DEFINES -DFX4_DONOR_FORK_DISCOVERY=1"
+fi
 
 command -v "$CC_BIN" >/dev/null
 command -v llvm-strip-17 >/dev/null
@@ -21,7 +32,7 @@ test -s "$ARTICLE_ORDER"
 echo "Building accepted ratio release..."
 rm -f ppm.temp
 make clean
-make CFLAGS_DEFINES="$CFLAGS_DEFINES" cmix -j3
+make DONOR="$DONOR" DONOR_DISCOVERY="$DONOR_DISCOVERY" CFLAGS_DEFINES="$CFLAGS_DEFINES" cmix -j3
 
 test -x cmix
 llvm-strip-17 --strip-all cmix
