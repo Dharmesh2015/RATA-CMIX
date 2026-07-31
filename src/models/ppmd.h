@@ -17,6 +17,10 @@ class PPMD : public ByteModel {
       const std::vector<bool>& vocab);
   ~PPMD();
   std::valarray<float>& Predict();
+  const std::array<float, 4>& PredictOrderBands();
+  unsigned int EffectiveOrder() const;
+  unsigned int LastEscapeDepth() const;
+  float RecentEscapeRate() const;
   void Perceive(int bit);
   void ByteUpdate();
  private:
@@ -25,6 +29,9 @@ class PPMD : public ByteModel {
   std::valarray<int> byte_map_;
   std::array<unsigned int, 256> tree_zero_;
   std::array<unsigned int, 256> tree_total_;
+  std::array<std::array<unsigned int, 256>, 4> band_tree_zero_{};
+  std::array<std::array<unsigned int, 256>, 4> band_tree_total_{};
+  std::array<float, 4> band_outputs_{{0.5f, 0.5f, 0.5f, 0.5f}};
   std::vector<unsigned char> disabled_bytes_;
   unsigned int tree_context_ = 1;
   bool vocab_full_ = false;

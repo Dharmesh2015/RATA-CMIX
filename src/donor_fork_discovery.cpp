@@ -4,14 +4,16 @@
 #include <cerrno>
 #include <cinttypes>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
-#include <fcntl.h>
 #include <sched.h>
+#include <signal.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -26,32 +28,46 @@
 
 namespace {
 
-constexpr int kBaselineWins = 0;
-constexpr int kDonorWins = 1;
-constexpr int kTrialLoserExit = 80;
-constexpr int kHandoffExit = 81;
+constexpr const char* kEdgeHeader =
+    "recipient_region,recipient_offset,candidate_rank,donor_offset,"
+    "baseline_payload_bytes,donor_payload_bytes,gain_bytes,status\n";
+constexpr const char* kSelectionHeader =
+    "recipient_region,recipient_offset,selected_donor_offset,"
+    "baseline_payload_bytes,selected_payload_bytes,gain_bytes,"
+    "candidate_count,successful_candidates\n";
 
 bool discovery_completed = false;
 
-struct RecordedDecision {
+enum class WorkerResult {
+  kFailed,
+  kPaused,
+  kComplete,
+};
+
+struct RecordedEdge {
   bool valid = false;
-  bool donor_won = false;
-  uint32_t donor_offset = DonorPlan::kNoDonor;
+  bool ok = false;
   uint64_t baseline_bytes = 0;
   uint64_t donor_bytes = 0;
 };
 
-struct BaselineMessage {
-  uint64_t payload_bytes;
-  uint32_t ok;
+struct RecordedSelection {
+  bool valid = false;
+  uint32_t donor_offset = DonorPlan::kNoDonor;
+  uint64_t baseline_bytes = 0;
+  uint64_t selected_bytes = 0;
+  uint32_t candidate_count = 0;
+  uint32_t successful_candidates = 0;
 };
 
-struct DecisionMessage {
-  uint64_t baseline_bytes;
-  uint64_t donor_bytes;
-  uint32_t winner;
-  uint32_t ok;
+struct ProbeMessage {
+  uint64_t payload_bytes = 0;
+  uint32_t ok = 0;
 };
+
+uint64_t EdgeKey(uint32_t region, uint32_t donor_offset) {
+  return (static_cast<uint64_t>(region) << 32) | donor_offset;
+}
 
 bool WriteAll(int fd, const void* data, size_t size) {
   const uint8_t* input = static_cast<const uint8_t*>(data);
@@ -90,6 +106,10 @@ std::string WinnersPath(const std::string& ledger_path) {
   return ledger_path + ".winners.csv";
 }
 
+std::string SelectionsPath(const std::string& ledger_path) {
+  return ledger_path + ".selected.csv";
+}
+
 std::string StatusPath(const std::string& ledger_path) {
   return ledger_path + ".status";
 }
@@ -98,9 +118,18 @@ std::string CompletePath(const std::string& ledger_path) {
   return ledger_path + ".complete";
 }
 
+std::string PausedPath(const std::string& ledger_path) {
+  return ledger_path + ".paused";
+}
+
 bool EnsureCsv(const std::string& path, const char* header) {
   struct stat info {};
-  if (stat(path.c_str(), &info) == 0 && info.st_size != 0) return true;
+  if (stat(path.c_str(), &info) == 0 && info.st_size != 0) {
+    std::ifstream input(path);
+    std::string first;
+    return input.is_open() && std::getline(input, first) &&
+        first + "\n" == header;
+  }
   FILE* file = fopen(path.c_str(), "wb");
   if (!file) return false;
   const bool ok = fputs(header, file) >= 0 && SyncFile(file);
@@ -109,92 +138,150 @@ bool EnsureCsv(const std::string& path, const char* header) {
 }
 
 bool EnsureLedgers(const std::string& ledger_path) {
-  const char* header =
-      "recipient_region,recipient_offset,donor_offset,"
-      "baseline_payload_bytes,donor_payload_bytes,gain_bytes,winner\n";
-  return EnsureCsv(ledger_path, header) &&
-      EnsureCsv(WinnersPath(ledger_path), header);
+  return EnsureCsv(ledger_path, kEdgeHeader) &&
+      EnsureCsv(WinnersPath(ledger_path), kEdgeHeader) &&
+      EnsureCsv(SelectionsPath(ledger_path), kSelectionHeader);
 }
 
-bool LoadDecisions(const std::string& ledger_path,
-    std::vector<RecordedDecision>* decisions) {
+bool AppendRow(const std::string& path, const char* row, size_t length) {
+  FILE* file = fopen(path.c_str(), "ab");
+  if (!file) return false;
+  const bool ok = fwrite(row, 1, length, file) == length && SyncFile(file);
+  fclose(file);
+  return ok;
+}
+
+bool WriteStatus(const std::string& ledger_path, const char* phase,
+    uint32_t region, uint32_t donor_offset, int64_t gain,
+    uint64_t new_trials) {
+  const std::string path = StatusPath(ledger_path);
+  const std::string temporary = path + ".tmp";
+  FILE* file = fopen(temporary.c_str(), "wb");
+  if (!file) return false;
+  fprintf(file,
+      "phase=%s\nrecipient_region=%u\nrecipient_offset=%" PRIu64
+      "\ndonor_offset=%u\ngain_bytes=%" PRId64
+      "\nnew_trials_this_run=%" PRIu64 "\npid=%ld\n",
+      phase, region,
+      static_cast<uint64_t>(region) * DonorPlan::kChunkSize,
+      donor_offset, gain, new_trials, static_cast<long>(getpid()));
+  const bool synced = SyncFile(file);
+  fclose(file);
+  if (!synced) return false;
+  return rename(temporary.c_str(), path.c_str()) == 0;
+}
+
+bool LoadEdges(const std::string& ledger_path,
+    std::unordered_map<uint64_t, RecordedEdge>* edges) {
   std::ifstream input(ledger_path);
   if (!input.is_open()) return false;
   std::string line;
-  std::getline(input, line);
+  if (!std::getline(input, line) || line + "\n" != kEdgeHeader) return false;
+  while (std::getline(input, line)) {
+    unsigned region = 0;
+    unsigned long long recipient_offset = 0;
+    unsigned rank = 0;
+    unsigned donor_offset = 0;
+    unsigned long long baseline_bytes = 0;
+    unsigned long long donor_bytes = 0;
+    long long gain_bytes = 0;
+    char status[16] = {};
+    if (sscanf(line.c_str(), "%u,%llu,%u,%u,%llu,%llu,%lld,%15s",
+        &region, &recipient_offset, &rank, &donor_offset, &baseline_bytes,
+        &donor_bytes, &gain_bytes, status) != 8) {
+      return false;
+    }
+    RecordedEdge edge;
+    edge.valid = true;
+    edge.ok = strcmp(status, "error") != 0;
+    edge.baseline_bytes = baseline_bytes;
+    edge.donor_bytes = donor_bytes;
+    (*edges)[EdgeKey(region, donor_offset)] = edge;
+  }
+  return true;
+}
+
+bool LoadSelections(const std::string& ledger_path,
+    std::vector<RecordedSelection>* selections) {
+  std::ifstream input(SelectionsPath(ledger_path));
+  if (!input.is_open()) return false;
+  std::string line;
+  if (!std::getline(input, line) || line + "\n" != kSelectionHeader) {
+    return false;
+  }
   while (std::getline(input, line)) {
     unsigned region = 0;
     unsigned long long recipient_offset = 0;
     unsigned donor_offset = 0;
     unsigned long long baseline_bytes = 0;
-    unsigned long long donor_bytes = 0;
+    unsigned long long selected_bytes = 0;
     long long gain_bytes = 0;
-    char winner[16] = {};
-    if (sscanf(line.c_str(), "%u,%llu,%u,%llu,%llu,%lld,%15s",
+    unsigned candidate_count = 0;
+    unsigned successful_candidates = 0;
+    if (sscanf(line.c_str(), "%u,%llu,%u,%llu,%llu,%lld,%u,%u",
         &region, &recipient_offset, &donor_offset, &baseline_bytes,
-        &donor_bytes, &gain_bytes, winner) != 7) {
-      continue;
+        &selected_bytes, &gain_bytes, &candidate_count,
+        &successful_candidates) != 8 ||
+        region >= selections->size()) {
+      return false;
     }
-    if (region >= decisions->size()) return false;
-    RecordedDecision& decision = (*decisions)[region];
-    decision.valid = true;
-    decision.donor_won = strcmp(winner, "donor") == 0;
-    decision.donor_offset = donor_offset;
-    decision.baseline_bytes = baseline_bytes;
-    decision.donor_bytes = donor_bytes;
+    RecordedSelection selection;
+    selection.valid = true;
+    selection.donor_offset = donor_offset;
+    selection.baseline_bytes = baseline_bytes;
+    selection.selected_bytes = selected_bytes;
+    selection.candidate_count = candidate_count;
+    selection.successful_candidates = successful_candidates;
+    (*selections)[region] = selection;
   }
   return true;
 }
 
-bool AppendDecision(const std::string& ledger_path, uint32_t region,
-    uint32_t donor_offset, const DecisionMessage& decision) {
-  const int64_t gain = static_cast<int64_t>(decision.baseline_bytes) -
-      static_cast<int64_t>(decision.donor_bytes);
-  const char* winner =
-      decision.winner == kDonorWins ? "donor" : "baseline";
-  char row[256] = {};
+bool AppendEdge(const std::string& ledger_path, uint32_t region,
+    uint32_t rank, uint32_t donor_offset, uint64_t baseline_bytes,
+    const ProbeMessage& donor, uint64_t new_trials) {
+  const int64_t gain = donor.ok
+      ? static_cast<int64_t>(baseline_bytes) -
+          static_cast<int64_t>(donor.payload_bytes)
+      : 0;
+  const char* status =
+      !donor.ok ? "error" : gain > 0 ? "donor" : "baseline";
+  char row[320] = {};
   const int length = snprintf(row, sizeof(row),
-      "%u,%" PRIu64 ",%u,%" PRIu64 ",%" PRIu64 ",%" PRId64 ",%s\n",
+      "%u,%" PRIu64 ",%u,%u,%" PRIu64 ",%" PRIu64
+      ",%" PRId64 ",%s\n",
       region, static_cast<uint64_t>(region) * DonorPlan::kChunkSize,
-      donor_offset, decision.baseline_bytes, decision.donor_bytes, gain,
-      winner);
+      rank, donor_offset, baseline_bytes, donor.payload_bytes, gain, status);
   if (length <= 0 || static_cast<size_t>(length) >= sizeof(row)) return false;
-
-  FILE* ledger = fopen(ledger_path.c_str(), "ab");
-  if (!ledger) return false;
-  const bool ledger_ok =
-      fwrite(row, 1, static_cast<size_t>(length), ledger) ==
-          static_cast<size_t>(length) &&
-      SyncFile(ledger);
-  fclose(ledger);
-  if (!ledger_ok) return false;
-
-  if (decision.winner == kDonorWins) {
-    const std::string winners_path = WinnersPath(ledger_path);
-    FILE* winners = fopen(winners_path.c_str(), "ab");
-    if (!winners) return false;
-    const bool winner_ok =
-        fwrite(row, 1, static_cast<size_t>(length), winners) ==
-            static_cast<size_t>(length) &&
-        SyncFile(winners);
-    fclose(winners);
-    if (!winner_ok) return false;
+  if (!AppendRow(ledger_path, row, static_cast<size_t>(length))) return false;
+  if (gain > 0 &&
+      !AppendRow(WinnersPath(ledger_path), row,
+          static_cast<size_t>(length))) {
+    return false;
   }
+  return WriteStatus(
+      ledger_path, "edge", region, donor_offset, gain, new_trials);
+}
 
-  const std::string status_path = StatusPath(ledger_path);
-  FILE* status = fopen(status_path.c_str(), "wb");
-  if (!status) return false;
-  fprintf(status,
-      "last_region=%u\nrecipient_offset=%" PRIu64
-      "\ndonor_offset=%u\nbaseline_bytes=%" PRIu64
-      "\ndonor_bytes=%" PRIu64 "\ngain_bytes=%" PRId64
-      "\nwinner=%s\nwinner_pid=%ld\n",
+bool AppendSelection(const std::string& ledger_path, uint32_t region,
+    const RecordedSelection& selection, uint64_t new_trials) {
+  const int64_t gain = static_cast<int64_t>(selection.baseline_bytes) -
+      static_cast<int64_t>(selection.selected_bytes);
+  char row[320] = {};
+  const int length = snprintf(row, sizeof(row),
+      "%u,%" PRIu64 ",%u,%" PRIu64 ",%" PRIu64
+      ",%" PRId64 ",%u,%u\n",
       region, static_cast<uint64_t>(region) * DonorPlan::kChunkSize,
-      donor_offset, decision.baseline_bytes, decision.donor_bytes, gain,
-      winner, static_cast<long>(getpid()));
-  const bool status_ok = SyncFile(status);
-  fclose(status);
-  return status_ok;
+      selection.donor_offset, selection.baseline_bytes,
+      selection.selected_bytes, gain, selection.candidate_count,
+      selection.successful_candidates);
+  if (length <= 0 || static_cast<size_t>(length) >= sizeof(row)) return false;
+  if (!AppendRow(
+      SelectionsPath(ledger_path), row, static_cast<size_t>(length))) {
+    return false;
+  }
+  return WriteStatus(ledger_path, "selected", region,
+      selection.donor_offset, gain, new_trials);
 }
 
 void SetCpuFromEnvironment(const char* name) {
@@ -209,6 +296,14 @@ void SetCpuFromEnvironment(const char* name) {
   sched_setaffinity(0, sizeof(set), &set);
 }
 
+uint64_t EnvironmentU64(const char* name) {
+  const char* text = getenv(name);
+  if (!text || !*text) return 0;
+  char* end = nullptr;
+  const unsigned long long value = strtoull(text, &end, 10);
+  return *end == '\0' ? value : 0;
+}
+
 bool EncodeRegion(const char* bytes, size_t size, uint64_t position,
     Encoder* encoder, DonorPlan* donor_plan) {
   for (size_t index = 0; index < size; ++index) {
@@ -221,119 +316,62 @@ bool EncodeRegion(const char* bytes, size_t size, uint64_t position,
   return true;
 }
 
-bool ApplyRecordedDecision(const RecordedDecision& decision,
-    uint32_t expected_donor, uint64_t position, Predictor* predictor,
-    DonorPlan* donor_plan) {
-  if (decision.donor_offset != expected_donor) return false;
-  if (!decision.donor_won) return true;
-  return donor_plan->ReplayAt(position, predictor);
-}
-
-bool TrialRegion(const std::string& ledger_path, uint32_t region,
-    uint32_t donor_offset, const char* bytes, size_t size, uint64_t position,
-    Encoder* encoder, Predictor* predictor, DonorPlan* donor_plan) {
+bool ProbeRegion(uint32_t donor_offset, bool replay_donor,
+    const char* bytes, size_t size, uint64_t position, Encoder* encoder,
+    Predictor* predictor, DonorPlan* donor_plan, ProbeMessage* result) {
+  int message_pipe[2] = {-1, -1};
+  if (pipe(message_pipe) != 0) return false;
   const uint64_t start_size = encoder->OutputSize();
-
-  // Probe the donor in a disposable child while this process remains at the
-  // exact recipient boundary. Keeping only one mutating branch alive avoids
-  // the roughly 16 GB peak of two simultaneous full Predictor branches.
-  int donor_pipe[2] = {-1, -1};
-  if (pipe(donor_pipe) != 0) return false;
-  const pid_t donor_probe = fork();
-  if (donor_probe < 0) return false;
-  if (donor_probe == 0) {
-    close(donor_pipe[0]);
-    SetCpuFromEnvironment("FX4_DONOR_BASELINE_CPU");
-    BaselineMessage donor {};
-    const bool replay_ok = donor_plan->ReplayAt(position, predictor);
-    donor.ok = replay_ok && EncodeRegion(
-        bytes, size, position, encoder, donor_plan) ? 1u : 0u;
-    donor.payload_bytes = encoder->OutputSize() - start_size;
-    const bool sent = WriteAll(donor_pipe[1], &donor, sizeof(donor));
-    close(donor_pipe[1]);
-    _exit(sent && donor.ok ? 0 : 2);
-  }
-  close(donor_pipe[1]);
-  BaselineMessage donor {};
-  const bool donor_read = ReadAll(donor_pipe[0], &donor, sizeof(donor));
-  close(donor_pipe[0]);
-  int donor_status = 0;
-  if (!donor_read || waitpid(donor_probe, &donor_status, 0) != donor_probe ||
-      !WIFEXITED(donor_status) || WEXITSTATUS(donor_status) != 0 ||
-      !donor.ok) {
+  const pid_t probe = fork();
+  if (probe < 0) {
+    close(message_pipe[0]);
+    close(message_pipe[1]);
     return false;
   }
+  if (probe == 0) {
+    close(message_pipe[0]);
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
+    SetCpuFromEnvironment("FX4_DONOR_TRIAL_CPU");
+    encoder->SetCountOnly(true);
+    ProbeMessage message;
+    const uint32_t region =
+        static_cast<uint32_t>(position / DonorPlan::kChunkSize);
+    const bool replay_ok = !replay_donor ||
+        donor_plan->ReplayCandidate(region, donor_offset, predictor);
+    message.ok = replay_ok &&
+        EncodeRegion(bytes, size, position, encoder, donor_plan) ? 1u : 0u;
+    message.payload_bytes = encoder->OutputSize() - start_size;
+    const bool sent =
+        WriteAll(message_pipe[1], &message, sizeof(message));
+    close(message_pipe[1]);
+    _exit(sent && message.ok ? 0 : 2);
+  }
 
-  // Probe baseline second. If baseline wins, this child becomes the new
-  // long-lived worker. If donor wins, it exits and the untouched parent
-  // reproduces the already measured donor path exactly once.
-  int baseline_pipe[2] = {-1, -1};
-  int decision_pipe[2] = {-1, -1};
-  if (pipe(baseline_pipe) != 0 || pipe(decision_pipe) != 0) return false;
-  const pid_t baseline_probe = fork();
-  if (baseline_probe < 0) return false;
-  if (baseline_probe == 0) {
-    close(baseline_pipe[0]);
-    close(decision_pipe[1]);
-    SetCpuFromEnvironment("FX4_DONOR_BASELINE_CPU");
-
-    BaselineMessage baseline {};
-    baseline.ok = EncodeRegion(
-        bytes, size, position, encoder, donor_plan) ? 1u : 0u;
-    baseline.payload_bytes = encoder->OutputSize() - start_size;
-    if (!WriteAll(baseline_pipe[1], &baseline, sizeof(baseline))) _exit(3);
-    close(baseline_pipe[1]);
-
-    DecisionMessage decision {};
-    if (!ReadAll(decision_pipe[0], &decision, sizeof(decision))) _exit(4);
-    close(decision_pipe[0]);
-    if (!decision.ok) _exit(5);
-    if (decision.winner != kBaselineWins) _exit(kTrialLoserExit);
-    if (!AppendDecision(ledger_path, region, donor_offset, decision)) {
-      _exit(6);
-    }
+  close(message_pipe[1]);
+  ProbeMessage message;
+  const bool read_ok =
+      ReadAll(message_pipe[0], &message, sizeof(message));
+  close(message_pipe[0]);
+  int status = 0;
+  const bool waited = waitpid(probe, &status, 0) == probe;
+  if (!read_ok || !waited || !WIFEXITED(status) ||
+      WEXITSTATUS(status) != 0 || !message.ok) {
+    result->ok = 0;
+    result->payload_bytes = 0;
     return true;
   }
-
-  close(baseline_pipe[1]);
-  close(decision_pipe[0]);
-  BaselineMessage baseline {};
-  const bool baseline_read =
-      ReadAll(baseline_pipe[0], &baseline, sizeof(baseline));
-  close(baseline_pipe[0]);
-
-  DecisionMessage decision {};
-  decision.baseline_bytes = baseline.payload_bytes;
-  decision.donor_bytes = donor.payload_bytes;
-  decision.ok = baseline_read && baseline.ok ? 1u : 0u;
-  decision.winner = decision.ok && donor.payload_bytes < baseline.payload_bytes
-      ? kDonorWins
-      : kBaselineWins;
-  const bool sent = WriteAll(decision_pipe[1], &decision, sizeof(decision));
-  close(decision_pipe[1]);
-  if (!sent || !decision.ok) {
-    waitpid(baseline_probe, nullptr, 0);
-    return false;
-  }
-
-  if (decision.winner == kBaselineWins) {
-    _exit(kHandoffExit);
-  }
-
-  int baseline_status = 0;
-  if (waitpid(baseline_probe, &baseline_status, 0) != baseline_probe ||
-      !WIFEXITED(baseline_status) ||
-      WEXITSTATUS(baseline_status) != kTrialLoserExit) {
-    return false;
-  }
-  if (!donor_plan->ReplayAt(position, predictor) ||
-      !EncodeRegion(bytes, size, position, encoder, donor_plan) ||
-      encoder->OutputSize() - start_size != donor.payload_bytes) {
-    return false;
-  }
-  return AppendDecision(ledger_path, region, donor_offset, decision);
+  *result = message;
+  return true;
 }
-bool RunWorker(const std::string& input_path,
+
+bool ContainsDonor(
+    const std::vector<uint32_t>& candidates, uint32_t donor_offset) {
+  return donor_offset == DonorPlan::kNoDonor ||
+      std::find(candidates.begin(), candidates.end(), donor_offset) !=
+          candidates.end();
+}
+
+WorkerResult RunWorker(const std::string& input_path,
     const std::string& scratch_output_path, uint64_t input_bytes,
     const std::vector<bool>& vocab, FILE* dictionary,
     bool pretrain_dictionary, DonorPlan* donor_plan,
@@ -341,7 +379,7 @@ bool RunWorker(const std::string& input_path,
   std::ifstream input(input_path, std::ios::in | std::ios::binary);
   std::ofstream output(
       scratch_output_path, std::ios::out | std::ios::binary);
-  if (!input.is_open() || !output.is_open()) return false;
+  if (!input.is_open() || !output.is_open()) return WorkerResult::kFailed;
 
   Predictor predictor(vocab);
   if (pretrain_dictionary) preprocessor::Pretrain(&predictor, dictionary);
@@ -349,9 +387,16 @@ bool RunWorker(const std::string& input_path,
 
   const size_t complete_regions =
       static_cast<size_t>(input_bytes / DonorPlan::kChunkSize);
-  std::vector<RecordedDecision> decisions(complete_regions);
-  if (!LoadDecisions(ledger_path, &decisions)) return false;
+  std::unordered_map<uint64_t, RecordedEdge> edges;
+  std::vector<RecordedSelection> selections(complete_regions);
+  if (!LoadEdges(ledger_path, &edges) ||
+      !LoadSelections(ledger_path, &selections)) {
+    return WorkerResult::kFailed;
+  }
 
+  const uint64_t max_new_trials =
+      EnvironmentU64("FX4_DONOR_MAX_NEW_TRIALS");
+  uint64_t new_trials = 0;
   std::vector<char> buffer(DonorPlan::kChunkSize);
   uint64_t position = 0;
   while (position < input_bytes) {
@@ -359,47 +404,148 @@ bool RunWorker(const std::string& input_path,
         std::min<uint64_t>(buffer.size(), input_bytes - position));
     input.read(buffer.data(), static_cast<std::streamsize>(wanted));
     const size_t count = static_cast<size_t>(input.gcount());
-    if (count != wanted) return false;
+    if (count != wanted) return WorkerResult::kFailed;
 
     const uint32_t region =
         static_cast<uint32_t>(position / DonorPlan::kChunkSize);
-    const uint32_t donor_offset = donor_plan->DonorOffset(region);
-    if (count == DonorPlan::kChunkSize &&
-        donor_offset != DonorPlan::kNoDonor) {
-      if (region < decisions.size() && decisions[region].valid) {
-        if (!ApplyRecordedDecision(
-            decisions[region], donor_offset, position, &predictor,
-            donor_plan)) {
-          return false;
+    const std::vector<uint32_t>& candidates =
+        donor_plan->CandidateOffsets(region);
+    const uint64_t start_size = encoder.OutputSize();
+
+    if (count == DonorPlan::kChunkSize && !candidates.empty()) {
+      if (region < selections.size() && selections[region].valid) {
+        const RecordedSelection& selection = selections[region];
+        if (selection.candidate_count != candidates.size() ||
+            !ContainsDonor(candidates, selection.donor_offset)) {
+          return WorkerResult::kFailed;
+        }
+        if (selection.donor_offset != DonorPlan::kNoDonor &&
+            !donor_plan->ReplayCandidate(
+                region, selection.donor_offset, &predictor)) {
+          return WorkerResult::kFailed;
         }
         if (!EncodeRegion(buffer.data(), count, position, &encoder,
-            donor_plan)) {
-          return false;
+            donor_plan) ||
+            encoder.OutputSize() - start_size != selection.selected_bytes) {
+          return WorkerResult::kFailed;
         }
-      } else if (!TrialRegion(ledger_path, region, donor_offset,
-          buffer.data(), count, position, &encoder, &predictor, donor_plan)) {
-        return false;
+      } else {
+        uint64_t baseline_bytes = 0;
+        for (uint32_t donor_offset : candidates) {
+          const auto found = edges.find(EdgeKey(region, donor_offset));
+          if (found != edges.end() && found->second.valid) {
+            baseline_bytes = found->second.baseline_bytes;
+            break;
+          }
+        }
+        if (baseline_bytes == 0) {
+          ProbeMessage baseline;
+          if (!ProbeRegion(DonorPlan::kNoDonor, false, buffer.data(), count,
+              position, &encoder, &predictor, donor_plan, &baseline) ||
+              !baseline.ok) {
+            return WorkerResult::kFailed;
+          }
+          baseline_bytes = baseline.payload_bytes;
+        }
+
+        RecordedSelection selection;
+        selection.valid = true;
+        selection.baseline_bytes = baseline_bytes;
+        selection.selected_bytes = baseline_bytes;
+        selection.candidate_count =
+            static_cast<uint32_t>(candidates.size());
+
+        for (size_t rank = 0; rank < candidates.size(); ++rank) {
+          const uint32_t donor_offset = candidates[rank];
+          const uint64_t key = EdgeKey(region, donor_offset);
+          auto found = edges.find(key);
+          if (found == edges.end()) {
+            if (max_new_trials != 0 && new_trials >= max_new_trials) {
+              unlink(CompletePath(ledger_path).c_str());
+              FILE* paused = fopen(PausedPath(ledger_path).c_str(), "wb");
+              if (!paused) return WorkerResult::kFailed;
+              fprintf(paused,
+                  "recipient_region=%u\ncandidate_rank=%zu\n"
+                  "donor_offset=%u\nnew_trials=%" PRIu64 "\n",
+                  region, rank, donor_offset, new_trials);
+              const bool pause_ok = SyncFile(paused);
+              fclose(paused);
+              if (!pause_ok ||
+                  !WriteStatus(ledger_path, "paused", region,
+                      donor_offset, 0, new_trials)) {
+                return WorkerResult::kFailed;
+              }
+              return WorkerResult::kPaused;
+            }
+
+            ProbeMessage donor;
+            if (!ProbeRegion(donor_offset, true, buffer.data(), count,
+                position, &encoder, &predictor, donor_plan, &donor)) {
+              return WorkerResult::kFailed;
+            }
+            ++new_trials;
+            if (!AppendEdge(ledger_path, region,
+                static_cast<uint32_t>(rank), donor_offset, baseline_bytes,
+                donor, new_trials)) {
+              return WorkerResult::kFailed;
+            }
+            RecordedEdge edge;
+            edge.valid = true;
+            edge.ok = donor.ok != 0;
+            edge.baseline_bytes = baseline_bytes;
+            edge.donor_bytes = donor.payload_bytes;
+            found = edges.emplace(key, edge).first;
+          }
+
+          const RecordedEdge& edge = found->second;
+          if (edge.baseline_bytes != baseline_bytes) {
+            return WorkerResult::kFailed;
+          }
+          if (!edge.ok) continue;
+          ++selection.successful_candidates;
+          if (edge.donor_bytes < selection.selected_bytes) {
+            selection.selected_bytes = edge.donor_bytes;
+            selection.donor_offset = donor_offset;
+          }
+        }
+
+        if (!AppendSelection(
+            ledger_path, region, selection, new_trials)) {
+          return WorkerResult::kFailed;
+        }
+        selections[region] = selection;
+        if (selection.donor_offset != DonorPlan::kNoDonor &&
+            !donor_plan->ReplayCandidate(
+                region, selection.donor_offset, &predictor)) {
+          return WorkerResult::kFailed;
+        }
+        if (!EncodeRegion(buffer.data(), count, position, &encoder,
+            donor_plan) ||
+            encoder.OutputSize() - start_size != selection.selected_bytes) {
+          return WorkerResult::kFailed;
+        }
       }
     } else if (!EncodeRegion(
         buffer.data(), count, position, &encoder, donor_plan)) {
-      return false;
+      return WorkerResult::kFailed;
     }
     position += count;
   }
 
   encoder.Flush();
   output.close();
-  if (!output.good()) return false;
+  if (!output.good()) return WorkerResult::kFailed;
 
-  const std::string complete_path = CompletePath(ledger_path);
-  FILE* complete = fopen(complete_path.c_str(), "wb");
-  if (!complete) return false;
+  unlink(PausedPath(ledger_path).c_str());
+  FILE* complete = fopen(CompletePath(ledger_path).c_str(), "wb");
+  if (!complete) return WorkerResult::kFailed;
   fprintf(complete, "regions=%zu\ninput_bytes=%" PRIu64
-      "\nfinal_worker_pid=%ld\n",
-      complete_regions, input_bytes, static_cast<long>(getpid()));
+      "\nnew_trials=%" PRIu64 "\npid=%ld\n",
+      complete_regions, input_bytes, new_trials,
+      static_cast<long>(getpid()));
   const bool ok = SyncFile(complete);
   fclose(complete);
-  return ok;
+  return ok ? WorkerResult::kComplete : WorkerResult::kFailed;
 }
 
 }  // namespace
@@ -421,40 +567,26 @@ bool RunDonorForkDiscovery(const std::string& input_path,
   return false;
 #else
   const char* path = getenv("FX4_DONOR_DISCOVERY_RESULTS");
-  if (!path || !*path || !donor_plan || donor_plan->empty()) return false;
+  if (!path || !*path || !donor_plan || donor_plan->empty() ||
+      !donor_plan->discovery_candidates()) {
+    return false;
+  }
   const std::string ledger_path(path);
   if (!EnsureLedgers(ledger_path)) return false;
   unlink(CompletePath(ledger_path).c_str());
+  unlink(PausedPath(ledger_path).c_str());
 
-  if (prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) return false;
-  const pid_t worker = fork();
-  if (worker < 0) return false;
-  if (worker == 0) {
-    const bool ok = RunWorker(input_path, scratch_output_path, input_bytes,
-        vocab, dictionary, pretrain_dictionary, donor_plan, ledger_path);
-    _exit(ok ? 0 : 1);
-  }
+  const WorkerResult result = RunWorker(input_path, scratch_output_path,
+      input_bytes, vocab, dictionary, pretrain_dictionary, donor_plan,
+      ledger_path);
+  if (result == WorkerResult::kFailed) return false;
 
-  bool final_worker_succeeded = false;
-  for (;;) {
-    int status = 0;
-    const pid_t child = waitpid(-1, &status, 0);
-    if (child < 0) {
-      if (errno == EINTR) continue;
-      if (errno == ECHILD) break;
-      return false;
-    }
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-      final_worker_succeeded = true;
-    }
-  }
-  if (!final_worker_succeeded ||
-      access(CompletePath(ledger_path).c_str(), R_OK) != 0) {
-    return false;
-  }
   struct stat info {};
   *output_bytes =
-      stat(scratch_output_path.c_str(), &info) == 0 ? info.st_size : 0;
+      result == WorkerResult::kComplete &&
+      stat(scratch_output_path.c_str(), &info) == 0
+          ? info.st_size
+          : 0;
   discovery_completed = true;
   return true;
 #endif

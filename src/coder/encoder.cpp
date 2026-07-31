@@ -4,7 +4,11 @@ Encoder::Encoder(std::ofstream* os, Predictor* p) : os_(os), x1_(0),
     x2_(0xffffffff), p_(p) {}
 
 void Encoder::WriteByte(unsigned int byte) {
-  out_.push_back(byte);
+  if (count_only_) {
+    ++count_only_bytes_;
+  } else {
+    out_.push_back(byte);
+  }
 }
 
 unsigned int Encoder::Discretize(float p) {

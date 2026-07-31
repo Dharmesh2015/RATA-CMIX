@@ -27,6 +27,27 @@
 
 namespace {
 const int kMinVocabFileSize = 10000;
+
+bool CopyResearchStream(const std::string& source, const char* destination) {
+  if (!destination || !*destination) return true;
+  if (source == destination) return false;
+  std::ifstream input(source, std::ios::binary);
+  std::ofstream output(destination,
+      std::ios::binary | std::ios::out | std::ios::trunc);
+  if (!input.is_open() || !output.is_open()) return false;
+  std::vector<char> buffer(1u << 20);
+  while (input) {
+    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const std::streamsize count = input.gcount();
+    if (count > 0) output.write(buffer.data(), count);
+  }
+  return input.eof() && output.good();
+}
+
+bool EnvironmentEnabled(const char* name) {
+  const char* value = std::getenv(name);
+  return value && *value && std::strcmp(value, "0") != 0;
+}
 }
 
 int Help() {
@@ -336,6 +357,10 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     fclose(temp_out);
   }
 
+  if (!CopyResearchStream(temp_path, std::getenv("FX4_DUMP_POST_WRT"))) {
+    fprintf(stderr, "cannot dump exact post-WRT stream\n");
+    return false;
+  }
 
   if (post_wrt_side_path &&
       !r1_reorder::ReorderEncodedTailFile(temp_path, post_wrt_side_path)) {
@@ -343,6 +368,34 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     return false;
   }
 
+  const char* post_r1_dump_path = std::getenv("FX4_DUMP_POST_R1");
+  if (!CopyResearchStream(temp_path, post_r1_dump_path)) {
+    fprintf(stderr, "cannot dump exact post-R1 predictor stream\n");
+    return false;
+  }
+
+  if (EnvironmentEnabled("FX4_STOP_AFTER_POST_R1")) {
+    if (!post_wrt_side_path) {
+      fprintf(stderr,
+          "FX4_STOP_AFTER_POST_R1 is valid only for the R1-enabled -e path\n");
+      return false;
+    }
+    if (!post_r1_dump_path || !*post_r1_dump_path) {
+      fprintf(stderr,
+          "FX4_STOP_AFTER_POST_R1 requires FX4_DUMP_POST_R1=<output-file>\n");
+      return false;
+    }
+    struct stat stream_info;
+    if (stat(temp_path.c_str(), &stream_info) != 0) {
+      fprintf(stderr, "cannot measure exact post-R1 predictor stream\n");
+      return false;
+    }
+    *output_bytes = static_cast<unsigned long long>(stream_info.st_size);
+    fprintf(stderr, "post-R1 predictor stream dumped: %s (%llu bytes)\n",
+        post_r1_dump_path, *output_bytes);
+    remove(temp_path.c_str());
+    return true;
+  }
 
   std::ifstream temp_in(temp_path, std::ios::in | std::ios::binary);
   if (!temp_in.is_open()) return false;
@@ -613,6 +666,7 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
         dictionary, &input_bytes, &output_bytes, ".r1_payload_lex_side")) {
       return Help();
     }
+    if (EnvironmentEnabled("FX4_STOP_AFTER_POST_R1")) return 0;
 #if FX4_DONOR_FORK_DISCOVERY
     if (DonorForkDiscoveryCompleted()) return 0;
 #endif

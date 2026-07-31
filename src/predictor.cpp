@@ -376,8 +376,8 @@ unsigned int Predictor::SpecialistStreamClass() const {
   return 7;
 }
 
-float Predictor::PredictSpecialist(float base_probability, float ppmd_logit,
-    float lstm_logit, float fxcm_logit) {
+float Predictor::PredictSpecialist(float base_probability,
+    float ppmd_logit, float lstm_logit, float fxcm_logit) {
   constexpr float kMinimumProbability = 1.0e-5f;
   const float bounded_probability = std::max(kMinimumProbability,
       std::min(1.0f - kMinimumProbability, base_probability));
@@ -388,11 +388,12 @@ float Predictor::PredictSpecialist(float base_probability, float ppmd_logit,
   const unsigned int confidence_bucket =
       (confidence >= 0.5f) + (confidence >= 1.5f) +
       (confidence >= 3.0f);
+  const unsigned int donor_bucket = 0;
   specialist_coarse_context_ =
       SpecialistStreamClass() * 8u + (manager_.bpos & 7u);
   specialist_context_ =
-      (specialist_coarse_context_ * 2u + disagreement_bucket) * 8u +
-      confidence_bucket;
+      (((specialist_coarse_context_ * 2u + disagreement_bucket) * 2u +
+        donor_bucket) * 4u) + confidence_bucket;
 
   auto bounded_delta = [base_logit](float model_logit) {
     return std::max(-4.0f, std::min(4.0f, model_logit - base_logit));
@@ -403,6 +404,7 @@ float Predictor::PredictSpecialist(float base_probability, float ppmd_logit,
   specialist_inputs_[3] = bounded_delta(fxcm_logit);
   specialist_inputs_[4] =
       std::max(-4.0f, std::min(4.0f, lstm_logit - ppmd_logit));
+  specialist_inputs_[5] = 0.0f;
 
   const auto& weights = specialist_weights_[specialist_context_];
   const auto& coarse_weights =

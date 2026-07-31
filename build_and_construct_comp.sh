@@ -6,6 +6,9 @@ cd "$ROOT_DIR"
 
 CC_BIN=clang++-17
 UPX_BIN="$ROOT_DIR/tools/upx"
+if [[ ! -x "$UPX_BIN" ]]; then
+  UPX_BIN="$(command -v upx 2>/dev/null || true)"
+fi
 DICTIONARY="$ROOT_DIR/dictionary/english.dic"
 ARTICLE_ORDER="$ROOT_DIR/src/readalike_prepr/data/new_article_order"
 SEED="$(printenv SEED 2>/dev/null || printf 923)"
@@ -25,7 +28,7 @@ fi
 
 command -v "$CC_BIN" >/dev/null
 command -v llvm-strip-17 >/dev/null
-test -x "$UPX_BIN"
+test -n "$UPX_BIN" && test -x "$UPX_BIN"
 test -s "$DICTIONARY"
 test -s "$ARTICLE_ORDER"
 

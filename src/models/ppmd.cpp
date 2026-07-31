@@ -1200,6 +1200,13 @@ uint sqp[256];
 uint trF[256];
 uint trT[256];
 
+uint band_sqp[4][256];
+uint band_trF[4][256];
+uint band_trT[4][256];
+int effective_order;
+uint last_escape_depth = 0;
+uint escape_ema_q = 0;
+
 void ConvertSQ( void ) {
   uint i,c,freq,total,prob,cnum;
   uint cum = 0xFFFFFF00;
@@ -1228,6 +1235,44 @@ void ConvertSQ( void ) {
     trF[node] = left;
     trT[node] = left + right;
     mass[node] = trT[node];
+  }
+}
+
+void ConvertShadowSQ(uint* output_sqp, uint* output_trF,
+    uint* output_trT, uint entry_count) {
+  uint cum = 0xFFFFFF00;
+  uint mass[512] = {};
+  uint unresolved = 256;
+  memset(output_sqp, 0, sizeof(uint) * 256);
+  memset(output_trF, 0, sizeof(uint) * 256);
+  memset(output_trT, 0, sizeof(uint) * 256);
+
+  for (uint i = 0; i < entry_count; ++i) {
+    const uint symbol = SQ[i].sym;
+    const uint probability =
+        qword(qword(cum) * SQ[i].freq) / SQ[i].total;
+    if (symbol < 256) {
+      if (output_sqp[symbol] == 0) {
+        output_sqp[symbol] = probability + 1;
+        --unresolved;
+      }
+    } else {
+      cum = probability;
+    }
+  }
+
+  const uint fallback = unresolved == 0 ? 1 :
+      static_cast<uint>(qword(cum) / unresolved) + 1;
+  for (uint c = 0; c < 256; ++c) {
+    if (output_sqp[c] == 0) output_sqp[c] = fallback;
+    mass[256 + c] = output_sqp[c];
+  }
+  for (int node = 255; node >= 1; --node) {
+    const uint left = mass[node << 1];
+    const uint right = mass[(node << 1) | 1];
+    output_trF[node] = left;
+    output_trT[node] = left + right;
+    mass[node] = output_trT[node];
   }
 }
 
@@ -1331,7 +1376,22 @@ void processSymbol2_T( PPM_CONTEXT& q, int ) {
   }
 
 void ppmd_PrepareByte( void ) {
-  SQ_ptr=0; NumMasked=0;
+  effective_order = _MaxOrder - OrderFall;
+  if (effective_order < 0) effective_order = 0;
+  if (effective_order > _MaxOrder) effective_order = _MaxOrder;
+  static const int band_limit[4] = {3, 8, 16, 25};
+  uint band_end[4] = {};
+  int context_order = effective_order;
+  auto capture_bands = [&]() {
+    for (int band = 0; band < 4; ++band) {
+      if (band_end[band] == 0 && context_order <= band_limit[band]) {
+        band_end[band] = SQ_ptr;
+      }
+    }
+  };
+
+  SQ_ptr = 0;
+  NumMasked = 0;
   int _OrderFall = OrderFall;
 
   PPM_CONTEXT* MinContext = MaxContext;
@@ -1340,24 +1400,38 @@ void ppmd_PrepareByte( void ) {
   } else {
     processBinSymbol_T( MinContext[0], 0 );
   }
+  capture_bands();
 
-  while(1) {
+  bool finished = false;
+  while (!finished) {
     do {
-      if( !MinContext->iSuffix ) goto Break;
+      if (!MinContext->iSuffix) {
+        finished = true;
+        break;
+      }
       OrderFall++;
+      if (context_order > 0) --context_order;
       MinContext = suff(MinContext);
-    } while( MinContext->NumStats==NumMasked );
-    processSymbol2_T( MinContext[0], 0 );
+    } while (MinContext->NumStats == NumMasked);
+    if (!finished) {
+      processSymbol2_T(MinContext[0], 0);
+      capture_bands();
+    }
   }
-
-  Break:
-  EscCount++; NumMasked=0; OrderFall=_OrderFall;
-
+  for (int band = 0; band < 4; ++band) {
+    if (band_end[band] == 0) band_end[band] = SQ_ptr;
+    ConvertShadowSQ(band_sqp[band], band_trF[band], band_trT[band],
+        band_end[band]);
+  }
+  EscCount++;
+  NumMasked = 0;
+  OrderFall = _OrderFall;
   ConvertSQ();
 }
 
 void ppmd_UpdateByte( uint c ) {
   PPM_CONTEXT* MinContext = MaxContext;
+  uint escape_depth = 0;
   if( MinContext->NumStats ) {
     processSymbol1<0>( MinContext[0], c );
   } else {
@@ -1370,8 +1444,14 @@ void ppmd_UpdateByte( uint c ) {
       OrderFall++;
       MinContext = suff(MinContext);
     } while( MinContext->NumStats==NumMasked );
+    ++escape_depth;
     processSymbol2<0>( MinContext[0], c );
   }
+  last_escape_depth = escape_depth;
+  const uint observation = std::min(escape_depth, 15U) * 4096U;
+  escape_ema_q =
+      static_cast<uint>((static_cast<qword>(escape_ema_q) * 255U +
+                         observation + 128U) >> 8);
 
   PPM_CONTEXT* p;
   if( (OrderFall!=0) || ((byte*)getSucc(FoundState)<UnitsStart) ) {
@@ -1410,6 +1490,10 @@ PPMD::PPMD(int order, int memory, const unsigned int& bit_context,
     const std::vector<bool>& vocab) : ByteModel(vocab), byte_(bit_context) {
   tree_zero_.fill(0);
   tree_total_.fill(0);
+  for (int band = 0; band < 4; ++band) {
+    band_tree_zero_[band].fill(0);
+    band_tree_total_[band].fill(0);
+  }
   vocab_full_ = true;
   for (int i = 0; i < 256; ++i) {
     if (!vocab_[i]) {
@@ -1437,6 +1521,30 @@ std::valarray<float>& PPMD::Predict() {
   return outputs_;
 }
 
+const std::array<float, 4>& PPMD::PredictOrderBands() {
+  for (int band = 0; band < 4; ++band) {
+    const unsigned int total = band_tree_total_[band][tree_context_];
+    const unsigned int zero = band_tree_zero_[band][tree_context_];
+    band_outputs_[band] = total == 0 ? 0.5f :
+        static_cast<float>(total - zero) / static_cast<float>(total);
+  }
+  return band_outputs_;
+}
+
+unsigned int PPMD::EffectiveOrder() const {
+  return ppmd_model_->effective_order < 0 ? 0 :
+      static_cast<unsigned int>(ppmd_model_->effective_order);
+}
+
+unsigned int PPMD::LastEscapeDepth() const {
+  return ppmd_model_->last_escape_depth;
+}
+
+float PPMD::RecentEscapeRate() const {
+  return std::min(ppmd_model_->escape_ema_q, 61440U) *
+      (1.0f / 61440.0f);
+}
+
 void PPMD::Perceive(int bit) {
   ByteModel::Perceive(bit);
   tree_context_ = (tree_context_ << 1) | static_cast<unsigned int>(bit);
@@ -1451,6 +1559,12 @@ void PPMD::ByteUpdate() {
       tree_zero_[i] = ppmd_model_->trF[i];
       tree_total_[i] = ppmd_model_->trT[i];
     }
+    for (int band = 0; band < 4; ++band) {
+      for (int i = 0; i < 256; ++i) {
+        band_tree_zero_[band][i] = ppmd_model_->band_trF[band][i];
+        band_tree_total_[band][i] = ppmd_model_->band_trT[band][i];
+      }
+    }
     for (unsigned char c : disabled_bytes_) {
       const unsigned int mass = ppmd_model_->sqp[c] ? ppmd_model_->sqp[c] : 1U;
       for (int bit_index = 8; bit_index != 0; --bit_index) {
@@ -1462,6 +1576,34 @@ void PPMD::ByteUpdate() {
           if (tree_zero_[node] >= mass) tree_zero_[node] -= mass;
           else tree_zero_[node] = 0;
         }
+      }
+      for (int band = 0; band < 4; ++band) {
+        const unsigned int band_mass =
+            ppmd_model_->band_sqp[band][c] ?
+            ppmd_model_->band_sqp[band][c] : 1U;
+        for (int bit_index = 8; bit_index != 0; --bit_index) {
+          const unsigned int node = (256U + c) >> bit_index;
+          const unsigned int bit = (c >> (bit_index - 1)) & 1U;
+          if (band_tree_total_[band][node] >= band_mass) {
+            band_tree_total_[band][node] -= band_mass;
+          } else {
+            band_tree_total_[band][node] = 0;
+          }
+          if (bit == 0) {
+            if (band_tree_zero_[band][node] >= band_mass) {
+              band_tree_zero_[band][node] -= band_mass;
+            } else {
+              band_tree_zero_[band][node] = 0;
+            }
+          }
+        }
+      }
+    }
+  } else {
+    for (int band = 0; band < 4; ++band) {
+      for (int i = 0; i < 256; ++i) {
+        band_tree_zero_[band][i] = ppmd_model_->band_trF[band][i];
+        band_tree_total_[band][i] = ppmd_model_->band_trT[band][i];
       }
     }
   }

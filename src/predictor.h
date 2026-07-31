@@ -59,11 +59,10 @@ class Predictor {
   void AddMixers();
 #if FX4_SPECIALIST_CORRECTOR
   unsigned int SpecialistStreamClass() const;
-  float PredictSpecialist(float base_probability, float ppmd_logit,
-      float lstm_logit, float fxcm_logit);
+  float PredictSpecialist(float base_probability,
+      float ppmd_logit, float lstm_logit, float fxcm_logit);
   void PerceiveSpecialist(int bit);
 #endif
-
   llvm::SmallVector<Indirect<Nonstationary>, 32> indirect_ns_models_; // non-stationary
   llvm::SmallVector<Indirect<RunMap>, 1> indirect_r_models_; // run map
   llvm::SmallVector<Direct, 4> direct_models_;
@@ -87,7 +86,7 @@ class Predictor {
 #if FX4_SPECIALIST_CORRECTOR
   static constexpr unsigned int kSpecialistCoarseContexts = 64;
   static constexpr unsigned int kSpecialistContexts = 1024;
-  static constexpr unsigned int kSpecialistFeatures = 5;
+  static constexpr unsigned int kSpecialistFeatures = 6;
   std::array<std::array<float, kSpecialistFeatures>,
       kSpecialistContexts> specialist_weights_{};
   std::array<std::array<float, kSpecialistFeatures>,

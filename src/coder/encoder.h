@@ -17,12 +17,15 @@ class Encoder {
       unsigned int prev4);
   void EndTraceByte();
   void Flush();
-  size_t OutputSize() { return out_.size();}
+  void SetCountOnly(bool enabled) { count_only_ = enabled; }
+  size_t OutputSize() const { return out_.size() + count_only_bytes_; }
  private:
   void WriteByte(unsigned int byte);
   unsigned int Discretize(float p);
 
   std::vector<char> out_;
+  size_t count_only_bytes_ = 0;
+  bool count_only_ = false;
   std::ofstream* os_;
   unsigned int x1_, x2_;
   Predictor* p_;
