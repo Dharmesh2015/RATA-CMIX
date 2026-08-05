@@ -14,12 +14,15 @@
 #include "predictor.h"
 #include "donor_plan.h"
 #include "donor_fork_discovery.h"
+#include "virtual_replay_plan.h"
+#include "postr1_transform.h"
 
 #include "readalike_prepr/article_reorder.h"
 #include "readalike_prepr/self_extract.h"
 #include "readalike_prepr/phda9_preprocess.h"
 #include "readalike_prepr/misc.h"
 #include "r1_reorder_transform.h"
+#include "scr2_transform.h"
 #include "fx4_config.h"
 
 #include <algorithm>
@@ -28,6 +31,49 @@
 namespace {
 const int kMinVocabFileSize = 10000;
 
+#if FX4_RESEARCH_DONOR_BOOTSTRAP
+std::vector<std::uint8_t> LoadResearchDonorBootstrap() {
+  const char* path = std::getenv("FX4_RESEARCH_DONOR_BOOTSTRAP");
+  if (!path || !*path) return {};
+  std::ifstream input(path, std::ios::in | std::ios::binary);
+  if (!input.is_open()) {
+    fprintf(stderr, "cannot open FX4_RESEARCH_DONOR_BOOTSTRAP: %s\n", path);
+    std::exit(2);
+  }
+  input.seekg(0, std::ios::end);
+  const std::streamoff length = input.tellg();
+  input.seekg(0, std::ios::beg);
+  if (length <= 0 || length > (1 << 20)) {
+    fprintf(stderr, "research donor bootstrap must be 1..1048576 bytes\n");
+    std::exit(2);
+  }
+  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
+  input.read(reinterpret_cast<char*>(bytes.data()), length);
+  if (!input) {
+    fprintf(stderr, "cannot read complete research donor bootstrap: %s\n",
+        path);
+    std::exit(2);
+  }
+  return bytes;
+}
+
+void AddResearchDonorVocabulary(const std::vector<std::uint8_t>& bytes,
+    std::vector<bool>* vocab) {
+  for (std::uint8_t byte : bytes) (*vocab)[byte] = true;
+}
+
+void ReplayResearchDonor(const std::vector<std::uint8_t>& bytes,
+    Predictor* predictor) {
+  for (std::uint8_t byte : bytes) {
+    for (int bit = 7; bit >= 0; --bit) {
+      predictor->Predict();
+      predictor->Perceive((byte >> bit) & 1);
+    }
+  }
+}
+#endif
+
+#if FX4_RESEARCH_STREAM_DUMP || FX4_VIRTUAL_REPLAY || FX4_DONOR_PLAN
 bool CopyResearchStream(const std::string& source, const char* destination) {
   if (!destination || !*destination) return true;
   if (source == destination) return false;
@@ -43,11 +89,15 @@ bool CopyResearchStream(const std::string& source, const char* destination) {
   }
   return input.eof() && output.good();
 }
+#endif
 
+#if FX4_RESEARCH_STREAM_DUMP || FX4_SCR2 || FX4_DONOR_PLAN || \
+    FX4_POSTR1_TRANSFORM
 bool EnvironmentEnabled(const char* name) {
   const char* value = std::getenv(name);
   return value && *value && std::strcmp(value, "0") != 0;
 }
+#endif
 }
 
 int Help() {
@@ -80,15 +130,24 @@ size_t getFileSize(const std::string& path) {
 }
 
 void WriteHeader(unsigned long long length, const std::vector<bool>& vocab,
-    bool dictionary_used, bool donor_plan_used, std::ofstream* os) {
+    bool dictionary_used, bool donor_plan_used, bool scr2_used,
+    bool postr1_transform_used, bool virtual_replay_used,
+    std::ofstream* os) {
   for (int i = 4; i >= 0; --i) {
     char c = length >> (8*i);
     if (i == 4) {
-      c &= 0x3F;
+      c &= 0x0F;
       if (dictionary_used) c |= 0x80;
       if (donor_plan_used) c |= 0x40;
+      if (scr2_used || postr1_transform_used) c |= 0x20;
+      if (virtual_replay_used) c |= 0x10;
     }
     os->put(c);
+  }
+  if (scr2_used) {
+    os->put(static_cast<char>(scr2::kArchiveVersion));
+  } else if (postr1_transform_used) {
+    os->put(static_cast<char>(postr1::kArchiveVersion));
   }
   if (length < kMinVocabFileSize) return;
   for (int i = 0; i < 32; ++i) {
@@ -108,25 +167,48 @@ void WriteStorageHeader(FILE* out, bool dictionary_used) {
   }
 }
 
-void ReadHeader(std::ifstream* is, unsigned long long* length,
-    bool* dictionary_used, bool* donor_plan_used,
+bool ReadHeader(std::ifstream* is, unsigned long long* length,
+    bool* dictionary_used, bool* donor_plan_used, bool* scr2_used,
+    bool* postr1_transform_used, bool* virtual_replay_used,
     std::vector<bool>* vocab) {
   *length = 0;
+  *scr2_used = false;
+  *postr1_transform_used = false;
+  bool transform_used = false;
   for (int i = 0; i <= 4; ++i) {
     *length <<= 8;
     unsigned char c = is->get();
     if (i == 0) {
-      if (c&0x80) *dictionary_used = true;
-      else *dictionary_used = false;
+      *dictionary_used = (c & 0x80) != 0;
       *donor_plan_used = (c & 0x40) != 0;
-      c &= 0x3F;
+      transform_used = (c & 0x20) != 0;
+      *virtual_replay_used = (c & 0x10) != 0;
+      c &= 0x0F;
     }
     *length += c;
   }
-  if (*length == 0) return;
+  if (transform_used) {
+    const int version = is->get();
+    if (version == scr2::kArchiveVersion) {
+#if FX4_SCR2
+      *scr2_used = true;
+#else
+      return false;
+#endif
+    } else if (version == postr1::kArchiveVersion) {
+#if FX4_POSTR1_TRANSFORM
+      *postr1_transform_used = true;
+#else
+      return false;
+#endif
+    } else {
+      return false;
+    }
+  }
+  if (*length == 0) return true;
   if (*length < kMinVocabFileSize) {
     std::fill(vocab->begin(), vocab->end(), true);
-    return;
+    return true;
   }
   for (int i = 0; i < 32; ++i) {
     unsigned char c = is->get();
@@ -134,6 +216,7 @@ void ReadHeader(std::ifstream* is, unsigned long long* length,
       if (c & (1<<j)) (*vocab)[i * 8 + j] = true;
     }
   }
+  return is->good();
 }
 
 void ExtractVocab(unsigned long long num_bytes, std::ifstream* is,
@@ -159,16 +242,29 @@ void ClearOutput() {
 }
 bool Compress(unsigned long long input_bytes, std::ifstream* is,
     std::ofstream* os, unsigned long long* output_bytes, Predictor* p,
-    DonorPlan* donor_plan) {
+    DonorPlan* donor_plan, VirtualReplayPlan* replay_plan) {
   Encoder e(os, p);
+#if FX4_VIRTUAL_REPLAY
+  const char* trace_path = std::getenv("FX4_VR_COST_TRACE");
+  if (replay_plan && trace_path && *trace_path) {
+    fprintf(stderr, "FX4_VR_COST_TRACE cannot be combined with FX4_VR_PLAN\n");
+    return false;
+  }
+  if (!e.StartCostTrace(trace_path, input_bytes)) {
+    fprintf(stderr, "cannot create FX4 virtual-replay cost trace\n");
+    return false;
+  }
+#endif
 #if FX4_PROGRESS_LOG
   FILE* progress = fopen("./progress.log", "w");
 #endif
-  const unsigned long long progress_step = 1 + (input_bytes / FX4_PROGRESS_STEPS);
+  const unsigned long long progress_step =
+      1 + (input_bytes / FX4_PROGRESS_STEPS);
   unsigned long long next_progress = 0;
   ClearOutput();
   std::vector<char> buffer(FX4_IO_BUFFER_BYTES);
   unsigned long long pos = 0;
+  std::size_t replay_index = 0;
 #if FX4_DONOR_PLAN
   const char* stats_path = std::getenv("FX4_REGION_STATS");
   std::ofstream stats;
@@ -185,56 +281,108 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
       ? static_cast<uint32_t>(std::strtoul(stop_text, nullptr, 10))
       : 0;
 #endif
+
+  auto before_byte = [&](unsigned long long logical_pos) -> bool {
+#if FX4_DONOR_PLAN
+    if (logical_pos != 0 && logical_pos % DonorPlan::kChunkSize == 0) {
+      const size_t region_end = e.OutputSize();
+      if (stats.is_open()) {
+        stats << current_region << ','
+              << (donor_plan
+                  ? donor_plan->DonorOffset(current_region)
+                  : DonorPlan::kNoDonor)
+              << ',' << region_start << ',' << region_end << ','
+              << (region_end - region_start) << '\n';
+      }
+      ++current_region;
+      region_start = region_end;
+      if (stop_after_regions != 0 && current_region >= stop_after_regions) {
+        if (stats.is_open()) stats.flush();
+        fprintf(stderr, "FX4 donor staged run stopped after %u regions\n",
+            current_region);
+        return false;
+      }
+    }
+    if (donor_plan && !donor_plan->ReplayAt(logical_pos, p)) return false;
+#else
+    (void)logical_pos;
+#endif
+    return true;
+  };
+
+  auto after_byte = [&](unsigned long long logical_pos,
+      std::uint8_t value) {
+#if FX4_DONOR_PLAN
+    if (donor_plan) donor_plan->CaptureByte(logical_pos, value);
+#else
+    (void)logical_pos;
+    (void)value;
+#endif
+  };
+
+  auto report_progress = [&](unsigned long long logical_pos) {
+    if (logical_pos < next_progress) return;
+    const double frac = 100.0 * logical_pos / input_bytes;
+#if FX4_STDERR_PROGRESS
+    fprintf(stderr, "\rprogress: %.2f%%", frac);
+    fflush(stderr);
+#endif
+#if FX4_PROGRESS_LOG
+    if (progress) fprintf(progress, "%.2f %zu\n", frac, e.OutputSize());
+#endif
+    do {
+      next_progress += progress_step;
+    } while (logical_pos >= next_progress);
+  };
+
   while (pos < input_bytes) {
     const size_t chunk = static_cast<size_t>(
         std::min<unsigned long long>(buffer.size(), input_bytes - pos));
     is->read(buffer.data(), chunk);
     const size_t got = static_cast<size_t>(is->gcount());
     if (got == 0) break;
-    for (size_t i = 0; i < got; ++i, ++pos) {
-#if FX4_DONOR_PLAN
-      if (pos != 0 && pos % DonorPlan::kChunkSize == 0) {
-        const size_t region_end = e.OutputSize();
-        if (stats.is_open()) {
-          stats << current_region << ','
-                << (donor_plan
-                    ? donor_plan->DonorOffset(current_region)
-                    : DonorPlan::kNoDonor)
-                << ',' << region_start << ',' << region_end << ','
-                << (region_end - region_start) << '\n';
+    size_t i = 0;
+    while (i < got) {
+      if (replay_plan && replay_index < replay_plan->event_count()) {
+        const VirtualReplayPlan::Event& event =
+            replay_plan->event(replay_index);
+        if (event.offset < pos) return false;
+        if (event.offset == pos) {
+          const auto& pattern = replay_plan->pattern(event.pattern);
+          if (i + pattern.size() > got) return false;
+          for (std::size_t k = 0; k < pattern.size(); ++k) {
+            if (static_cast<std::uint8_t>(buffer[i + k]) != pattern[k]) {
+              fprintf(stderr,
+                  "FX4 virtual-replay input mismatch at byte %llu\n",
+                  static_cast<unsigned long long>(pos + k));
+              return false;
+            }
+          }
+          for (std::uint8_t value : pattern) {
+            if (!before_byte(pos)) return false;
+            e.ObserveKnownByte(value);
+            after_byte(pos, value);
+            report_progress(pos);
+            ++pos;
+            ++i;
+          }
+          ++replay_index;
+          continue;
         }
-        ++current_region;
-        region_start = region_end;
-        if (stop_after_regions != 0 &&
-            current_region >= stop_after_regions) {
-          if (stats.is_open()) stats.flush();
-          fprintf(stderr, "FX4 donor staged run stopped after %u regions\n",
-              current_region);
-          return false;
-        }
       }
-      if (donor_plan && !donor_plan->ReplayAt(pos, p)) return false;
-#endif
-      unsigned char c = static_cast<unsigned char>(buffer[i]);
-      for (int j = 7; j >= 0; --j) {
-        e.Encode((c >> j) & 1);
-      }
-#if FX4_DONOR_PLAN
-      if (donor_plan) donor_plan->CaptureByte(pos, c);
-#endif
-      if (pos >= next_progress) {
-        double frac = 100.0 * pos / input_bytes;
-#if FX4_STDERR_PROGRESS
-        fprintf(stderr, "\rprogress: %.2f%%", frac);
-        fflush(stderr);
-#endif
-#if FX4_PROGRESS_LOG
-        if (progress) fprintf(progress, "%.2f %zu\n", frac, e.OutputSize());
-#endif
-        next_progress += progress_step;
-      }
+
+      const std::uint8_t value = static_cast<std::uint8_t>(buffer[i]);
+      if (!before_byte(pos)) return false;
+      e.BeginTraceByte(pos, value, 0);
+      for (int bit = 7; bit >= 0; --bit) e.Encode((value >> bit) & 1);
+      e.EndTraceByte();
+      after_byte(pos, value);
+      report_progress(pos);
+      ++pos;
+      ++i;
     }
   }
+  if (replay_plan && replay_index != replay_plan->event_count()) return false;
   e.Flush();
 #if FX4_DONOR_PLAN
   if (stats.is_open()) {
@@ -258,40 +406,86 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
   return pos == input_bytes && os->good();
 }
 bool Decompress(unsigned long long output_length, std::ifstream* is,
-                std::ofstream* os, Predictor* p, DonorPlan* donor_plan) {
+    std::ofstream* os, Predictor* p, DonorPlan* donor_plan,
+    VirtualReplayPlan* replay_plan) {
   Decoder d(is, p);
-  const unsigned long long progress_step = 1 + (output_length / FX4_PROGRESS_STEPS);
+  const unsigned long long progress_step =
+      1 + (output_length / FX4_PROGRESS_STEPS);
   unsigned long long next_progress = 0;
   std::vector<char> output;
   output.reserve(FX4_IO_BUFFER_BYTES);
+  std::size_t replay_index = 0;
   ClearOutput();
-  for (unsigned long long pos = 0; pos < output_length; ++pos) {
+
+  auto before_byte = [&](unsigned long long logical_pos) -> bool {
 #if FX4_DONOR_PLAN
-    if (donor_plan && !donor_plan->ReplayAt(pos, p)) return false;
+    if (donor_plan && !donor_plan->ReplayAt(logical_pos, p)) return false;
+#else
+    (void)logical_pos;
 #endif
-    int byte = 1;
-    while (byte < 256) {
-      byte += byte + d.Decode();
-    }
-    output.push_back(static_cast<char>(byte));
+    return true;
+  };
+
+  auto after_byte = [&](unsigned long long logical_pos,
+      std::uint8_t value) {
 #if FX4_DONOR_PLAN
-    if (donor_plan) {
-      donor_plan->CaptureByte(pos, static_cast<uint8_t>(byte));
-    }
+    if (donor_plan) donor_plan->CaptureByte(logical_pos, value);
+#else
+    (void)logical_pos;
+    (void)value;
 #endif
+  };
+
+  auto emit_byte = [&](std::uint8_t value) {
+    output.push_back(static_cast<char>(value));
     if (output.size() >= FX4_IO_BUFFER_BYTES) {
       os->write(output.data(), static_cast<std::streamsize>(output.size()));
       output.clear();
     }
-    if (pos >= next_progress) {
-      double frac = 100.0 * pos / output_length;
+  };
+
+  auto report_progress = [&](unsigned long long logical_pos) {
+    if (logical_pos < next_progress) return;
+    const double frac = 100.0 * logical_pos / output_length;
 #if FX4_STDERR_PROGRESS
-      fprintf(stderr, "\rprogress: %.2f%%", frac);
-      fflush(stderr);
+    fprintf(stderr, "\rprogress: %.2f%%", frac);
+    fflush(stderr);
 #endif
+    do {
       next_progress += progress_step;
+    } while (logical_pos >= next_progress);
+  };
+
+  unsigned long long pos = 0;
+  while (pos < output_length) {
+    if (replay_plan && replay_index < replay_plan->event_count()) {
+      const VirtualReplayPlan::Event& event = replay_plan->event(replay_index);
+      if (event.offset < pos) return false;
+      if (event.offset == pos) {
+        const auto& pattern = replay_plan->pattern(event.pattern);
+        for (std::uint8_t value : pattern) {
+          if (!before_byte(pos)) return false;
+          d.ObserveKnownByte(value);
+          emit_byte(value);
+          after_byte(pos, value);
+          report_progress(pos);
+          ++pos;
+        }
+        ++replay_index;
+        continue;
+      }
     }
+
+    if (!before_byte(pos)) return false;
+    int byte = 1;
+    while (byte < 256) byte += byte + d.Decode();
+    const std::uint8_t value = static_cast<std::uint8_t>(byte);
+    emit_byte(value);
+    after_byte(pos, value);
+    report_progress(pos);
+    ++pos;
   }
+  if (replay_plan && replay_index != replay_plan->event_count()) return false;
   if (!output.empty()) {
     os->write(output.data(), static_cast<std::streamsize>(output.size()));
   }
@@ -301,7 +495,6 @@ bool Decompress(unsigned long long output_length, std::ifstream* is,
 #endif
   return os->good();
 }
-
 bool Store(const std::string& input_path, const std::string& temp_path,
     const std::string& output_path, FILE* dictionary,
     unsigned long long* input_bytes, unsigned long long* output_bytes) {
@@ -330,7 +523,20 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     FILE* dictionary, unsigned long long* input_bytes,
     unsigned long long* output_bytes,
     const char* post_wrt_side_path = nullptr) {
-  {
+  const bool raw_entropy_input =
+#if FX4_DONOR_PLAN
+      EnvironmentEnabled("FX4_RAW_ENTROPY_INPUT");
+#else
+      false;
+#endif
+  if (raw_entropy_input) {
+    struct stat input_info {};
+    if (stat(input_path.c_str(), &input_info) != 0 ||
+        !CopyResearchStream(input_path, temp_path.c_str())) {
+      return false;
+    }
+    *input_bytes = static_cast<unsigned long long>(input_info.st_size);
+  } else {
     FILE* data_in = fopen(input_path.c_str(), "rb");
     if (!data_in) return false;
     FILE* temp_out = fopen(temp_path.c_str(), "wb");
@@ -357,10 +563,12 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     fclose(temp_out);
   }
 
+#if FX4_RESEARCH_STREAM_DUMP
   if (!CopyResearchStream(temp_path, std::getenv("FX4_DUMP_POST_WRT"))) {
     fprintf(stderr, "cannot dump exact post-WRT stream\n");
     return false;
   }
+#endif
 
   if (post_wrt_side_path &&
       !r1_reorder::ReorderEncodedTailFile(temp_path, post_wrt_side_path)) {
@@ -368,6 +576,7 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     return false;
   }
 
+#if FX4_RESEARCH_STREAM_DUMP
   const char* post_r1_dump_path = std::getenv("FX4_DUMP_POST_R1");
   if (!CopyResearchStream(temp_path, post_r1_dump_path)) {
     fprintf(stderr, "cannot dump exact post-R1 predictor stream\n");
@@ -396,6 +605,67 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     remove(temp_path.c_str());
     return true;
   }
+#endif
+
+  bool postr1_transform_used = false;
+#if FX4_POSTR1_TRANSFORM
+  const char* postr1_plan_path = std::getenv("FX4_POSTR1_TRANSFORM_PLAN");
+  if (postr1_plan_path && *postr1_plan_path) {
+    if (!post_wrt_side_path) {
+      fprintf(stderr,
+          "FX4_POSTR1_TRANSFORM_PLAN is valid only after R1 in the -e path\n");
+      return false;
+    }
+    std::uint64_t before_transform = 0;
+    std::uint64_t after_transform = 0;
+    if (!postr1::EncodeFile(temp_path, postr1_plan_path,
+        &before_transform, &after_transform)) {
+      fprintf(stderr, "selective post-R1 transform failed\n");
+      return false;
+    }
+    postr1_transform_used = true;
+    fprintf(stderr, "post-R1 portfolio: %llu -> %llu bytes\n",
+        static_cast<unsigned long long>(before_transform),
+        static_cast<unsigned long long>(after_transform));
+    malloc_trim(0);
+  }
+#endif
+
+  bool scr2_used = false;
+#if FX4_SCR2
+  const bool scr2_requested = EnvironmentEnabled("FX4_ENABLE_SCR2") ||
+      (FX4_SCR2_DEFAULT != 0 && post_wrt_side_path != nullptr);
+  if (scr2_requested && !postr1_transform_used) {
+    std::uint64_t before_scr2 = 0;
+    std::uint64_t after_scr2 = 0;
+    if (!scr2::EncodeFile(temp_path, &before_scr2, &after_scr2)) {
+      fprintf(stderr, "SCR2 post-R1 transform failed\n");
+      return false;
+    }
+    if (after_scr2 < before_scr2) {
+      scr2_used = true;
+      fprintf(stderr, "SCR2: %llu -> %llu bytes\n",
+          static_cast<unsigned long long>(before_scr2),
+          static_cast<unsigned long long>(after_scr2));
+    } else {
+      std::uint64_t restored_size = 0;
+      if (!scr2::DecodeFile(temp_path, &restored_size) ||
+          restored_size != before_scr2) {
+        fprintf(stderr, "SCR2 raw fallback restore failed\n");
+        return false;
+      }
+    }
+    malloc_trim(0);
+  }
+#endif
+
+#if FX4_VIRTUAL_REPLAY
+  const char* replay_dump_path = std::getenv("FX4_VR_DUMP_INPUT");
+  if (!CopyResearchStream(temp_path, replay_dump_path)) {
+    fprintf(stderr, "cannot dump exact FX4 virtual-replay input\n");
+    return false;
+  }
+#endif
 
   std::ifstream temp_in(temp_path, std::ios::in | std::ios::binary);
   if (!temp_in.is_open()) return false;
@@ -415,6 +685,24 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     temp_in.seekg(0, std::ios::beg);
   }
 
+#if FX4_RESEARCH_DONOR_BOOTSTRAP
+  const std::vector<std::uint8_t> research_donor =
+      LoadResearchDonorBootstrap();
+  AddResearchDonorVocabulary(research_donor, &vocab);
+#endif
+
+  VirtualReplayPlan* active_replay_plan = nullptr;
+#if FX4_VIRTUAL_REPLAY
+  VirtualReplayPlan replay_plan;
+  const char* replay_plan_path = std::getenv("FX4_VR_PLAN");
+  if (replay_plan_path && *replay_plan_path) {
+    if (!replay_plan.LoadExternal(replay_plan_path, temp_bytes)) {
+      fprintf(stderr, "invalid FX4_VR_PLAN: %s\n", replay_plan_path);
+      return false;
+    }
+    if (!replay_plan.empty()) active_replay_plan = &replay_plan;
+  }
+#endif
 
   DonorPlan* active_donor_plan = nullptr;
 #if FX4_DONOR_PLAN
@@ -439,7 +727,8 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     uint64_t discovery_output_bytes = 0;
     const bool discovery_ok = RunDonorForkDiscovery(
         temp_path, output_path, temp_bytes, vocab, dictionary,
-        enable_preprocess, active_donor_plan, &discovery_output_bytes);
+        enable_preprocess || dictionary != nullptr, active_donor_plan,
+        &discovery_output_bytes);
     *output_bytes = discovery_output_bytes;
     remove(output_path.c_str());
     remove(temp_path.c_str());
@@ -448,17 +737,36 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
 #endif
 
   WriteHeader(temp_bytes, vocab, dictionary != NULL,
-      active_donor_plan != nullptr, &data_out);
+      active_donor_plan != nullptr, scr2_used,
+      postr1_transform_used, active_replay_plan != nullptr, &data_out);
 #if FX4_DONOR_PLAN
   if (active_donor_plan && !active_donor_plan->WriteArchive(&data_out)) {
     fprintf(stderr, "cannot write FX4 donor plan\n");
     return false;
   }
 #endif
-  Predictor p(vocab);
-  if (enable_preprocess) preprocessor::Pretrain(&p, dictionary);
+#if FX4_VIRTUAL_REPLAY
+  if (active_replay_plan && !active_replay_plan->WriteArchive(&data_out)) {
+    fprintf(stderr, "cannot write FX4 virtual-replay plan\n");
+    return false;
+  }
+#endif
+  Predictor p(vocab, scr2_used);
+  if (enable_preprocess
+#if FX4_DONOR_FORK_DISCOVERY || FX4_DONOR_PLAN
+      || dictionary != nullptr
+#endif
+  ) {
+    preprocessor::Pretrain(&p, dictionary);
+  }
+#if FX4_RESEARCH_DONOR_BOOTSTRAP
+  else if (dictionary) {
+    preprocessor::Pretrain(&p, dictionary);
+  }
+  ReplayResearchDonor(research_donor, &p);
+#endif
   if (!Compress(temp_bytes, &temp_in, &data_out, output_bytes, &p,
-      active_donor_plan)) {
+      active_donor_plan, active_replay_plan)) {
     fprintf(stderr, "FX4 entropy compression failed\n");
     return false;
   }
@@ -482,12 +790,21 @@ bool RunDecompression(const std::string& input_path,
   std::vector<bool> vocab(256, false);
   bool dictionary_used = false;
   bool donor_plan_used = false;
-  ReadHeader(&data_in, output_bytes, &dictionary_used, &donor_plan_used,
-      &vocab);
+  bool scr2_used = false;
+  bool postr1_transform_used = false;
+  bool virtual_replay_used = false;
+  if (!ReadHeader(&data_in, output_bytes, &dictionary_used,
+      &donor_plan_used, &scr2_used, &postr1_transform_used,
+      &virtual_replay_used, &vocab)) {
+    return false;
+  }
   if (!dictionary_used && dictionary != NULL) return false;
   if (dictionary_used && dictionary == NULL) return false;
 
   if (*output_bytes == 0) {  // undo store
+    if (scr2_used || postr1_transform_used || virtual_replay_used) {
+      return false;
+    }
     data_in.close();
     FILE* in = fopen(input_path.c_str(), "rb");
     if (!in) return false;
@@ -521,13 +838,38 @@ bool RunDecompression(const std::string& input_path,
     }
 #endif
 
-    Predictor p(vocab);
+    VirtualReplayPlan* active_replay_plan = nullptr;
+#if FX4_VIRTUAL_REPLAY
+    VirtualReplayPlan replay_plan;
+    if (virtual_replay_used) {
+      if (!replay_plan.ReadArchive(&data_in, *output_bytes)) {
+        fprintf(stderr, "invalid FX4 virtual-replay plan in archive\n");
+        return false;
+      }
+      active_replay_plan = &replay_plan;
+    }
+#else
+    if (virtual_replay_used) {
+      fprintf(stderr, "archive requires virtual-replay-enabled FX4 build\n");
+      return false;
+    }
+#endif
+
+#if FX4_RESEARCH_DONOR_BOOTSTRAP
+    const std::vector<std::uint8_t> research_donor =
+        LoadResearchDonorBootstrap();
+    AddResearchDonorVocabulary(research_donor, &vocab);
+#endif
+    Predictor p(vocab, scr2_used);
     if (dictionary_used) preprocessor::Pretrain(&p, dictionary);
+#if FX4_RESEARCH_DONOR_BOOTSTRAP
+    ReplayResearchDonor(research_donor, &p);
+#endif
 
     std::ofstream temp_out(temp_path, std::ios::out | std::ios::binary);
     if (!temp_out.is_open()) return false;
     if (!Decompress(*output_bytes, &data_in, &temp_out, &p,
-        active_donor_plan)) {
+        active_donor_plan, active_replay_plan)) {
       fprintf(stderr, "FX4 entropy decompression failed\n");
       return false;
     }
@@ -536,6 +878,46 @@ bool RunDecompression(const std::string& input_path,
     data_in.close();
   }
   malloc_trim(0);
+
+#if FX4_POSTR1_TRANSFORM
+  if (postr1_transform_used) {
+    std::uint64_t restored_size = 0;
+    if (!postr1::DecodeFile(temp_path, &restored_size)) {
+      fprintf(stderr, "selective post-R1 inverse transform failed\n");
+      return false;
+    }
+  }
+#else
+  if (postr1_transform_used) return false;
+#endif
+
+#if FX4_SCR2
+  if (scr2_used) {
+    std::uint64_t restored_size = 0;
+    if (!scr2::DecodeFile(temp_path, &restored_size)) {
+      fprintf(stderr, "SCR2 inverse transform failed\n");
+      return false;
+    }
+  }
+#else
+  if (scr2_used) return false;
+#endif
+
+#if FX4_DONOR_PLAN
+  if (EnvironmentEnabled("FX4_RAW_ENTROPY_OUTPUT")) {
+    if (post_wrt_side_path || scr2_used || postr1_transform_used ||
+        virtual_replay_used ||
+        !CopyResearchStream(temp_path, output_path.c_str())) {
+      return false;
+    }
+    struct stat output_info {};
+    if (stat(output_path.c_str(), &output_info) != 0) return false;
+    *output_bytes = static_cast<unsigned long long>(output_info.st_size);
+    remove(temp_path.c_str());
+    return true;
+  }
+#endif
+
   if (post_wrt_side_path) {
     if (!r1_reorder::ExtractSideFromFile(temp_path, post_wrt_side_path) ||
         !r1_reorder::RestoreEncodedTailFile(temp_path, post_wrt_side_path)) {
@@ -580,7 +962,11 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
     input_path = argv[2];
     output_path = argv[3];
     if (argc == 5) {
-      if (argv[1][1] == 'n') return Help();
+      if (argv[1][1] == 'n') {
+#if !FX4_RESEARCH_DONOR_BOOTSTRAP && !FX4_DONOR_FORK_DISCOVERY && !FX4_DONOR_PLAN
+        return Help();
+#endif
+      }
       dictionary = fopen(argv[2], "rb");
       if (!dictionary) return Help();
       input_path = argv[3];
@@ -666,7 +1052,9 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
         dictionary, &input_bytes, &output_bytes, ".r1_payload_lex_side")) {
       return Help();
     }
+#if FX4_RESEARCH_STREAM_DUMP
     if (EnvironmentEnabled("FX4_STOP_AFTER_POST_R1")) return 0;
+#endif
 #if FX4_DONOR_FORK_DISCOVERY
     if (DonorForkDiscoveryCompleted()) return 0;
 #endif

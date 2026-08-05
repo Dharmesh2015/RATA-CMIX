@@ -13,6 +13,10 @@ class ByteMixer : public ByteModel {
       const std::vector<bool>& vocab, unsigned int vocab_size, Lstm* lstm);
   void SetInput(int index, float val);
   void ByteUpdate();
+  void SetRecurrentTraining(bool enabled) {
+    lstm_->SetRecurrentTraining(enabled);
+  }
+  const std::valarray<float>& ByteProbabilities() const { return probs_; }
 
  private:
   std::unique_ptr<Lstm> lstm_;

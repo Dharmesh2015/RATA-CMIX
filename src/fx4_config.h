@@ -69,6 +69,42 @@
 #define FX4_DONOR_FORK_DISCOVERY 0
 #endif
 
+// Research-only external donor replay used by the bounded crawler. The
+// accepted compressor leaves this at 0, so neither its archive format nor its
+// executable contains the bootstrap path. A crawler build sets it to 1 and
+// supplies FX4_RESEARCH_DONOR_BOOTSTRAP=<file> to encoder and decoder.
+#ifndef FX4_RESEARCH_DONOR_BOOTSTRAP
+#define FX4_RESEARCH_DONOR_BOOTSTRAP 0
+#endif
+
+// Exact intermediate stream dumps are opt-in research instrumentation. Keep
+// them out of production and donor-search binaries unless explicitly enabled.
+#ifndef FX4_RESEARCH_STREAM_DUMP
+#define FX4_RESEARCH_STREAM_DUMP 0
+#endif
+
+// Selective post-R1 virtual replay. A plan is used only when compression sets
+// FX4_VR_PLAN; archives carry every pattern and event needed by the decoder.
+#ifndef FX4_VIRTUAL_REPLAY
+#define FX4_VIRTUAL_REPLAY 1
+#endif
+
+// Reversible structural-token transform for the post-R1 predictor stream.
+// Compression opts in with FX4_ENABLE_SCR2=1; archives carry their own mode.
+#ifndef FX4_SCR2
+#define FX4_SCR2 0
+#endif
+
+#ifndef FX4_SCR2_DEFAULT
+#define FX4_SCR2_DEFAULT 0
+#endif
+
+// Add three SCR2-only structural experts to the outer context mixer. Raw
+// archives do not construct them and retain the accepted predictor shape.
+#ifndef FX4_SCR2_SPECIALIST
+#define FX4_SCR2_SPECIALIST 1
+#endif
+
 #ifndef FX4_SPECIALIST_CORRECTOR
 #define FX4_SPECIALIST_CORRECTOR 1
 #endif
@@ -77,4 +113,18 @@
 #define FX4_SPECIALIST_LEARNING_RATE 0.0005f
 #endif
 
+// Selective post-R1 predictor portfolio. Experts are activated only by spans
+// carried in the archive plan; with no selected span this path is exactly
+// baseline-neutral.
+#ifndef FX4_SELECTIVE_POSTR1
+#define FX4_SELECTIVE_POSTR1 1
+#endif
+
+
+// Reversible block portfolio between R1 and the entropy models. Compression
+// opts in with FX4_POSTR1_TRANSFORM_PLAN; the resulting F4PT stream is
+// self-contained and restored before the R1 inverse.
+#ifndef FX4_POSTR1_TRANSFORM
+#define FX4_POSTR1_TRANSFORM 1
+#endif
 #endif

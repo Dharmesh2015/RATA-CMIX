@@ -9,6 +9,20 @@ class Predictor;
 
 class DonorPlan {
  public:
+  struct CandidateSpec {
+    uint32_t donor_offset;
+    uint32_t length;
+    uint16_t order;
+  };
+
+  struct ExpertSpan {
+    uint64_t offset;
+    uint32_t length;
+    uint32_t expert_mask;
+    uint8_t stream_class;
+    uint8_t profile_id;
+  };
+
   static constexpr uint32_t kChunkSize = 1u << 20;
   static constexpr uint32_t kSeedSize = 4096;
   static constexpr uint32_t kNoDonor = 0xffffffffu;
@@ -17,10 +31,14 @@ class DonorPlan {
   bool ReadArchive(std::ifstream* input, uint64_t stream_size);
   bool WriteArchive(std::ofstream* output) const;
 
-  bool empty() const { return assignments_.empty(); }
+  bool empty() const {
+    return assignments_.empty() && expert_spans_.empty();
+  }
+  bool has_expert_spans() const { return !expert_spans_.empty(); }
   bool discovery_candidates() const { return discovery_candidates_; }
   uint32_t DonorOffset(uint32_t region) const;
   const std::vector<uint32_t>& CandidateOffsets(uint32_t region) const;
+  const std::vector<CandidateSpec>& CandidateSpecs(uint32_t region) const;
   bool ReplayAt(uint64_t position, Predictor* predictor);
   bool ReplayCandidate(
       uint32_t region, uint32_t donor_offset, Predictor* predictor);
@@ -43,14 +61,23 @@ class DonorPlan {
   };
 
   bool Initialize(uint64_t stream_size, bool allow_multiple);
+  bool ReadExpertSpans(std::istream* input, uint32_t count,
+      bool archive_format);
+  bool ApplyExpertSpanAt(uint64_t position, Predictor* predictor);
 
   std::vector<Assignment> assignments_;
+  std::vector<ExpertSpan> expert_spans_;
   std::vector<uint32_t> donor_by_region_;
   std::vector<std::vector<uint32_t>> candidates_by_region_;
+  std::vector<std::vector<CandidateSpec>> candidate_specs_by_region_;
   std::vector<std::vector<size_t>> assignments_by_region_;
   std::vector<Seed> seeds_;
   std::vector<size_t> active_seeds_;
   size_t next_seed_ = 0;
+  size_t next_expert_span_ = 0;
+  size_t active_expert_span_ = static_cast<size_t>(-1);
+  uint32_t portfolio_mask_ = 0;
+  bool portfolio_enabled_ = false;
   bool discovery_candidates_ = false;
 };
 

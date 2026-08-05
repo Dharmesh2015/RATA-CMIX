@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "predictor.h"
+#include "models/postr1_experts.h"
 
 namespace {
 
@@ -53,11 +54,76 @@ void WriteU24(std::ostream* output, uint32_t value) {
   output->put(static_cast<char>(value >> 16));
 }
 
+void WriteU32(std::ostream* output, uint32_t value) {
+  for (unsigned shift = 0; shift < 32; shift += 8) {
+    output->put(static_cast<char>(value >> shift));
+  }
+}
+
+bool ReadVarint(std::istream* input, uint64_t* value) {
+  *value = 0;
+  for (unsigned shift = 0; shift < 64; shift += 7) {
+    const int next = input->get();
+    if (next == EOF) return false;
+    const uint8_t byte = static_cast<uint8_t>(next);
+    *value |= static_cast<uint64_t>(byte & 0x7f) << shift;
+    if ((byte & 0x80) == 0) return true;
+  }
+  return false;
+}
+
+bool WriteVarint(std::ostream* output, uint64_t value) {
+  do {
+    uint8_t byte = static_cast<uint8_t>(value & 0x7f);
+    value >>= 7;
+    if (value != 0) byte |= 0x80;
+    output->put(static_cast<char>(byte));
+  } while (value != 0 && *output);
+  return output->good();
+}
+
 }  // namespace
+
+bool DonorPlan::ReadExpertSpans(std::istream* input, uint32_t count,
+    bool archive_format) {
+  expert_spans_.clear();
+  expert_spans_.reserve(count);
+  uint64_t previous_end = 0;
+  for (uint32_t index = 0; index < count; ++index) {
+    ExpertSpan span{};
+    if (archive_format) {
+      uint64_t gap = 0;
+      uint64_t length = 0;
+      uint64_t mask = 0;
+      if (!ReadVarint(input, &gap) || !ReadVarint(input, &length) ||
+          !ReadVarint(input, &mask) ||
+          gap > UINT64_MAX - previous_end || length > UINT32_MAX ||
+          mask > UINT32_MAX) {
+        return false;
+      }
+      span.offset = previous_end + gap;
+      span.length = static_cast<uint32_t>(length);
+      span.expert_mask = static_cast<uint32_t>(mask);
+    } else {
+      span.offset = ReadU64(input);
+      span.length = ReadU32(input);
+      span.expert_mask = ReadU32(input);
+    }
+    const int stream_class = input->get();
+    const int profile_id = input->get();
+    if (!*input || stream_class < 0 || profile_id < 0) return false;
+    span.stream_class = static_cast<uint8_t>(stream_class);
+    span.profile_id = static_cast<uint8_t>(profile_id);
+    expert_spans_.push_back(span);
+    previous_end = span.offset + span.length;
+  }
+  return true;
+}
 
 bool DonorPlan::LoadExternal(const char* path, uint64_t stream_size) {
   std::ifstream input(path, std::ios::in | std::ios::binary);
   assignments_.clear();
+  expert_spans_.clear();
   discovery_candidates_ = false;
   if (!input.is_open()) return false;
 
@@ -76,7 +142,7 @@ bool DonorPlan::LoadExternal(const char* path, uint64_t stream_size) {
   const bool discovery =
       std::memcmp(magic.data(), "F4CD", 4) == 0 && flags == 1;
   if (!input || (!production && !discovery) ||
-      (version != 1 && version != 2 && version != 3) ||
+      (version != 1 && version != 2 && version != 3 && version != 4) ||
       chunk_size != kChunkSize || planned_size != stream_size ||
       (version == 1 && seed_size != kSeedSize) ||
       (version >= 2 && seed_size > 65536u)) {
@@ -84,16 +150,24 @@ bool DonorPlan::LoadExternal(const char* path, uint64_t stream_size) {
   }
 
   assignments_.clear();
+  expert_spans_.clear();
   assignments_.reserve(count);
   for (uint16_t index = 0; index < count; ++index) {
     Assignment assignment{
         ReadU16(&input), ReadU32(&input),
         version == 1 ? kSeedSize : ReadU16(&input),
-        version == 3
+        version >= 3
             ? static_cast<uint16_t>(static_cast<uint8_t>(input.get()))
             : index};
     if (!input) return false;
     assignments_.push_back(assignment);
+  }
+  if (version == 4) {
+    const uint32_t span_count = ReadU32(&input);
+    if (!input || span_count > (1u << 20) ||
+        !ReadExpertSpans(&input, span_count, false)) {
+      return false;
+    }
   }
   discovery_candidates_ = discovery;
   return Initialize(stream_size, discovery || version >= 2);
@@ -101,10 +175,11 @@ bool DonorPlan::LoadExternal(const char* path, uint64_t stream_size) {
 
 bool DonorPlan::ReadArchive(std::ifstream* input, uint64_t stream_size) {
   const int version = input->get();
-  if (version != 3) return false;
+  if (version != 3 && version != 4) return false;
   const uint16_t count = ReadU16(input);
   if (!*input) return false;
   assignments_.clear();
+  expert_spans_.clear();
   assignments_.reserve(count);
   for (uint16_t index = 0; index < count; ++index) {
     const uint16_t recipient = ReadU16(input);
@@ -119,6 +194,13 @@ bool DonorPlan::ReadArchive(std::ifstream* input, uint64_t stream_size) {
         recipient, shifted_offset << 8, 1u << length_log2,
         static_cast<uint16_t>(order)});
   }
+  if (version == 4) {
+    const uint32_t span_count = ReadU32(input);
+    if (!*input || span_count > (1u << 20) ||
+        !ReadExpertSpans(input, span_count, true)) {
+      return false;
+    }
+  }
   discovery_candidates_ = false;
   return Initialize(stream_size, true);
 }
@@ -126,7 +208,7 @@ bool DonorPlan::ReadArchive(std::ifstream* input, uint64_t stream_size) {
 bool DonorPlan::WriteArchive(std::ofstream* output) const {
   if (discovery_candidates_) return false;
   if (assignments_.size() > 0xffff) return false;
-  output->put(3);
+  output->put(4);
   WriteU16(output, static_cast<uint16_t>(assignments_.size()));
   for (const Assignment& assignment : assignments_) {
     if ((assignment.donor_offset & 255u) != 0 ||
@@ -145,12 +227,45 @@ bool DonorPlan::WriteArchive(std::ofstream* output) const {
     output->put(static_cast<char>(length_log2));
     output->put(static_cast<char>(assignment.order));
   }
+  WriteU32(output, static_cast<uint32_t>(expert_spans_.size()));
+  uint64_t previous_end = 0;
+  for (const ExpertSpan& span : expert_spans_) {
+    if (span.offset < previous_end ||
+        !WriteVarint(output, span.offset - previous_end) ||
+        !WriteVarint(output, span.length) ||
+        !WriteVarint(output, span.expert_mask)) {
+      return false;
+    }
+    output->put(static_cast<char>(span.stream_class));
+    output->put(static_cast<char>(span.profile_id));
+    previous_end = span.offset + span.length;
+  }
   return output->good();
 }
 
 bool DonorPlan::Initialize(uint64_t stream_size, bool allow_multiple) {
   const uint64_t complete_regions = stream_size / kChunkSize;
   if (complete_regions > 0xffff) return false;
+
+  std::sort(expert_spans_.begin(), expert_spans_.end(),
+      [](const ExpertSpan& left, const ExpertSpan& right) {
+        return left.offset < right.offset;
+      });
+  uint64_t previous_span_end = 0;
+  portfolio_mask_ = 0;
+  for (const ExpertSpan& span : expert_spans_) {
+    if (span.length == 0 || span.expert_mask == 0 ||
+        (span.expert_mask & ~static_cast<uint32_t>(
+            PostR1Experts::kAllPredictors)) != 0 ||
+        span.stream_class > static_cast<uint8_t>(
+            PostR1Experts::StreamClass::kMixed) ||
+        span.offset < previous_span_end || span.offset > stream_size ||
+        span.length > stream_size - span.offset) {
+      return false;
+    }
+    portfolio_mask_ |= span.expert_mask;
+    previous_span_end = span.offset + span.length;
+  }
 
   std::sort(assignments_.begin(), assignments_.end(),
       [](const Assignment& left, const Assignment& right) {
@@ -163,6 +278,8 @@ bool DonorPlan::Initialize(uint64_t stream_size, bool allow_multiple) {
   donor_by_region_.assign(
       static_cast<size_t>(complete_regions), kNoDonor);
   candidates_by_region_.assign(
+      static_cast<size_t>(complete_regions), {});
+  candidate_specs_by_region_.assign(
       static_cast<size_t>(complete_regions), {});
   assignments_by_region_.assign(
       static_cast<size_t>(complete_regions), {});
@@ -196,6 +313,8 @@ bool DonorPlan::Initialize(uint64_t stream_size, bool allow_multiple) {
     previous_offset = assignment.donor_offset;
     candidates_by_region_[assignment.recipient].push_back(
         assignment.donor_offset);
+    candidate_specs_by_region_[assignment.recipient].push_back({
+        assignment.donor_offset, assignment.length, assignment.order});
     assignments_by_region_[assignment.recipient].push_back(
         assignment_index);
     offsets.emplace_back(assignment.donor_offset, assignment.length);
@@ -222,6 +341,31 @@ bool DonorPlan::Initialize(uint64_t stream_size, bool allow_multiple) {
   }
   active_seeds_.clear();
   next_seed_ = 0;
+  next_expert_span_ = 0;
+  active_expert_span_ = static_cast<size_t>(-1);
+  portfolio_enabled_ = false;
+  return true;
+}
+
+bool DonorPlan::ApplyExpertSpanAt(
+    uint64_t position, Predictor* predictor) {
+  if (active_expert_span_ != static_cast<size_t>(-1)) {
+    const ExpertSpan& active = expert_spans_[active_expert_span_];
+    const uint64_t end = active.offset + active.length;
+    if (position < end) return true;
+    if (position != end) return false;
+    predictor->SetPostR1Span(position, 0, 0, 0);
+    active_expert_span_ = static_cast<size_t>(-1);
+  }
+  if (next_expert_span_ < expert_spans_.size()) {
+    const ExpertSpan& next = expert_spans_[next_expert_span_];
+    if (next.offset < position) return false;
+    if (next.offset == position) {
+      predictor->SetPostR1Span(next.offset, next.expert_mask,
+          next.stream_class, next.profile_id);
+      active_expert_span_ = next_expert_span_++;
+    }
+  }
   return true;
 }
 
@@ -236,6 +380,14 @@ const std::vector<uint32_t>& DonorPlan::CandidateOffsets(
   static const std::vector<uint32_t> empty;
   return region < candidates_by_region_.size()
       ? candidates_by_region_[region]
+      : empty;
+}
+
+const std::vector<DonorPlan::CandidateSpec>& DonorPlan::CandidateSpecs(
+    uint32_t region) const {
+  static const std::vector<CandidateSpec> empty;
+  return region < candidate_specs_by_region_.size()
+      ? candidate_specs_by_region_[region]
       : empty;
 }
 
@@ -272,6 +424,15 @@ bool DonorPlan::ReplaySeed(
 }
 
 bool DonorPlan::ReplayAt(uint64_t position, Predictor* predictor) {
+  if (position == 0 && portfolio_mask_ != 0 && !portfolio_enabled_) {
+    predictor->EnablePostR1Portfolio(portfolio_mask_);
+    portfolio_enabled_ = true;
+  }
+  if (!ApplyExpertSpanAt(position, predictor)) return false;
+  // F4CP expert plans use the causal observer only. Legacy replay remains
+  // available for old assignment-only archives, but never mutates the main
+  // predictor when a post-R1 specialist portfolio is present.
+  if (portfolio_mask_ != 0) return true;
   if (position % kChunkSize != 0) return true;
   const uint64_t region = position / kChunkSize;
   if (region >= assignments_by_region_.size()) return true;

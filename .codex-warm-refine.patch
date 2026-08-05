@@ -1,0 +1,24 @@
+diff --git a/src/donor_winner_search.cpp b/src/donor_winner_search.cpp
+--- a/src/donor_winner_search.cpp
++++ b/src/donor_winner_search.cpp
+@@ -139,7 +139,7 @@ SearchConfig LoadConfig() {
+   config.near_loss_bytes =
+       EnvironmentU32("FX4_WINNER_NEAR_BYTES", 64, 0, 1024);
+   config.planned_donors =
+-      EnvironmentU32("FX4_WINNER_PLANNED_DONORS", 7, 7, 8);
++      EnvironmentU32("FX4_WINNER_PLANNED_DONORS", 7, 1, 8);
+   config.max_regions =
+       EnvironmentU32("FX4_WINNER_MAX_REGIONS", 0, 0, 65535);
+   config.start_region =
+diff --git a/tools/build_planned_donor_profiles.py b/tools/build_planned_donor_profiles.py
+--- a/tools/build_planned_donor_profiles.py
++++ b/tools/build_planned_donor_profiles.py
+@@ -74,6 +74,6 @@ def main() -> int:
+     args = parse_args()
+-    if not 7 <= args.donors_per_region <= 32:
+-        raise SystemExit("--donors-per-region must be between 7 and 32")
++    if not 1 <= args.donors_per_region <= 32:
++        raise SystemExit("--donors-per-region must be between 1 and 32")
+     stream_size = args.stream.stat().st_size
+     complete_regions = stream_size // CHUNK_SIZE
+     if complete_regions > 0xFFFF:

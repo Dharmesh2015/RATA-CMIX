@@ -17,6 +17,12 @@
 #include "models/ppmd.h"
 #include "models/bracket.h"
 #include "models/fxcmv1.h"
+#if FX4_SELECTIVE_POSTR1
+#include "models/postr1_experts.h"
+#endif
+#if FX4_SCR2 && FX4_SCR2_SPECIALIST
+#include "models/scr2_fxcm_adapter.h"
+#endif
 #include "mixer/lstm.h"
 #include "contexts/context-hash.h"
 #include "contexts/bracket-context.h"
@@ -39,11 +45,14 @@
 
 class Predictor {
  public:
-  Predictor(const std::vector<bool>& vocab);
+  Predictor(const std::vector<bool>& vocab, bool scr2_enabled = false);
   float Predict();
   void Perceive(int bit);
   void Pretrain(int bit);
   void FreeFxcmMemory();
+  void EnablePostR1Portfolio(std::uint32_t mask);
+  void SetPostR1Span(std::uint64_t logical_offset, std::uint32_t mask,
+      std::uint8_t stream_class, std::uint8_t profile_id);
 
  private:
   unsigned long long GetNumModels();
@@ -63,19 +72,24 @@ class Predictor {
       float ppmd_logit, float lstm_logit, float fxcm_logit);
   void PerceiveSpecialist(int bit);
 #endif
+#if FX4_SELECTIVE_POSTR1
+  void UpdatePostR1ResidualDistribution();
+  float PostR1ResidualProbability() const;
+#endif
   llvm::SmallVector<Indirect<Nonstationary>, 32> indirect_ns_models_; // non-stationary
   llvm::SmallVector<Indirect<RunMap>, 1> indirect_r_models_; // run map
   llvm::SmallVector<Direct, 4> direct_models_;
   llvm::SmallVector<Match, 10> match_models_;
   
   std::optional<Bracket> bracket_model_;
-  size_t auxiliary_size_ = 2; // 0 -> fxcm, 1 -> byte_mixer
+  size_t auxiliary_size_ = 3; // aggregate FXCM, LSTM, direct PPMd
   SSE sse_;
   llvm::SmallVector<MixerInput,2> layers_;
   llvm::SmallVector<Mixer, 24> mixer_0_;
   llvm::SmallVector<Mixer, 1> mixer_1_;
   std::vector<unsigned int> auxiliary_;
   ContextManager manager_;
+  unsigned long long final_mixer_context_ = 0;
   Sigmoid sigmoid_;
   std::array<float, 4096> fxcm_stretched_inputs_;
   float fxcm_neutral_input_ = 0.0f;
@@ -83,6 +97,16 @@ class Predictor {
   std::optional<ByteMixer> byte_mixer_;
   std::vector<bool> vocab_;
   FXCM fxcm_model_;
+#if FX4_SELECTIVE_POSTR1
+  std::unique_ptr<PostR1Experts> postr1_experts_;
+  bool postr1_prediction_used_ = false;
+  std::array<float, 512> postr1_mass_{};
+  std::array<float, 256> postr1_residual_one_{};
+  unsigned int postr1_residual_gain_ = 0;
+#endif
+#if FX4_SCR2 && FX4_SCR2_SPECIALIST
+  std::optional<scr2::FxcmAdapter> scr2_fxcm_adapter_;
+#endif
 #if FX4_SPECIALIST_CORRECTOR
   static constexpr unsigned int kSpecialistCoarseContexts = 64;
   static constexpr unsigned int kSpecialistContexts = 1024;

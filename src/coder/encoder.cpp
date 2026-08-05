@@ -1,5 +1,22 @@
 #include "encoder.h"
 
+#include <cmath>
+
+namespace {
+
+void WriteU16(std::ostream* output, std::uint16_t value) {
+  output->put(static_cast<char>(value));
+  output->put(static_cast<char>(value >> 8));
+}
+
+void WriteU64(std::ostream* output, std::uint64_t value) {
+  for (unsigned int shift = 0; shift < 64; shift += 8) {
+    output->put(static_cast<char>(value >> shift));
+  }
+}
+
+}  // namespace
+
 Encoder::Encoder(std::ofstream* os, Predictor* p) : os_(os), x1_(0),
     x2_(0xffffffff), p_(p) {}
 
@@ -17,6 +34,10 @@ unsigned int Encoder::Discretize(float p) {
 
 void Encoder::Encode(int bit) {
   const unsigned int p = Discretize(p_->Predict());
+  if (trace_byte_active_) {
+    const unsigned int mass = bit ? p : 65536u - p;
+    trace_cost_bits_ -= std::log2(static_cast<double>(mass) / 65536.0);
+  }
   const unsigned int xmid = x1_ + ((x2_ - x1_) >> 16) * p +
       (((x2_ - x1_) & 0xffff) * p >> 16);
   if (bit) {
@@ -67,9 +88,29 @@ void Encoder::BeginTraceByte(unsigned long long offset, unsigned int actual_byte
   (void)offset;
   (void)actual_byte;
   (void)prev4;
+  if (cost_trace_.is_open()) {
+    trace_cost_bits_ = 0.0;
+    trace_byte_active_ = true;
+  }
 }
 
-void Encoder::EndTraceByte() {}
+void Encoder::EndTraceByte() {
+  if (!trace_byte_active_) return;
+  const float cost = static_cast<float>(trace_cost_bits_);
+  cost_trace_.write(reinterpret_cast<const char*>(&cost), sizeof(cost));
+  trace_byte_active_ = false;
+}
+
+bool Encoder::StartCostTrace(const char* path, std::uint64_t stream_size) {
+  if (!path || !*path) return true;
+  cost_trace_.open(path, std::ios::binary | std::ios::out | std::ios::trunc);
+  if (!cost_trace_.is_open()) return false;
+  cost_trace_.write("F4TC", 4);
+  WriteU16(&cost_trace_, 1);
+  WriteU16(&cost_trace_, 0);
+  WriteU64(&cost_trace_, stream_size);
+  return cost_trace_.good();
+}
 
 void Encoder::Flush() {
   while (((x1_^x2_) & 0xff000000) == 0) {
@@ -81,4 +122,5 @@ void Encoder::Flush() {
 
   auto* data = reinterpret_cast<const char*>(out_.data());
   os_->write(data, out_.size());
+  if (cost_trace_.is_open()) cost_trace_.flush();
 }

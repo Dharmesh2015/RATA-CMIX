@@ -7,8 +7,16 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cmath>
-Predictor::Predictor(const std::vector<bool>& vocab) : manager_(),
-    sigmoid_(100001), vocab_(vocab) {
+Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled)
+    : manager_(), sigmoid_(100001), vocab_(vocab) {
+#if FX4_SCR2 && FX4_SCR2_SPECIALIST
+  if (scr2_enabled) {
+    scr2_fxcm_adapter_.emplace();
+    scr2_fxcm_adapter_->Init();
+  }
+#else
+  (void)scr2_enabled;
+#endif
   fxcm_neutral_input_ = sigmoid_.Logit(0.5f);
   for (int raw = -2047; raw <= 2047; ++raw) {
     float p = fxcm_model_.RawPredictionProbability(static_cast<short>(raw));
@@ -26,12 +34,84 @@ Predictor::Predictor(const std::vector<bool>& vocab) : manager_(),
   AddMatch();
   AddDoubleIndirect();
   AddMixers();
-  auxiliary_size_ = 2;
+  auxiliary_size_ = 3;
 }
 
 void Predictor::FreeFxcmMemory() {
   fxcm_model_.FreeMemory();
+#if FX4_SCR2 && FX4_SCR2_SPECIALIST
+  if (scr2_fxcm_adapter_) scr2_fxcm_adapter_->Free();
+#endif
 }
+
+void Predictor::EnablePostR1Portfolio(std::uint32_t mask) {
+#if FX4_SELECTIVE_POSTR1
+  if (!postr1_experts_) {
+    postr1_experts_.reset(new PostR1Experts());
+    postr1_residual_one_.fill(0.5f);
+  }
+  postr1_experts_->EnablePortfolio(mask);
+#else
+  (void)mask;
+#endif
+}
+
+void Predictor::SetPostR1Span(std::uint64_t logical_offset,
+    std::uint32_t mask, std::uint8_t stream_class,
+    std::uint8_t profile_id) {
+#if FX4_SELECTIVE_POSTR1
+  if (mask != 0 && !postr1_experts_) EnablePostR1Portfolio(mask);
+  if (!postr1_experts_) return;
+  if (stream_class > static_cast<std::uint8_t>(
+          PostR1Experts::StreamClass::kMixed)) {
+    stream_class = static_cast<std::uint8_t>(
+        PostR1Experts::StreamClass::kMixed);
+  }
+  postr1_residual_gain_ = (profile_id >> 6) & 3u;
+  postr1_experts_->SetSpan(logical_offset, mask,
+      static_cast<PostR1Experts::StreamClass>(stream_class), profile_id);
+#else
+  (void)logical_offset;
+  (void)mask;
+  (void)stream_class;
+  (void)profile_id;
+#endif
+}
+
+#if FX4_SELECTIVE_POSTR1
+void Predictor::UpdatePostR1ResidualDistribution() {
+  const std::valarray<float>& ppmd = byte_model_->BytePredict();
+  const std::valarray<float>& lstm = byte_mixer_->ByteProbabilities();
+  postr1_mass_.fill(0.0f);
+  for (unsigned int symbol = 0; symbol < 256; ++symbol) {
+    if (!vocab_[symbol]) continue;
+    const float p = std::max(1.0e-30f, ppmd[symbol]);
+    const float q = std::max(1.0e-30f, lstm[symbol]);
+    const float middle = std::sqrt(p * q);
+    float mass = middle;
+    if (postr1_residual_gain_ == 0) {
+      mass = std::sqrt(p * middle);       // g = 0.25
+    } else if (postr1_residual_gain_ == 2) {
+      mass = std::sqrt(q * middle);       // g = 0.75
+    } else if (postr1_residual_gain_ == 3) {
+      mass = q;                           // g = 1.00
+    }
+    postr1_mass_[256 + symbol] = mass;
+  }
+  for (int node = 255; node >= 1; --node) {
+    postr1_mass_[node] =
+        postr1_mass_[node * 2] + postr1_mass_[node * 2 + 1];
+    postr1_residual_one_[node] = postr1_mass_[node] > 0.0f
+        ? postr1_mass_[node * 2 + 1] / postr1_mass_[node]
+        : 0.5f;
+  }
+}
+
+float Predictor::PostR1ResidualProbability() const {
+  const unsigned int node = manager_.bit_context_ & 255u;
+  return node == 0 ? 0.5f : postr1_residual_one_[node];
+}
+#endif
 
 unsigned long long Predictor::GetNumModels() {
   unsigned long long num = 0;
@@ -39,6 +119,9 @@ unsigned long long Predictor::GetNumModels() {
   // models
   num += bracket_model_->NumOutputs(); // bracket
   num += fxcm_model_.NumOutputs();
+#if FX4_SCR2 && FX4_SCR2_SPECIALIST
+  if (scr2_fxcm_adapter_) num += scr2::FxcmAdapter::kOutputs;
+#endif
   num += direct_models_.size();
   num += match_models_.size();
   num += indirect_ns_models_.size();
@@ -191,7 +274,7 @@ void Predictor::AddMixers() {
   input_size = mixer_0_.size() + auxiliary_size_;
   layers_[1].SetNumModels(input_size);
 
-  AddMixer(1,manager_.zero_context_, 0.0003);
+  AddMixer(1, final_mixer_context_, 0.0003);
 
   layers_[0].SetExtraInputSize(mixer_0_.size());
 
@@ -222,7 +305,22 @@ float Predictor::Predict() {
     ++input_index;
   }
   auto fxcm_model_index = input_index - 1;
-  
+
+#if FX4_SCR2 && FX4_SCR2_SPECIALIST
+  if (scr2_fxcm_adapter_) {
+    const auto predictions = scr2_fxcm_adapter_->Predict(
+        static_cast<unsigned int>(manager_.bit_context_),
+        static_cast<unsigned int>(manager_.bpos),
+        static_cast<unsigned int>(manager_.b2streamcxt),
+        static_cast<unsigned int>(manager_.b3streamcxt),
+        (static_cast<unsigned int>(manager_.line_class_) << 24) ^
+            (static_cast<unsigned int>(manager_.wrt_state_) << 16) ^
+            static_cast<unsigned int>(manager_.longest_match_));
+    for (float probability : predictions) {
+      layers_[0].SetInput(input_index++, probability);
+    }
+  }
+#endif
 
   for (unsigned int i = 0; i < direct_models_.size(); ++i) {
     const std::valarray<float>& outputs = direct_models_[i].Predict();
@@ -264,30 +362,67 @@ float Predictor::Predict() {
   layers_[0].SetInput(input_index++, byte_mixer_output);
   auto byte_mixer_index = input_index - 1;
 
-  float auxiliary_average = Sigmoid::Logistic(layers_[0].Inputs()[fxcm_model_index]) + Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]);
-  auxiliary_average /= auxiliary_size_;
-  manager_.auxiliary_context_ =auxiliary_average * 15;
+  bool postr1_training = false;
+#if FX4_SELECTIVE_POSTR1
+  postr1_training =
+      postr1_experts_ && postr1_experts_->training_mask() != 0;
+#endif
+  float selected_fxcm_logit = layers_[0].Inputs()[fxcm_model_index];
+  float selected_fxcm_probability =
+      Sigmoid::Logistic(selected_fxcm_logit);
+  float auxiliary_average = selected_fxcm_probability +
+      Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]);
+  auxiliary_average /= 2.0f;
+  manager_.auxiliary_context_ = auxiliary_average * 15;
 
   for (unsigned int i = 0; i < mixer_0_.size(); ++i) {
     float p = mixer_0_[i].Mix();
     layers_[0].SetExtraInput(i, p);
     layers_[1].SetStretchedInput(i, p);
   }
-  layers_[1].SetStretchedInput(mixer_0_.size(), layers_[0].Inputs()[fxcm_model_index]);
+  layers_[1].SetStretchedInput(mixer_0_.size(), selected_fxcm_logit);
   layers_[1].SetStretchedInput(mixer_0_.size() + 1, layers_[0].Inputs()[byte_mixer_index]);
+  layers_[1].SetStretchedInput(mixer_0_.size() + 2, 0.0f);
+
+  final_mixer_context_ = 0;
 
   float p = Sigmoid::Logistic(mixer_1_[0].Mix());
   p = sse_.Predict(p);
 #if FX4_SPECIALIST_CORRECTOR
   p = PredictSpecialist(p, layers_[0].Inputs()[ppmd_model_index],
       layers_[0].Inputs()[byte_mixer_index],
-      layers_[0].Inputs()[fxcm_model_index]);
+      selected_fxcm_logit);
+#endif
+#if FX4_SELECTIVE_POSTR1
+  postr1_prediction_used_ = false;
+  if (byte_mixer_override < 0 && postr1_training) {
+    const float aggregate_fxcm_probability = std::max(1.0e-5f,
+        std::min(1.0f - 1.0e-5f, fxcm_model_.FinalProbability()));
+    postr1_experts_->SetModelSignals(
+        Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]),
+        Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]),
+        aggregate_fxcm_probability,
+        byte_model_->PredictOrderBands(), byte_model_->EffectiveOrder(),
+        byte_model_->LastEscapeDepth(), byte_model_->RecentEscapeRate(),
+        PostR1ResidualProbability(),
+        static_cast<unsigned int>(manager_.longest_match_));
+    p = postr1_experts_->Predict(
+        p, manager_.bit_context_, manager_.bpos & 7u);
+    postr1_prediction_used_ = true;
+  }
 #endif
   if (byte_mixer_override >= 0) return byte_mixer_override;
   return p;
 }
 
 void Predictor::Perceive(int bit) {
+#if FX4_SELECTIVE_POSTR1
+  if (postr1_experts_ && postr1_prediction_used_)
+    postr1_experts_->Perceive(bit);
+#endif
+#if FX4_SCR2 && FX4_SCR2_SPECIALIST
+  if (scr2_fxcm_adapter_) scr2_fxcm_adapter_->Update(bit);
+#endif
 #if FX4_SPECIALIST_CORRECTOR
   PerceiveSpecialist(bit);
 #endif
@@ -322,6 +457,11 @@ void Predictor::Perceive(int bit) {
   if (manager_.bit_context_ >= 128) byte_update = true;
 
   manager_.UpdateContexts(bit);
+#if FX4_SCR2 && FX4_SCR2_SPECIALIST
+  if (byte_update && scr2_fxcm_adapter_) {
+    scr2_fxcm_adapter_->OnByte(manager_.recent_bytes_[0]);
+  }
+#endif
   if (byte_update) {
     bracket_model_->ByteUpdate();
 
@@ -346,7 +486,14 @@ void Predictor::Perceive(int bit) {
     }
 
     byte_mixer_->ByteUpdate();
-
+#if FX4_SELECTIVE_POSTR1
+    if (postr1_experts_) {
+      if (postr1_experts_->training_mask() & PostR1Experts::kResidualLstm) {
+        UpdatePostR1ResidualDistribution();
+      }
+      postr1_experts_->ByteUpdate(manager_.recent_bytes_[0]);
+    }
+#endif
   }
   byte_mixer_output = byte_mixer_->Predict()[0];
   lstmpr=Discretize(byte_mixer_output);
@@ -388,7 +535,11 @@ float Predictor::PredictSpecialist(float base_probability,
   const unsigned int confidence_bucket =
       (confidence >= 0.5f) + (confidence >= 1.5f) +
       (confidence >= 3.0f);
-  const unsigned int donor_bucket = 0;
+  // Keep the accepted specialist independent of downstream post-R1 state.
+  // Neutral values preserve its existing context numbering and feature shape.
+  const float donor_confidence = 0.0f;
+  const bool selected_postr1_span = false;
+  const unsigned int donor_bucket = donor_confidence >= 0.5f;
   specialist_coarse_context_ =
       SpecialistStreamClass() * 8u + (manager_.bpos & 7u);
   specialist_context_ =
@@ -404,7 +555,10 @@ float Predictor::PredictSpecialist(float base_probability,
   specialist_inputs_[3] = bounded_delta(fxcm_logit);
   specialist_inputs_[4] =
       std::max(-4.0f, std::min(4.0f, lstm_logit - ppmd_logit));
-  specialist_inputs_[5] = 0.0f;
+  specialist_inputs_[5] = selected_postr1_span
+      ? std::min(4.0f,
+          static_cast<float>(byte_model_->LastEscapeDepth()) * 0.25f)
+      : 0.0f;
 
   const auto& weights = specialist_weights_[specialist_context_];
   const auto& coarse_weights =

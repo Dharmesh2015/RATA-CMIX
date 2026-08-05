@@ -20,6 +20,9 @@ class Lstm {
   std::valarray<float>& Perceive(unsigned int input);
   std::valarray<float>& Predict(unsigned int input);
   void SetInput(const std::valarray<float>& input);
+  void SetRecurrentTraining(bool enabled) {
+    recurrent_training_enabled_ = enabled;
+  }
   //void SaveToDisk(const std::string& path);
   //void LoadFromDisk(const std::string& path);
 
@@ -33,6 +36,8 @@ class Lstm {
   float learning_rate_;
   unsigned int num_cells_, epoch_, horizon_, input_size_, output_size_;
   int last_input_ = -1;
+  bool recurrent_training_enabled_ = true;
+  unsigned int horizons_since_recurrent_training_ = 0;
 };
 #include "lstm.hpp"
 #endif

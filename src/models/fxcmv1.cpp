@@ -6049,6 +6049,10 @@ float FXCM::RawPredictionProbability(short raw) const {
     return fxcmv1::squashed_probability[raw + 2047];
 }
 
+float FXCM::FinalProbability() const {
+    return fxcmv1::pr * fxcmv1::conversion_factor;
+}
+
 unsigned int FXCM::NumOutputs() {
     return fxcmv1::model_predictions.size();
 }

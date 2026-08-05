@@ -88,6 +88,9 @@ inline std::valarray<float>& Lstm::Perceive(unsigned int input) {
   int old_input = input_history_[last_epoch];
   input_history_[last_epoch] = input;
   if (epoch_ == 0) {
+    const bool run_recurrent = recurrent_training_enabled_ ||
+        horizons_since_recurrent_training_ >= 7;
+    if (run_recurrent) {
     for (int epoch = horizon_ - 1; epoch >= 0; --epoch) {
       for (int layer = layers_.size() - 1; layer >= 0; --layer) {
         int offset = layer * num_cells_;
@@ -107,6 +110,10 @@ inline std::valarray<float>& Lstm::Perceive(unsigned int input) {
         layers_[layer].BackwardPass(layer_input_[epoch][layer], epoch, layer,
             input_symbol, &hidden_error_);
       }
+    }
+      horizons_since_recurrent_training_ = 0;
+    } else {
+      ++horizons_since_recurrent_training_;
     }
   }
 

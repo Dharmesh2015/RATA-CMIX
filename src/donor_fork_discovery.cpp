@@ -22,6 +22,7 @@
 
 #include "coder/encoder.h"
 #include "donor_plan.h"
+#include "donor_winner_search.h"
 #include "fx4_config.h"
 #include "predictor.h"
 #include "preprocess/preprocessor.h"
@@ -572,6 +573,14 @@ bool RunDonorForkDiscovery(const std::string& input_path,
     return false;
   }
   const std::string ledger_path(path);
+  const char* winner_mode = getenv("FX4_DONOR_WINNER_SEARCH");
+  if (winner_mode && *winner_mode && strcmp(winner_mode, "0") != 0) {
+    const bool ok = RunDonorWinnerSearch(input_path, scratch_output_path,
+        input_bytes, vocab, dictionary, pretrain_dictionary, donor_plan,
+        ledger_path, output_bytes);
+    discovery_completed = ok;
+    return ok;
+  }
   if (!EnsureLedgers(ledger_path)) return false;
   unlink(CompletePath(ledger_path).c_str());
   unlink(PausedPath(ledger_path).c_str());

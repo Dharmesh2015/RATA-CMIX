@@ -24,6 +24,7 @@ class FXCM : public Model {
   const unsigned char* PredictionMask() const;
   unsigned int ActivePredictions() const;
   float RawPredictionProbability(short raw) const;
+  float FinalProbability() const;
   unsigned int NumOutputs();
   void Perceive(int bit);
   void ByteUpdate() {};
