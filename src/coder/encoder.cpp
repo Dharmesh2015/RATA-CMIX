@@ -32,6 +32,20 @@ unsigned int Encoder::Discretize(float p) {
   return 1 + 65534 * p;
 }
 
+unsigned int Encoder::DiscretizeProbability(float p) {
+  return 1 + 65534 * p;
+}
+
+Encoder Encoder::Clone() const {
+  Encoder branch(os_, p_);
+  branch.x1_ = x1_;
+  branch.x2_ = x2_;
+  branch.out_ = out_;
+  branch.count_only_ = count_only_;
+  branch.count_only_bytes_ = count_only_bytes_;
+  return branch;
+}
+
 void Encoder::Encode(int bit) {
   const unsigned int p = Discretize(p_->Predict());
   if (trace_byte_active_) {
@@ -123,4 +137,19 @@ void Encoder::Flush() {
   auto* data = reinterpret_cast<const char*>(out_.data());
   os_->write(data, out_.size());
   if (cost_trace_.is_open()) cost_trace_.flush();
+}
+
+size_t Encoder::ProjectedFinalOutputSize() const {
+  // Identical renormalization logic to Flush(), operating on local copies
+  // of x1_/x2_ so the live encoder state is untouched.
+  unsigned int x1 = x1_;
+  unsigned int x2 = x2_;
+  size_t pending_bytes = 0;
+  while (((x1 ^ x2) & 0xff000000) == 0) {
+    ++pending_bytes;
+    x1 <<= 8;
+    x2 = (x2 << 8) + 255;
+  }
+  ++pending_bytes;  // Flush()'s unconditional final WriteByte(x2 >> 24).
+  return OutputSize() + pending_bytes;
 }

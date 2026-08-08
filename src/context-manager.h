@@ -17,6 +17,7 @@
 #include <cmath>
 #include "ds/SmallVector.h"
 
+#include <cstdint>
 #include <vector>
 
 struct ContextManager {
@@ -92,7 +93,11 @@ struct ContextManager {
   llvm::SmallVector<ContextHash, 12> context_hash_contexts_;
   llvm::SmallVector<Sparse, 18> sparse_contexts_;
   llvm::SmallVector<BracketContext, 1> bracket_contexts_;
-  std::vector<unsigned long long> hashes_ind1,hashes_ind2,hashes_ind3,hashes_ind4,hashes_ind5;
+  // Every stored value is explicitly masked to 32 bits or less (verified:
+  // ind1<=0xFF, ind2<=0xFFFFFFFF exactly, ind3<=0x1FFFFFF, ind5<=0x3FFFFFFF
+  // in context-manager.cpp), so 64-bit storage was pure unused headroom.
+  std::vector<std::uint32_t> hashes_ind1,hashes_ind2,hashes_ind3,
+      hashes_ind4,hashes_ind5;
   RunMap run_map_;
   Nonstationary nonstationary_;
 };

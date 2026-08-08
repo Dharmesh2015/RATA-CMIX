@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <sstream>
 
 #include "predictor.h"
 #include "models/postr1_experts.h"
@@ -80,6 +81,17 @@ bool WriteVarint(std::ostream* output, uint64_t value) {
     output->put(static_cast<char>(byte));
   } while (value != 0 && *output);
   return output->good();
+}
+
+// Single source of truth for one assignment record's on-disk encoding.
+// WriteArchive() and the SerializedAssignmentGroupSize() cost estimator
+// both call this, so the two can never independently drift out of sync.
+void WriteAssignmentFields(std::ostream* output, uint16_t recipient,
+    uint32_t shifted_donor_offset, unsigned int length_log2, uint8_t order) {
+  WriteU16(output, recipient);
+  WriteU24(output, shifted_donor_offset);
+  output->put(static_cast<char>(length_log2));
+  output->put(static_cast<char>(order));
 }
 
 }  // namespace
@@ -218,14 +230,12 @@ bool DonorPlan::WriteArchive(std::ofstream* output) const {
         assignment.order > 255u) {
       return false;
     }
-    WriteU16(output, assignment.recipient);
-    WriteU24(output, assignment.donor_offset >> 8);
     unsigned int length_log2 = 0;
     for (uint32_t value = assignment.length; value > 1; value >>= 1) {
       ++length_log2;
     }
-    output->put(static_cast<char>(length_log2));
-    output->put(static_cast<char>(assignment.order));
+    WriteAssignmentFields(output, assignment.recipient,
+        assignment.donor_offset >> 8, length_log2, assignment.order);
   }
   WriteU32(output, static_cast<uint32_t>(expert_spans_.size()));
   uint64_t previous_end = 0;
@@ -241,6 +251,26 @@ bool DonorPlan::WriteArchive(std::ofstream* output) const {
     previous_end = span.offset + span.length;
   }
   return output->good();
+}
+
+size_t DonorPlan::SerializedFixedOverhead() {
+  std::ostringstream scratch;
+  scratch.put(4);                                    // version
+  WriteU16(&scratch, static_cast<uint16_t>(0));       // assignment count
+  WriteU32(&scratch, static_cast<uint32_t>(0));       // expert-span count
+  return scratch.str().size();
+}
+
+size_t DonorPlan::SerializedAssignmentGroupSize(size_t donor_count) {
+  std::ostringstream scratch;
+  // Field values here are placeholders (offset/length/order do not affect
+  // encoded width -- every field is fixed-width u16/u24/u8/u8). Using the
+  // real WriteAssignmentFields() writer, rather than a literal "7 * N",
+  // means this stays correct even if the encoding ever changes.
+  for (size_t index = 0; index < donor_count; ++index) {
+    WriteAssignmentFields(&scratch, 0, 0, 0, 0);
+  }
+  return scratch.str().size();
 }
 
 bool DonorPlan::Initialize(uint64_t stream_size, bool allow_multiple) {

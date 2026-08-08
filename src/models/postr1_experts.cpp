@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 
 namespace {
 
@@ -21,6 +22,17 @@ std::uint64_t RollingPower(unsigned int length) {
   std::uint64_t power = 1;
   while (length--) power *= kRollingBase;
   return power;
+}
+
+std::uint64_t DonorContextHash(
+    const std::uint8_t* bytes, unsigned int length) {
+  std::uint64_t hash = 0x6a09e667f3bcc909ULL ^
+      (static_cast<std::uint64_t>(length) << 56);
+  for (unsigned int i = 0; i < length; ++i) {
+    hash ^= static_cast<std::uint64_t>(bytes[i]) +
+        0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+  }
+  return hash;
 }
 
 }  // namespace
@@ -211,6 +223,149 @@ float PostR1Experts::donor_confidence() const {
   return length * (0.5f + 0.5f * agreement);
 }
 
+float PostR1Experts::profile_donor_confidence() const {
+  const float evidence = std::min(1.0f,
+      static_cast<float>(donor_profile_confidence_) * (1.0f / 12.0f));
+  const float agreement = std::min(1.0f,
+      static_cast<float>(donor_profile_agreement_) * 0.25f);
+  return evidence * (0.5f + 0.5f * agreement);
+}
+
+void PostR1Experts::SetDonorProfile(
+    const std::vector<std::uint8_t>& bytes,
+    const std::vector<std::uint32_t>& segment_lengths) {
+  for (auto& table : donor_profile_) {
+    table.assign(kDonorProfileSlots, DonorSlot{});
+  }
+  donor_profile_prediction_ = 0;
+  donor_profile_confidence_ = 0;
+  donor_profile_agreement_ = 0;
+  // Donor winners are measured from an identical warm primary predictor.
+  // Reset only the small specialist so independently selected recipients
+  // compose without carrying an earlier donor's correction state.
+  for (auto& weights : mixer_weight_) weights.fill(0);
+  mixer_error_.fill(8192);
+  for (auto& gains : expert_gain_total_) gains.fill(0);
+  for (auto& squares : expert_gain_square_) squares.fill(0);
+  expert_observations_.fill(0);
+  expert_enabled_.fill(false);
+  expert_probability_.fill(0.5f);
+  expert_delta_.fill(0.0f);
+  mixer_input_.fill(0.0f);
+  mixer_context_ = 0;
+  final_probability_ = 0.5f;
+  residual_history_ = 0;
+  error_run_ = 0;
+  recent_error_ = 0.25f;
+  last_hard_prediction_ = 0;
+  current_prefix_ = 1;
+  last_bit_position_ = 0;
+
+  std::vector<std::uint32_t> single_segment;
+  const std::vector<std::uint32_t>* segments = &segment_lengths;
+  if (segments->empty()) {
+    if (bytes.size() > std::numeric_limits<std::uint32_t>::max()) return;
+    single_segment.push_back(static_cast<std::uint32_t>(bytes.size()));
+    segments = &single_segment;
+  }
+  std::uint64_t total = 0;
+  for (const std::uint32_t length : *segments) total += length;
+  if (total != bytes.size()) return;
+
+  static constexpr unsigned int context_lengths[kDonorProfileContexts] = {
+      4, 8, 16, 32};
+  std::size_t start = 0;
+  for (const std::uint32_t length : *segments) {
+    const std::size_t end = start + length;
+    for (unsigned int context_index = 0;
+         context_index < kDonorProfileContexts; ++context_index) {
+      const unsigned int context_length = context_lengths[context_index];
+      for (std::size_t i = start + context_length; i < end; ++i) {
+        const std::uint64_t key = DonorContextHash(
+            bytes.data() + i - context_length, context_length);
+        DonorSlot& slot = donor_profile_[context_index][
+            MixHash(key) & (kDonorProfileSlots - 1u)];
+        const std::uint8_t prediction = bytes[i];
+        if (slot.confidence == 0) {
+          slot.key = key;
+          slot.prediction = prediction;
+          slot.confidence = 1;
+        } else if (slot.key == key && slot.prediction == prediction) {
+          if (slot.confidence != 0xffff) ++slot.confidence;
+        } else if (slot.key == key) {
+          if (slot.confidence > 1) --slot.confidence;
+          else {
+            slot.prediction = prediction;
+            slot.confidence = 1;
+          }
+        } else if (slot.confidence > 1) {
+          --slot.confidence;
+        } else {
+          slot.key = key;
+          slot.prediction = prediction;
+          slot.confidence = 1;
+        }
+      }
+    }
+    start = end;
+  }
+  UpdateDonorProfilePrediction();
+}
+
+float PostR1Experts::DonorProfilePrediction(
+    unsigned int bit_position) const {
+  if (donor_profile_confidence_ == 0) return 0.5f;
+  const int predicted_bit =
+      (donor_profile_prediction_ >> (7 - bit_position)) & 1;
+  const float strength = std::min(0.44f,
+      0.04f + 0.36f * profile_donor_confidence());
+  return predicted_bit ? 0.5f + strength : 0.5f - strength;
+}
+
+void PostR1Experts::UpdateDonorProfilePrediction() {
+  donor_profile_confidence_ = 0;
+  donor_profile_agreement_ = 0;
+  if (donor_profile_[0].empty() || bytes_seen_ < 4) return;
+
+  static constexpr unsigned int context_lengths[kDonorProfileContexts] = {
+      4, 8, 16, 32};
+  std::array<std::uint16_t, 256> vote{};
+  std::array<std::uint8_t, kDonorProfileContexts> predictions{};
+  std::array<bool, kDonorProfileContexts> matched{};
+  for (unsigned int context_index = 0;
+       context_index < kDonorProfileContexts; ++context_index) {
+    const unsigned int context_length = context_lengths[context_index];
+    if (bytes_seen_ < context_length) continue;
+    std::array<std::uint8_t, 32> context{};
+    for (unsigned int i = 0; i < context_length; ++i) {
+      context[i] =
+          recent_bytes_[(recent_pos_ - context_length + i) & 63u];
+    }
+    const std::uint64_t key =
+        DonorContextHash(context.data(), context_length);
+    const DonorSlot& slot = donor_profile_[context_index][
+        MixHash(key) & (kDonorProfileSlots - 1u)];
+    if (slot.confidence == 0 || slot.key != key) continue;
+    const unsigned int weight =
+        (context_index + 1u) * std::min<unsigned int>(slot.confidence, 24u);
+    vote[slot.prediction] = static_cast<std::uint16_t>(
+        std::min<unsigned int>(0xffffu, vote[slot.prediction] + weight));
+    predictions[context_index] = slot.prediction;
+    matched[context_index] = true;
+  }
+
+  const auto best = std::max_element(vote.begin(), vote.end());
+  if (best == vote.end() || *best == 0) return;
+  donor_profile_prediction_ =
+      static_cast<std::uint8_t>(best - vote.begin());
+  donor_profile_confidence_ = *best;
+  for (unsigned int i = 0; i < kDonorProfileContexts; ++i) {
+    if (matched[i] && predictions[i] == donor_profile_prediction_) {
+      ++donor_profile_agreement_;
+    }
+  }
+}
+
 float PostR1Experts::MatchPrediction(unsigned int bit_position) {
   if (phrase_confidence_ == 0 || phrase_agreement_ < 2) return 0.5f;
   const int predicted_bit = (phrase_prediction_ >> (7 - bit_position)) & 1;
@@ -223,7 +378,7 @@ std::uint32_t PostR1Experts::ExpertMask(unsigned int expert) {
   static constexpr std::uint32_t kMasks[kExpertCount] = {
       kStructural, kPpmdEscapeOrder, kSparseVirtualPpm, kWordXmlPpm,
       kResidualLstm, kMicroDiffusion, kRareResidual, kCtsSkipCts,
-      kDmc, kTokenMatch, 0u, 0u};
+      kDmc, kTokenMatch, kDonorProfile, 0u};
   return expert < kExpertCount ? kMasks[expert] : 0u;
 }
 
@@ -328,6 +483,9 @@ float PostR1Experts::Predict(float baseline_probability,
   if (observed_mask_ & kTokenMatch) {
     expert_probability_[9] = MatchPrediction(bit_position);
   }
+  if (observed_mask_ & kDonorProfile) {
+    expert_probability_[10] = DonorProfilePrediction(bit_position);
+  }
 
   const float base_logit = Logit(baseline_probability_);
   mixer_input_.fill(0.0f);
@@ -340,15 +498,23 @@ float PostR1Experts::Predict(float baseline_probability,
     expert_enabled_[i] = true;
     float delta = std::max(-4.0f, std::min(4.0f,
         Logit(expert_probability_[i]) - base_logit));
-    if (i == 9) {
+    if (i == 9 || i == 10) {
       const float entropy_scale = 4.0f * baseline_probability_ *
           (1.0f - baseline_probability_);
-      delta *= entropy_scale * donor_confidence();
+      const float confidence = i == 9
+          ? donor_confidence() : profile_donor_confidence();
+      delta *= entropy_scale * confidence;
     }
     expert_delta_[i] = delta;
 
     float gate = 0.0f;
-    if (observations >= 64) {
+    if (i == 10) {
+      // A donor profile is exact-coded in an isolated page branch. Waiting
+      // for 64 samples in each of 2048 contexts made short pages tie the
+      // baseline. Exact 4/8/16/32-byte hits are usable immediately; the
+      // page-level archive comparison still rejects every harmful profile.
+      gate = profile_donor_confidence() > 0.0f ? 1.0f : 0.0f;
+    } else if (observations >= 64) {
       const double total =
           static_cast<double>(expert_gain_total_[mixer_context_][i]);
       const double square =
@@ -362,46 +528,50 @@ float PostR1Experts::Predict(float baseline_probability,
     mixer_input_[i] = delta * gate;
   }
 
-  // Primary models route the specialist through MixerContext(); they are not
-  // remixed as correction inputs, which keeps p_base permanently anchored.
-  mixer_input_[kExpertCount] = 1.0f;
-  mixer_input_[kExpertCount + 1] = 0.0f;
-  mixer_input_[kExpertCount + 2] = 0.0f;
-  mixer_input_[kExpertCount + 3] = 0.0f;
-  mixer_input_[kExpertCount + 4] =
-      std::min(4.0f, static_cast<float>(match_length_) / 16.0f);
+  const bool donor_only =
+      (observed_mask_ & ~(kDonorProfile | kContextMixer)) == 0;
+  if (!donor_only) {
+    mixer_input_[kExpertCount] = 1.0f;
+    mixer_input_[kExpertCount + 4] =
+        std::min(4.0f, static_cast<float>(match_length_) / 16.0f);
+  }
 
-  auto correction_for = [&](std::uint32_t mask) {
-    float correction = 0.0f;
-    if (mask & kContextMixer) {
-      const auto& weights = mixer_weight_[mixer_context_];
-      std::int64_t dot = 0;
-      for (unsigned int i = 0; i < kMixerFeatures; ++i) {
-        if (i < kExpertCount && (mask & ExpertMask(i)) == 0) continue;
-        const int input = static_cast<int>(mixer_input_[i] * 2048.0f);
-        dot += static_cast<std::int64_t>(weights[i]) * input;
-      }
-      correction = static_cast<float>(dot) * (1.0f / 4194304.0f);
-    } else {
-      float sum = 0.0f;
-      unsigned int count = 0;
-      for (unsigned int i = 0; i < kExpertCount; ++i) {
-        if ((mask & ExpertMask(i)) != 0 &&
-            std::fabs(mixer_input_[i]) > 1.0e-6f) {
-          sum += mixer_input_[i];
-          ++count;
-        }
-      }
-      if (count) correction = 0.0625f * sum / count;
-    }
-    return std::max(-1.5f, std::min(1.5f, correction));
-  };
-
-  const float training_correction = correction_for(observed_mask_);
+  const float training_correction = CorrectionFor(observed_mask_);
   final_probability_ = Logistic(base_logit + training_correction);
   last_hard_prediction_ = baseline_probability_ >= 0.5f;
   if (active_mask_ == 0) return baseline_probability_;
-  return Logistic(base_logit + correction_for(active_mask_));
+  return Logistic(base_logit + CorrectionFor(active_mask_));
+}
+
+float PostR1Experts::CorrectionFor(std::uint32_t mask) const {
+  float correction = 0.0f;
+  if (mask & kContextMixer) {
+    const auto& weights = mixer_weight_[mixer_context_];
+    std::int64_t dot = 0;
+    for (unsigned int i = 0; i < kMixerFeatures; ++i) {
+      if (i < kExpertCount && (mask & ExpertMask(i)) == 0) continue;
+      const int input = static_cast<int>(mixer_input_[i] * 2048.0f);
+      dot += static_cast<std::int64_t>(weights[i]) * input;
+    }
+    correction = static_cast<float>(dot) * (1.0f / 4194304.0f);
+  } else {
+    float sum = 0.0f;
+    unsigned int count = 0;
+    for (unsigned int i = 0; i < kExpertCount; ++i) {
+      if ((mask & ExpertMask(i)) != 0 &&
+          std::fabs(mixer_input_[i]) > 1.0e-6f) {
+        sum += mixer_input_[i];
+        ++count;
+      }
+    }
+    if (count) {
+      const bool donor_profile_only =
+          (mask & kDonorProfile) != 0 &&
+          (mask & ~(kDonorProfile | kContextMixer)) == 0;
+      correction = (donor_profile_only ? 0.25f : 0.0625f) * sum / count;
+    }
+  }
+  return std::max(-1.5f, std::min(1.5f, correction));
 }
 
 void PostR1Experts::Perceive(int bit) {
@@ -605,6 +775,15 @@ void PostR1Experts::UpdateStreamClass(std::uint8_t byte) {
 void PostR1Experts::ByteUpdate(std::uint8_t byte) {
   if (observed_mask_ == 0) return;
   UpdateStreamClass(byte);
+  const std::uint32_t donor_only = kDonorProfile | kContextMixer;
+  if ((observed_mask_ & ~donor_only) == 0) {
+    recent_bytes_[recent_pos_++ & 63u] = byte;
+    ++bytes_seen_;
+    if (active_mask_ & kDonorProfile) {
+      UpdateDonorProfilePrediction();
+    }
+    return;
+  }
   UpdateHashes(byte);
   if (observed_mask_ & kTokenMatch) {
     EnsureEpisodic();
@@ -708,6 +887,9 @@ void PostR1Experts::ByteUpdate(std::uint8_t byte) {
   }
   recent_bytes_[recent_pos_++ & 63u] = byte;
   ++bytes_seen_;
+  if (observed_mask_ & kDonorProfile) {
+    UpdateDonorProfilePrediction();
+  }
 }
 
 bool PostR1Experts::WriteOracle(const char* path) const {
@@ -717,7 +899,7 @@ bool PostR1Experts::WriteOracle(const char* path) const {
   static const char* names[kExpertCount + 2] = {
       "baseline", "structural", "ppmd_escape_order", "sparse_virtual_ppm",
       "word_xml_ppm", "residual_lstm", "micro_diffusion", "rare_residual",
-      "cts_skipcts", "dmc", "token_match", "episodic_cache", "tiny_ssm",
+      "cts_skipcts", "dmc", "token_match", "donor_profile", "tiny_ssm",
       "selected_mixer"};
   output << "model,bits,loss_bits,equivalent_bytes,bpb\n";
   for (unsigned int i = 0; i < kExpertCount + 2; ++i) {

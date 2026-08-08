@@ -11,7 +11,6 @@
 #include "models/byte-model.h"
 #include "context-manager.h"
 #include "models/direct.h"
-#include "models/direct-hash.h"
 #include "models/indirect.h"
 #include "models/match.h"
 #include "models/ppmd.h"
@@ -19,9 +18,6 @@
 #include "models/fxcmv1.h"
 #if FX4_SELECTIVE_POSTR1
 #include "models/postr1_experts.h"
-#endif
-#if FX4_SCR2 && FX4_SCR2_SPECIALIST
-#include "models/scr2_fxcm_adapter.h"
 #endif
 #include "mixer/lstm.h"
 #include "contexts/context-hash.h"
@@ -53,6 +49,8 @@ class Predictor {
   void EnablePostR1Portfolio(std::uint32_t mask);
   void SetPostR1Span(std::uint64_t logical_offset, std::uint32_t mask,
       std::uint8_t stream_class, std::uint8_t profile_id);
+  void SetPostR1DonorProfile(const std::vector<std::uint8_t>& bytes,
+      const std::vector<std::uint32_t>& segment_lengths);
 
  private:
   unsigned long long GetNumModels();
@@ -62,7 +60,6 @@ class Predictor {
   void AddPPMD();
   void AddBracket();
   void AddWord();
-  void AddDirect();
   void AddMatch();
   void AddDoubleIndirect();
   void AddMixers();
@@ -82,7 +79,7 @@ class Predictor {
   llvm::SmallVector<Match, 10> match_models_;
   
   std::optional<Bracket> bracket_model_;
-  size_t auxiliary_size_ = 3; // aggregate FXCM, LSTM, direct PPMd
+  size_t auxiliary_size_ = 3; // FXCM, LSTM, direct PPMd
   SSE sse_;
   llvm::SmallVector<MixerInput,2> layers_;
   llvm::SmallVector<Mixer, 24> mixer_0_;
@@ -104,13 +101,10 @@ class Predictor {
   std::array<float, 256> postr1_residual_one_{};
   unsigned int postr1_residual_gain_ = 0;
 #endif
-#if FX4_SCR2 && FX4_SCR2_SPECIALIST
-  std::optional<scr2::FxcmAdapter> scr2_fxcm_adapter_;
-#endif
 #if FX4_SPECIALIST_CORRECTOR
   static constexpr unsigned int kSpecialistCoarseContexts = 64;
   static constexpr unsigned int kSpecialistContexts = 1024;
-  static constexpr unsigned int kSpecialistFeatures = 6;
+  static constexpr unsigned int kSpecialistFeatures = 5;
   std::array<std::array<float, kSpecialistFeatures>,
       kSpecialistContexts> specialist_weights_{};
   std::array<std::array<float, kSpecialistFeatures>,

@@ -33,7 +33,7 @@
 
 // cmix-lex cadence retained for the 14 GB file-backed heap and 10 GB RSS cap.
 #ifndef FX4_PPMD_REMAP_INTERVAL
-#define FX4_PPMD_REMAP_INTERVAL 5000ull
+#define FX4_PPMD_REMAP_INTERVAL 65536ull
 #endif
 
 #ifndef FX4_LSTM_CELLS
@@ -56,8 +56,8 @@
 #define FX4_LSTM_GRADIENT_CLIP 10.0f
 #endif
 
-// Baseline-anchored correction over existing PPMd, LSTM and FXCM predictions.
-// It uses only decoder-visible stream state and has no archive side data.
+// Versioned donor-plan support is research-only until exact net archive gain
+// exceeds its metadata and executable cost.
 #ifndef FX4_DONOR_PLAN
 #define FX4_DONOR_PLAN 0
 #endif
@@ -86,7 +86,7 @@
 // Selective post-R1 virtual replay. A plan is used only when compression sets
 // FX4_VR_PLAN; archives carry every pattern and event needed by the decoder.
 #ifndef FX4_VIRTUAL_REPLAY
-#define FX4_VIRTUAL_REPLAY 1
+#define FX4_VIRTUAL_REPLAY 0
 #endif
 
 // Reversible structural-token transform for the post-R1 predictor stream.
@@ -99,12 +99,6 @@
 #define FX4_SCR2_DEFAULT 0
 #endif
 
-// Add three SCR2-only structural experts to the outer context mixer. Raw
-// archives do not construct them and retain the accepted predictor shape.
-#ifndef FX4_SCR2_SPECIALIST
-#define FX4_SCR2_SPECIALIST 1
-#endif
-
 #ifndef FX4_SPECIALIST_CORRECTOR
 #define FX4_SPECIALIST_CORRECTOR 1
 #endif
@@ -113,11 +107,12 @@
 #define FX4_SPECIALIST_LEARNING_RATE 0.0005f
 #endif
 
+
 // Selective post-R1 predictor portfolio. Experts are activated only by spans
 // carried in the archive plan; with no selected span this path is exactly
 // baseline-neutral.
 #ifndef FX4_SELECTIVE_POSTR1
-#define FX4_SELECTIVE_POSTR1 1
+#define FX4_SELECTIVE_POSTR1 0
 #endif
 
 
@@ -125,6 +120,6 @@
 // opts in with FX4_POSTR1_TRANSFORM_PLAN; the resulting F4PT stream is
 // self-contained and restored before the R1 inverse.
 #ifndef FX4_POSTR1_TRANSFORM
-#define FX4_POSTR1_TRANSFORM 1
+#define FX4_POSTR1_TRANSFORM 0
 #endif
 #endif

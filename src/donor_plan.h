@@ -46,6 +46,20 @@ class DonorPlan {
       uint32_t donor_offset, uint32_t length, Predictor* predictor);
   void CaptureByte(uint64_t position, uint8_t byte);
 
+  // Exact serialized-archive cost helpers. Both route through the identical
+  // field-encoding routines WriteArchive() uses (see donor_plan.cpp), so
+  // discovery/search code can never silently drift from the true archive
+  // byte layout the way an independently maintained formula could.
+  //
+  // SerializedFixedOverhead(): bytes written once per archive regardless of
+  // region count -- version byte + assignment-count u16 + expert-span-count
+  // u32 (7 bytes today; computed, not hardcoded).
+  static size_t SerializedFixedOverhead();
+  // SerializedAssignmentGroupSize(N): exact bytes WriteArchive() spends on N
+  // assignment records (7 bytes each today; computed via the same
+  // fixed-width field writers WriteArchive() uses, not a literal constant).
+  static size_t SerializedAssignmentGroupSize(size_t donor_count);
+
  private:
   struct Assignment {
     uint16_t recipient;

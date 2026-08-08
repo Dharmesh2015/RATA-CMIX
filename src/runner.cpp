@@ -529,6 +529,7 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
 #else
       false;
 #endif
+#if FX4_DONOR_PLAN
   if (raw_entropy_input) {
     struct stat input_info {};
     if (stat(input_path.c_str(), &input_info) != 0 ||
@@ -537,6 +538,7 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     }
     *input_bytes = static_cast<unsigned long long>(input_info.st_size);
   } else {
+#endif
     FILE* data_in = fopen(input_path.c_str(), "rb");
     if (!data_in) return false;
     FILE* temp_out = fopen(temp_path.c_str(), "wb");
@@ -561,7 +563,9 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     }
     fclose(data_in);
     fclose(temp_out);
+#if FX4_DONOR_PLAN
   }
+#endif
 
 #if FX4_RESEARCH_STREAM_DUMP
   if (!CopyResearchStream(temp_path, std::getenv("FX4_DUMP_POST_WRT"))) {

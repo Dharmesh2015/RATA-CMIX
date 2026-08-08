@@ -18,6 +18,16 @@ class PPMD : public ByteModel {
   ~PPMD();
   std::valarray<float>& Predict();
   const std::array<float, 4>& PredictOrderBands();
+  // Building the 4 order-band trees inside ppmd_PrepareByte() (4x
+  // ConvertShadowSQ calls, each with a 3KB memset + 255-node tree build)
+  // is pure overhead unless a post-R1 expert actually consumes
+  // PredictOrderBands(). Those trees are entirely separate from
+  // tree_zero_/tree_total_/ConvertSQ() (which feed the accepted PPMd
+  // probability), so skipping them has zero effect on p_base or archive
+  // bytes -- verified by construction, and by exact roundtrip tests.
+  // Defaults to true (matches prior always-on behavior); callers that
+  // never touch this get identical behavior to before this change.
+  void SetOrderBandsNeeded(bool needed);
   unsigned int EffectiveOrder() const;
   unsigned int LastEscapeDepth() const;
   float RecentEscapeRate() const;

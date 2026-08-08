@@ -30,7 +30,8 @@ class PostR1Experts {
     kContextMixer     = 1u << 12,
     kConfidenceBptt   = 1u << 13,
     kOracle           = 1u << 14,
-    kAllPredictors    = (1u << 15) - 1u,
+    kDonorProfile     = 1u << 15,
+    kAllPredictors    = (1u << 16) - 1u,
   };
 
   enum class StreamClass : std::uint8_t {
@@ -63,18 +64,19 @@ class PostR1Experts {
       unsigned int bit_position);
   void Perceive(int bit);
   void ByteUpdate(std::uint8_t byte);
+  void SetDonorProfile(const std::vector<std::uint8_t>& bytes,
+      const std::vector<std::uint32_t>& segment_lengths);
 
-  bool ShouldTrainLstm() const { return true; }
-  std::uint32_t active_mask() const { return active_mask_; }
-  std::uint32_t training_mask() const { return observed_mask_; }
-  StreamClass stream_class() const { return stream_class_; }
-  std::uint8_t profile_id() const { return profile_id_; }
-  float donor_confidence() const;
-  float donor_probability() const { return expert_probability_[9]; }
-
-  bool WriteOracle(const char* path) const;
+  std::uint32_t training_mask() const {
+    const std::uint32_t other =
+        observed_mask_ & ~(kDonorProfile | kContextMixer);
+    return other == 0 ? active_mask_ : observed_mask_;
+  }
 
  private:
+  float donor_confidence() const;
+  float profile_donor_confidence() const;
+  bool WriteOracle(const char* path) const;
   static constexpr unsigned int kExpertCount = 12;
   static constexpr unsigned int kMixerFeatures = kExpertCount + 5;
   static constexpr unsigned int kMixerContexts = 2048;
@@ -85,6 +87,8 @@ class PostR1Experts {
   static constexpr unsigned int kPhraseHashes = 3;
   static constexpr unsigned int kPhraseVotes =
       kPhraseCandidates * kPhraseHashes + 1;
+  static constexpr unsigned int kDonorProfileContexts = 4;
+  static constexpr unsigned int kDonorProfileSlots = 1u << 15;
 
   struct Counts {
     std::uint16_t zero = 1;
@@ -100,6 +104,12 @@ class PostR1Experts {
     double loss_bits = 0.0;
     std::uint64_t bits = 0;
   };
+  struct DonorSlot {
+    std::uint64_t key = 0;
+    std::uint16_t confidence = 0;
+    std::uint8_t prediction = 0;
+  };
+
 
   float CountProbability(Counts* table, std::uint32_t index) const;
   void UpdateCount(Counts* table, std::uint32_t index, int bit);
@@ -111,9 +121,14 @@ class PostR1Experts {
   float DmcPrediction();
   float MatchPrediction(unsigned int bit_position);
   std::uint32_t MixerContext(unsigned int bit_position) const;
+  float DonorProfilePrediction(unsigned int bit_position) const;
+  void UpdateDonorProfilePrediction();
   static std::uint32_t ExpertMask(unsigned int expert);
   bool ExpertEnabled(unsigned int expert) const;
   bool ExpertOutputEnabled(unsigned int expert) const;
+  // Extracted from Predict()'s prior local lambda, unchanged math: combines
+  // mixer_input_ deltas for experts whose ExpertMask() bit is set in `mask`.
+  float CorrectionFor(std::uint32_t mask) const;
   void UpdateExpertGains(int bit);
   void UpdateHashes(std::uint8_t byte);
   void UpdateStreamClass(std::uint8_t byte);
@@ -192,6 +207,11 @@ class PostR1Experts {
   std::uint16_t continuation_length_ = 0;
 
   std::array<OracleStat, kExpertCount + 2> oracle_{};
+  std::array<std::vector<DonorSlot>, kDonorProfileContexts> donor_profile_;
+  std::uint8_t donor_profile_prediction_ = 0;
+  std::uint16_t donor_profile_confidence_ = 0;
+  std::uint8_t donor_profile_agreement_ = 0;
+
 };
 
 #endif

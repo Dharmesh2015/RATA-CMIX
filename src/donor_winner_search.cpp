@@ -53,12 +53,37 @@ constexpr const char* kSpanHeader =
 constexpr const char* kCandidateHeader =
     "recipient_region,recipient_offset,candidate_rank,donor_offset,"
     "donor_length,phrase_score,source\n";
+constexpr const char* kCostHeader =
+    "region,baseline_payload,candidate_payload,assignment_cost,span_cost,"
+    "copy_cost,candidate_total,saving_bytes,improvement_percent,status\n";
 
 struct DonorWindow {
   uint32_t offset = 0;
   uint32_t length = 0;
   uint32_t score = 0;
 };
+
+struct RecipientSpan {
+  uint32_t region = 0;
+  uint64_t offset = 0;
+  uint32_t length = 0;
+  uint8_t stream_class =
+      static_cast<uint8_t>(PostR1Experts::StreamClass::kMixed);
+};
+
+std::vector<uint64_t> recipient_offsets;
+bool recipient_spans_from_csv = false;
+std::vector<std::vector<DonorWindow>> ranked_page_candidates;
+std::unordered_set<std::uint32_t> ranked_recipient_filter;
+bool ranked_recipient_filter_enabled = false;
+std::uint8_t current_recipient_stream_class =
+    static_cast<std::uint8_t>(PostR1Experts::StreamClass::kMixed);
+
+uint64_t RecipientOffset(uint32_t region) {
+  return region < recipient_offsets.size()
+      ? recipient_offsets[region]
+      : static_cast<uint64_t>(region) * DonorPlan::kChunkSize;
+}
 
 using DonorSequence = std::vector<DonorWindow>;
 
@@ -101,7 +126,9 @@ struct SearchConfig {
   uint32_t max_regions = 0;
   uint32_t start_region = 1;
   uint64_t max_new_trials = 0;
+  uint64_t stop_offset = std::numeric_limits<uint64_t>::max();
   bool planned_only = false;
+  bool planned_prefixes = true;
 };
 
 uint64_t EnvironmentU64(const char* name, uint64_t fallback) {
@@ -146,8 +173,13 @@ SearchConfig LoadConfig() {
       EnvironmentU32("FX4_WINNER_START_REGION", 1, 0, 65535);
   config.max_new_trials =
       EnvironmentU64("FX4_DONOR_MAX_NEW_TRIALS", 0);
+  config.stop_offset =
+      EnvironmentU64("FX4_WINNER_STOP_OFFSET",
+          std::numeric_limits<uint64_t>::max());
   config.planned_only =
       EnvironmentU32("FX4_WINNER_PLANNED_ONLY", 0, 0, 1) != 0;
+  config.planned_prefixes =
+      EnvironmentU32("FX4_WINNER_PLANNED_PREFIXES", 1, 0, 1) != 0;
   return config;
 }
 
@@ -220,6 +252,10 @@ std::string CandidatePath(const std::string& base) {
   return base + ".winner_candidates.csv";
 }
 
+std::string CostAccountingPath(const std::string& base) {
+  return base + ".cost_accounting.csv";
+}
+
 std::string StatusPath(const std::string& base) {
   return base + ".winner.status";
 }
@@ -253,7 +289,8 @@ bool EnsureLedgers(const std::string& base) {
       EnsureCsv(WinnersPath(base), kTrialHeader) &&
       EnsureCsv(SelectionPath(base), kSelectionHeader) &&
       EnsureCsv(SpanPath(base), kSpanHeader) &&
-      EnsureCsv(CandidatePath(base), kCandidateHeader);
+      EnsureCsv(CandidatePath(base), kCandidateHeader) &&
+      EnsureCsv(CostAccountingPath(base), kCostHeader);
 }
 
 bool AppendRow(const std::string& path, const std::string& row) {
@@ -263,6 +300,61 @@ bool AppendRow(const std::string& path, const std::string& row) {
       SyncFile(output);
   fclose(output);
   return ok;
+}
+
+// Exact donor-plan metadata cost for a sequence of N assignments, routed
+// through DonorPlan's real WriteArchive() field encoders (see donor_plan.cpp)
+// rather than an independently maintained formula. This intentionally
+// includes DonorPlan::SerializedFixedOverhead(), which carries the
+// version/count/expert-span-count header bytes that a prior "3 + 7*N"
+// estimate omitted (a 4-byte undercount from the missing expert-span-count
+// u32 that WriteArchive() always emits).
+uint64_t DonorPlanMetadataCost(size_t donor_count) {
+  if (donor_count == 0) return 0;
+  return DonorPlan::SerializedFixedOverhead() +
+      DonorPlan::SerializedAssignmentGroupSize(donor_count);
+}
+
+// ceil(baseline * 0.01) via integer arithmetic: ceil(a/100) = (a+99)/100.
+uint64_t StrongTargetBytes(uint64_t baseline) {
+  return baseline - (baseline + 99) / 100;
+}
+
+const char* AcceptanceStatus(uint64_t candidate_total, uint64_t baseline,
+    uint64_t strong_target) {
+  if (candidate_total <= strong_target) return "STRONG_1PCT";
+  if (candidate_total < baseline) return "POSITIVE_BELOW_1PCT";
+  return "REJECTED_SAVED";
+}
+
+// Durable Phase-2 cost-accounting row: total archive cost (payload +
+// donor-plan metadata + span/COPY metadata, the latter two 0 until Phases
+// 11/13 land) compared against baseline, with the STRONG_1PCT /
+// POSITIVE_BELOW_1PCT / REJECTED_SAVED acceptance status.
+bool AppendCostAccounting(const std::string& base, uint32_t region,
+    uint64_t baseline_payload, uint64_t candidate_payload,
+    uint64_t assignment_cost, uint64_t span_cost, uint64_t copy_cost) {
+  const uint64_t candidate_total =
+      candidate_payload + assignment_cost + span_cost + copy_cost;
+  const int64_t saving_bytes =
+      static_cast<int64_t>(baseline_payload) -
+      static_cast<int64_t>(candidate_total);
+  const double improvement_percent = baseline_payload == 0 ? 0.0 :
+      (100.0 * static_cast<double>(saving_bytes)) /
+          static_cast<double>(baseline_payload);
+  const uint64_t strong_target = StrongTargetBytes(baseline_payload);
+  const char* status =
+      AcceptanceStatus(candidate_total, baseline_payload, strong_target);
+  char row[512] = {};
+  const int length = snprintf(row, sizeof(row),
+      "%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+      ",%" PRIu64 ",%" PRId64 ",%.4f,%s\n",
+      region, baseline_payload, candidate_payload, assignment_cost,
+      span_cost, copy_cost, candidate_total, saving_bytes,
+      improvement_percent, status);
+  return length > 0 && static_cast<size_t>(length) < sizeof(row) &&
+      AppendRow(CostAccountingPath(base),
+          std::string(row, static_cast<size_t>(length)));
 }
 
 std::vector<std::string> Split(const std::string& text, char delimiter) {
@@ -285,6 +377,180 @@ bool ParseU64(const std::string& text, uint64_t* value) {
   if (*end != '\0') return false;
   *value = parsed;
   return true;
+}
+
+int FindColumn(const std::vector<std::string>& header, const char* name) {
+  const auto found = std::find(header.begin(), header.end(), name);
+  return found == header.end() ? -1 :
+      static_cast<int>(found - header.begin());
+}
+
+bool LoadRecipientSpans(uint64_t input_bytes,
+    std::vector<RecipientSpan>* spans) {
+  spans->clear();
+  const uint64_t stop_offset =
+      EnvironmentU64("FX4_WINNER_STOP_OFFSET", input_bytes);
+  const char* path = getenv("FX4_WINNER_PACKS_CSV");
+  recipient_spans_from_csv = path && *path;
+  if (!recipient_spans_from_csv) {
+    const uint64_t count =
+        std::min(input_bytes, stop_offset) / DonorPlan::kChunkSize;
+    for (uint64_t region = 0; region < count; ++region) {
+      spans->push_back({
+          static_cast<uint32_t>(region),
+          region * DonorPlan::kChunkSize,
+          DonorPlan::kChunkSize});
+    }
+  } else {
+    std::ifstream input(path);
+    std::string line;
+    if (!input.is_open() || !std::getline(input, line)) return false;
+    const auto header = Split(line, ',');
+    const int id_column = FindColumn(header, "pack_id");
+    const int offset_column = FindColumn(header, "post_r1_start");
+    const int end_column = FindColumn(header, "post_r1_end");
+    const int length_column = FindColumn(header, "post_r1_length");
+    const int class_column = FindColumn(header, "stream_class");
+    if (id_column < 0 || offset_column < 0 || end_column < 0 ||
+        length_column < 0) {
+      return false;
+    }
+    uint64_t previous_end = 0;
+    while (std::getline(input, line)) {
+      const std::vector<std::string> fields = Split(line, ',');
+      if (fields.size() != header.size()) return false;
+      uint64_t region = 0;
+      uint64_t offset = 0;
+      uint64_t end = 0;
+      uint64_t length = 0;
+      uint64_t stream_class =
+          static_cast<uint8_t>(PostR1Experts::StreamClass::kMixed);
+      if (!ParseU64(fields[id_column], &region) ||
+          !ParseU64(fields[offset_column], &offset) ||
+          !ParseU64(fields[end_column], &end) ||
+          !ParseU64(fields[length_column], &length) ||
+          (class_column >= 0 &&
+           !ParseU64(fields[class_column], &stream_class)) ||
+          region != spans->size() ||
+          region > std::numeric_limits<uint32_t>::max() ||
+          length == 0 || length > std::numeric_limits<uint32_t>::max() ||
+          end < offset || end - offset != length ||
+          offset < previous_end ||
+          stream_class > static_cast<uint8_t>(
+              PostR1Experts::StreamClass::kMixed)) {
+        return false;
+      }
+      if (end > input_bytes || end > stop_offset) break;
+      spans->push_back({
+          static_cast<uint32_t>(region), offset,
+          static_cast<uint32_t>(length),
+          static_cast<uint8_t>(stream_class)});
+      previous_end = end;
+    }
+  }
+
+  recipient_offsets.assign(spans->size(), 0);
+  for (const RecipientSpan& span : *spans) {
+    recipient_offsets[span.region] = span.offset;
+  }
+  return !spans->empty();
+}
+
+bool LoadRankedPageCandidates(const std::vector<RecipientSpan>& spans) {
+  ranked_page_candidates.assign(spans.size(), {});
+  const char* path = getenv("FX4_WINNER_PAGE_CANDIDATES_CSV");
+  if (!path || !*path) return true;
+  std::ifstream input(path);
+  std::string line;
+  constexpr const char* expected =
+      "pack_id,recipient_offset,recipient_length,candidate_rank,"
+      "donor_offset,donor_length,phrase_score,signature_hits";
+  constexpr const char* classified =
+      "pack_id,recipient_offset,recipient_length,candidate_rank,"
+      "donor_offset,donor_length,phrase_score,signature_hits,"
+      "recipient_class,donor_class";
+  if (!input.is_open() || !std::getline(input, line) ||
+      (line != expected && line != classified)) {
+    return false;
+  }
+  const size_t expected_fields = line == classified ? 10u : 8u;
+  while (std::getline(input, line)) {
+    const auto fields = Split(line, ',');
+    if (fields.size() != expected_fields) return false;
+    std::uint64_t region = 0;
+    std::uint64_t recipient_offset = 0;
+    std::uint64_t recipient_length = 0;
+    std::uint64_t donor_offset = 0;
+    std::uint64_t donor_length = 0;
+    std::uint64_t score = 0;
+    if (!ParseU64(fields[0], &region) ||
+        !ParseU64(fields[1], &recipient_offset) ||
+        !ParseU64(fields[2], &recipient_length) ||
+        !ParseU64(fields[4], &donor_offset) ||
+        !ParseU64(fields[5], &donor_length) ||
+        !ParseU64(fields[6], &score) ||
+        region >= spans.size() ||
+        recipient_offset != spans[region].offset ||
+        recipient_length != spans[region].length ||
+        donor_offset > std::numeric_limits<std::uint32_t>::max() ||
+        donor_length < 256 || donor_length > 65536 ||
+        (donor_length & (donor_length - 1)) != 0 ||
+        (donor_offset & (kAlignment - 1)) != 0 ||
+        donor_offset + donor_length > recipient_offset ||
+        score > std::numeric_limits<std::uint32_t>::max()) {
+      return false;
+    }
+    ranked_page_candidates[region].push_back({
+        static_cast<std::uint32_t>(donor_offset),
+        static_cast<std::uint32_t>(donor_length),
+        static_cast<std::uint32_t>(score)});
+  }
+  return true;
+}
+
+bool LoadRankedRecipientFilter(const std::vector<RecipientSpan>& spans) {
+  ranked_recipient_filter.clear();
+  ranked_recipient_filter_enabled = false;
+  const char* path = getenv("FX4_WINNER_RECIPIENTS_CSV");
+  if (!path || !*path) return true;
+  std::ifstream input(path);
+  std::string line;
+  constexpr const char* expected =
+      "rank,pack_id,recipient_offset,recipient_length,best_phrase_score,"
+      "best_signature_hits,candidate_count";
+  if (!input.is_open() || !std::getline(input, line) || line != expected) {
+    return false;
+  }
+  const std::uint64_t limit =
+      EnvironmentU64("FX4_WINNER_RECIPIENT_LIMIT", 0);
+  while (std::getline(input, line)) {
+    const auto fields = Split(line, ',');
+    if (fields.size() != 7) return false;
+    std::uint64_t rank = 0;
+    std::uint64_t region = 0;
+    std::uint64_t offset = 0;
+    std::uint64_t length = 0;
+    std::uint64_t score = 0;
+    if (!ParseU64(fields[0], &rank) ||
+        !ParseU64(fields[1], &region) ||
+        !ParseU64(fields[2], &offset) ||
+        !ParseU64(fields[3], &length) ||
+        !ParseU64(fields[4], &score) ||
+        region >= spans.size() || offset != spans[region].offset ||
+        length != spans[region].length) {
+      return false;
+    }
+    if (score == 0) continue;
+    if (limit != 0 && ranked_recipient_filter.size() >= limit) break;
+    ranked_recipient_filter.insert(static_cast<std::uint32_t>(region));
+  }
+  ranked_recipient_filter_enabled = true;
+  return !ranked_recipient_filter.empty();
+}
+
+bool SearchRecipient(std::uint32_t region) {
+  return !ranked_recipient_filter_enabled ||
+      ranked_recipient_filter.count(region) != 0;
 }
 
 std::string SequenceText(const DonorSequence& sequence) {
@@ -335,10 +601,14 @@ bool LoadTrials(const std::string& base,
     const std::vector<std::string> fields = Split(line, ',');
     if (fields.size() != 12) return false;
     uint64_t region = 0;
+    uint64_t recipient_offset = 0;
     uint64_t trial_id = 0;
     uint64_t payload = 0;
-    if (!ParseU64(fields[0], &region) || !ParseU64(fields[2], &trial_id) ||
-        !ParseU64(fields[8], &payload) || region > 0xffff) {
+    if (!ParseU64(fields[0], &region) ||
+        !ParseU64(fields[1], &recipient_offset) ||
+        !ParseU64(fields[2], &trial_id) ||
+        !ParseU64(fields[8], &payload) || region > 0xffff ||
+        recipient_offset != RecipientOffset(static_cast<uint32_t>(region))) {
       return false;
     }
     DonorSequence sequence;
@@ -362,10 +632,14 @@ bool LoadSelections(const std::string& base,
     const std::vector<std::string> fields = Split(line, ',');
     if (fields.size() != 10) return false;
     uint64_t region = 0;
+    uint64_t recipient_offset = 0;
     uint64_t baseline = 0;
     uint64_t selected = 0;
-    if (!ParseU64(fields[0], &region) || !ParseU64(fields[2], &baseline) ||
-        !ParseU64(fields[3], &selected) || region >= selections->size()) {
+    if (!ParseU64(fields[0], &region) ||
+        !ParseU64(fields[1], &recipient_offset) ||
+        !ParseU64(fields[2], &baseline) ||
+        !ParseU64(fields[3], &selected) || region >= selections->size() ||
+        recipient_offset != RecipientOffset(static_cast<uint32_t>(region))) {
       return false;
     }
     SelectionRecord record;
@@ -390,7 +664,7 @@ bool WriteStatus(const std::string& base, const char* phase,
       "\nnew_trials_this_run=%" PRIu64 "\ngain_bytes=%" PRId64
       "\ndonors=%s\npid=%ld\n",
       phase, region,
-      static_cast<uint64_t>(region) * DonorPlan::kChunkSize,
+      RecipientOffset(region),
       new_trials, gain,
       sequence.empty() ? "-" : SequenceText(sequence).c_str(),
       static_cast<long>(getpid()));
@@ -415,7 +689,7 @@ bool AppendTrial(const std::string& base, uint32_t region,
   const int length = snprintf(row, sizeof(row),
       "%u,%" PRIu64 ",%" PRIu64 ",%s,%zu,%zu,%s,%" PRIu64
       ",%" PRIu64 ",%" PRId64 ",%" PRId64 ",%s\n",
-      region, static_cast<uint64_t>(region) * DonorPlan::kChunkSize,
+      region, RecipientOffset(region),
       trial_id, stage, sequence.size(), sequence.size(), donors.c_str(),
       baseline_bytes, payload_bytes, gain, marginal_gain, status);
   if (length <= 0 || static_cast<size_t>(length) >= sizeof(row)) return false;
@@ -434,21 +708,28 @@ bool AppendSelection(const std::string& base, uint32_t region,
     uint64_t exact_trials) {
   const int64_t gain = static_cast<int64_t>(selection.baseline_bytes) -
       static_cast<int64_t>(selection.selected_bytes);
-  const int64_t metadata = selection.sequence.empty()
-      ? 0 : 3 + static_cast<int64_t>(7 * selection.sequence.size());
+  const int64_t metadata =
+      static_cast<int64_t>(DonorPlanMetadataCost(selection.sequence.size()));
   const std::string donors = selection.sequence.empty()
       ? "-" : SequenceText(selection.sequence);
   char row[2048] = {};
   const int length = snprintf(row, sizeof(row),
       "%u,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRId64
       ",%" PRId64 ",%zu,%s,%u,%" PRIu64 "\n",
-      region, static_cast<uint64_t>(region) * DonorPlan::kChunkSize,
+      region, RecipientOffset(region),
       selection.baseline_bytes, selection.selected_bytes, gain,
       gain - metadata, selection.sequence.size(), donors.c_str(),
       candidate_count, exact_trials);
-  return length > 0 && static_cast<size_t>(length) < sizeof(row) &&
-      AppendRow(SelectionPath(base),
-          std::string(row, static_cast<size_t>(length)));
+  if (length <= 0 || static_cast<size_t>(length) >= sizeof(row) ||
+      !AppendRow(SelectionPath(base),
+          std::string(row, static_cast<size_t>(length)))) {
+    return false;
+  }
+  // Phase 2 authoritative cost ledger: span_cost/copy_cost are 0 until the
+  // causal span selector (Phase 11) and COPY events (Phase 13) exist.
+  return AppendCostAccounting(base, region, selection.baseline_bytes,
+      selection.selected_bytes,
+      DonorPlanMetadataCost(selection.sequence.size()), 0, 0);
 }
 
 bool AppendSpans(const std::string& base, uint32_t region,
@@ -466,12 +747,12 @@ bool AppendSpans(const std::string& base, uint32_t region,
   order.resize(std::min<size_t>(order.size(), top_spans));
   for (size_t rank = 0; rank < order.size(); ++rank) {
     const uint64_t span_offset =
-        static_cast<uint64_t>(region) * DonorPlan::kChunkSize +
+        RecipientOffset(region) +
         static_cast<uint64_t>(order[rank]) * kLossSpanBytes;
     char row[256] = {};
     const int length = snprintf(row, sizeof(row),
         "%u,%" PRIu64 ",%zu,%" PRIu64 ",%u\n",
-        region, static_cast<uint64_t>(region) * DonorPlan::kChunkSize,
+        region, RecipientOffset(region),
         rank, span_offset, baseline.span_bytes[order[rank]]);
     if (length <= 0 || static_cast<size_t>(length) >= sizeof(row) ||
         !AppendRow(SpanPath(base),
@@ -492,7 +773,7 @@ bool WriteCandidateRows(const std::string& base, uint32_t region,
         : (candidates[rank].score == 0 ? "recent_fallback" : "phrase_token");
     const int length = snprintf(row, sizeof(row),
         "%u,%" PRIu64 ",%zu,%u,%u,%u,%s\n",
-        region, static_cast<uint64_t>(region) * DonorPlan::kChunkSize,
+        region, RecipientOffset(region),
         rank, candidates[rank].offset, candidates[rank].length,
         candidates[rank].score, source);
     if (length <= 0 || static_cast<size_t>(length) >= sizeof(row) ||
@@ -521,19 +802,17 @@ bool ReadWindow(int input_fd, uint32_t offset, uint32_t length,
   return true;
 }
 
-bool ReplaySequence(int input_fd, const DonorSequence& sequence,
-    Predictor* predictor) {
-  std::vector<uint8_t> bytes;
+bool LoadDonorProfile(int input_fd, const DonorSequence& sequence,
+    std::vector<uint8_t>* profile, std::vector<uint32_t>* segment_lengths) {
+  profile->clear();
+  segment_lengths->clear();
+  std::vector<uint8_t> window;
   for (const DonorWindow& donor : sequence) {
-    if (!ReadWindow(input_fd, donor.offset, donor.length, &bytes)) {
+    if (!ReadWindow(input_fd, donor.offset, donor.length, &window)) {
       return false;
     }
-    for (uint8_t byte : bytes) {
-      for (int bit = 7; bit >= 0; --bit) {
-        predictor->Predict();
-        predictor->Perceive((byte >> bit) & 1);
-      }
-    }
+    profile->insert(profile->end(), window.begin(), window.end());
+    segment_lengths->push_back(donor.length);
   }
   return true;
 }
@@ -567,7 +846,7 @@ bool ProbeSequence(const DonorSequence& sequence, const char* bytes,
     int input_fd, bool collect_spans, ProbeMessage* result) {
   int message_pipe[2] = {-1, -1};
   if (pipe(message_pipe) != 0) return false;
-  const uint64_t start_size = encoder->OutputSize();
+  const uint64_t start_size = encoder->ProjectedFinalOutputSize();
   const pid_t probe = fork();
   if (probe < 0) {
     close(message_pipe[0]);
@@ -580,10 +859,24 @@ bool ProbeSequence(const DonorSequence& sequence, const char* bytes,
     SetCpuFromEnvironment("FX4_DONOR_TRIAL_CPU");
     encoder->SetCountOnly(true);
     ProbeMessage message;
-    const bool replay_ok = ReplaySequence(input_fd, sequence, predictor);
-    message.ok = replay_ok && EncodeRegion(bytes, size, position, encoder,
+    bool profile_ok = true;
+    if (!sequence.empty()) {
+      std::vector<uint8_t> profile;
+      std::vector<uint32_t> segment_lengths;
+      profile_ok = LoadDonorProfile(
+          input_fd, sequence, &profile, &segment_lengths);
+      if (profile_ok) {
+        const std::uint32_t mask = PostR1Experts::kDonorProfile;
+        predictor->EnablePostR1Portfolio(mask);
+        predictor->SetPostR1DonorProfile(profile, segment_lengths);
+        predictor->SetPostR1Span(position, mask,
+            current_recipient_stream_class, current_recipient_stream_class);
+      }
+    }
+    message.ok = profile_ok && EncodeRegion(bytes, size, position, encoder,
         nullptr, collect_spans ? &message : nullptr) ? 1u : 0u;
-    message.payload_bytes = encoder->OutputSize() - start_size;
+    message.payload_bytes =
+        encoder->ProjectedFinalOutputSize() - start_size;
     const bool sent = WriteAll(message_pipe[1], &message, sizeof(message));
     close(message_pipe[1]);
     _exit(sent && message.ok ? 0 : 2);
@@ -673,8 +966,8 @@ class CausalPhraseIndex {
   }
 
   std::vector<std::pair<uint32_t, uint32_t>> Find(
-      const char* input, const ProbeMessage& baseline, uint32_t top_spans,
-      uint64_t recipient_offset, uint32_t limit) const {
+      const char* input, size_t size, const ProbeMessage& baseline,
+      uint32_t top_spans, uint64_t recipient_offset, uint32_t limit) const {
     std::vector<uint32_t> spans(baseline.span_count);
     for (uint32_t index = 0; index < baseline.span_count; ++index) {
       spans[index] = index;
@@ -690,8 +983,10 @@ class CausalPhraseIndex {
     std::unordered_map<uint32_t, uint32_t> scores;
     for (uint32_t span : spans) {
       const size_t start = static_cast<size_t>(span) * kLossSpanBytes;
+      if (start >= size) continue;
+      const size_t span_end = std::min(size, start + kLossSpanBytes);
       for (size_t local = start;
-           local + kAlignment <= start + kLossSpanBytes;
+           local + kAlignment <= span_end;
            local += kAlignment) {
         for (size_t phrase = 0; phrase < kAlignment; phrase += 16) {
           Score(PhraseHash(bytes + local + phrase), recipient_offset,
@@ -774,13 +1069,12 @@ void AddUniqueWindow(const DonorWindow& candidate,
 }
 
 uint64_t TotalBytes(const ScoredSequence& scored) {
-  return scored.payload_bytes + (scored.sequence.empty()
-      ? 0u : 3u + 7u * scored.sequence.size());
+  return scored.payload_bytes + DonorPlanMetadataCost(scored.sequence.size());
 }
 
 uint64_t TotalBytes(const SelectionRecord& selection) {
-  return selection.selected_bytes + (selection.sequence.empty()
-      ? 0u : 3u + 7u * selection.sequence.size());
+  return selection.selected_bytes +
+      DonorPlanMetadataCost(selection.sequence.size());
 }
 
 bool BeatsSelection(
@@ -869,13 +1163,20 @@ SearchResult SearchRegion(uint32_t region, const char* bytes, size_t size,
 
 
   std::vector<DonorWindow> initial;
-  for (const DonorPlan::CandidateSpec& candidate :
-       donor_plan->CandidateSpecs(region)) {
-    AddUniqueWindow({candidate.donor_offset, candidate.length,
-        std::numeric_limits<uint32_t>::max()}, position, &initial);
+  if (region < ranked_page_candidates.size()) {
+    for (const DonorWindow& candidate : ranked_page_candidates[region]) {
+      AddUniqueWindow(candidate, position, &initial);
+    }
   }
-  const auto matches = phrase_index.Find(bytes, baseline, config.top_spans,
-      position, config.candidate_offsets);
+  if (!recipient_spans_from_csv) {
+    for (const DonorPlan::CandidateSpec& candidate :
+         donor_plan->CandidateSpecs(region)) {
+      AddUniqueWindow({candidate.donor_offset, candidate.length,
+          std::numeric_limits<uint32_t>::max()}, position, &initial);
+    }
+  }
+  const auto matches = phrase_index.Find(bytes, size, baseline,
+      config.top_spans, position, config.candidate_offsets);
   for (const auto& match : matches) {
     AddUniqueWindow({match.first, kInitialLength, match.second},
         position, &initial);
@@ -896,8 +1197,11 @@ SearchResult SearchRegion(uint32_t region, const char* bytes, size_t size,
             ? left.score > right.score
             : left.offset < right.offset;
       });
-  const size_t initial_limit = config.candidate_offsets +
-      donor_plan->CandidateSpecs(region).size();
+  const size_t planned_count = region < ranked_page_candidates.size()
+      ? ranked_page_candidates[region].size() : 0;
+  const size_t initial_limit = config.candidate_offsets + planned_count +
+      (recipient_spans_from_csv
+          ? 0 : donor_plan->CandidateSpecs(region).size());
   if (initial.size() > initial_limit) initial.resize(initial_limit);
   if (!WriteCandidateRows(ledger_base, region, initial)) {
     return SearchResult::kFailed;
@@ -905,16 +1209,28 @@ SearchResult SearchRegion(uint32_t region, const char* bytes, size_t size,
 
   bool paused = false;
   if (config.planned_only) {
-    DonorSequence planned;
     const size_t count = std::min<size_t>(
         config.planned_donors, initial.size());
+    std::vector<size_t> prefix_sizes;
     if (count != 0) {
-      planned.assign(initial.begin(), initial.begin() + count);
+      if (config.planned_prefixes) {
+        for (size_t prefix = 1; prefix < count; prefix <<= 1) {
+          prefix_sizes.push_back(prefix);
+        }
+      }
+      prefix_sizes.push_back(count);
+    }
+    static const char* stages[] = {
+        "planned0", "planned1", "planned2", "planned3", "planned4",
+        "planned5", "planned6", "planned7", "planned8"};
+    for (const size_t prefix : prefix_sizes) {
+      DonorSequence planned(initial.begin(), initial.begin() + prefix);
       ScoredSequence scored;
-      if (Evaluate(region, "planned", planned, baseline.payload_bytes,
-          baseline.payload_bytes, bytes, size, position, encoder, predictor,
-          input_fd, config, ledger_base, trials, next_trial_id, new_trials,
-          &paused, &scored) && BeatsSelection(scored, *selection)) {
+      if (Evaluate(region, stages[std::min<size_t>(prefix, 8u)], planned,
+          baseline.payload_bytes, baseline.payload_bytes, bytes, size,
+          position, encoder, predictor, input_fd, config, ledger_base, trials,
+          next_trial_id, new_trials, &paused, &scored) &&
+          BeatsSelection(scored, *selection)) {
         selection->selected_bytes = scored.payload_bytes;
         selection->sequence = scored.sequence;
       }
@@ -1105,8 +1421,17 @@ bool RunDonorWinnerSearch(const std::string& input_path,
   if (pretrain_dictionary) preprocessor::Pretrain(&predictor, dictionary);
   Encoder encoder(&output, &predictor);
 
-  const size_t complete_regions =
-      static_cast<size_t>(input_bytes / DonorPlan::kChunkSize);
+  std::vector<RecipientSpan> recipient_spans;
+  if (!LoadRecipientSpans(input_bytes, &recipient_spans)) {
+    close(input_fd);
+    return false;
+  }
+  if (!LoadRankedPageCandidates(recipient_spans) ||
+      !LoadRankedRecipientFilter(recipient_spans)) {
+    close(input_fd);
+    return false;
+  }
+  const size_t complete_regions = recipient_spans.size();
   std::unordered_map<std::string, TrialRecord> trials;
   std::vector<SelectionRecord> selections(complete_regions);
   uint64_t next_trial_id = 1;
@@ -1124,24 +1449,45 @@ bool RunDonorWinnerSearch(const std::string& input_path,
   uint64_t new_trials = 0;
   uint32_t searched_regions = 0;
 
-  while (position < input_bytes) {
-    const size_t wanted = static_cast<size_t>(
-        std::min<uint64_t>(buffer.size(), input_bytes - position));
-    input.read(buffer.data(), static_cast<std::streamsize>(wanted));
+  auto encode_baseline = [&](uint64_t byte_count) {
+    while (byte_count != 0) {
+      const size_t count = static_cast<size_t>(
+          std::min<uint64_t>(buffer.size(), byte_count));
+      input.read(buffer.data(), static_cast<std::streamsize>(count));
+      if (static_cast<size_t>(input.gcount()) != count ||
+          !EncodeRegion(buffer.data(), count, position, &encoder,
+              donor_plan, nullptr)) {
+        return false;
+      }
+      phrase_index.AddRegion(buffer.data(), count, position);
+      position += count;
+      byte_count -= count;
+    }
+    return true;
+  };
+
+  for (const RecipientSpan& span : recipient_spans) {
+    if (span.offset < position ||
+        span.offset + span.length > input_bytes ||
+        !encode_baseline(span.offset - position)) {
+      close(input_fd);
+      return false;
+    }
+    if (buffer.size() < span.length) buffer.resize(span.length);
+    input.read(buffer.data(), static_cast<std::streamsize>(span.length));
     const size_t count = static_cast<size_t>(input.gcount());
-    if (count != wanted) {
+    if (count != span.length) {
       close(input_fd);
       return false;
     }
 
-    const uint32_t region =
-        static_cast<uint32_t>(position / DonorPlan::kChunkSize);
-    const uint64_t start_size = encoder.OutputSize();
+    const uint32_t region = span.region;
+    current_recipient_stream_class = span.stream_class;
+    const uint64_t start_size = encoder.ProjectedFinalOutputSize();
     SelectionRecord selection;
-    if (count == DonorPlan::kChunkSize && region < selections.size() &&
-        selections[region].valid) {
+    if (region < selections.size() && selections[region].valid) {
       selection = selections[region];
-    } else if (count == DonorPlan::kChunkSize &&
+    } else if (SearchRecipient(region) &&
         region >= config.start_region &&
         (config.max_regions == 0 || searched_regions < config.max_regions)) {
       const SearchResult result = SearchRegion(region, buffer.data(), count,
@@ -1177,23 +1523,19 @@ bool RunDonorWinnerSearch(const std::string& input_path,
       selection.selected_bytes = 0;
     }
 
-    if (!selection.sequence.empty() &&
-        !ReplaySequence(input_fd, selection.sequence, &predictor)) {
-      close(input_fd);
-      return false;
-    }
     if (!EncodeRegion(buffer.data(), count, position, &encoder,
         donor_plan, nullptr)) {
       close(input_fd);
       return false;
     }
-    const uint64_t actual_bytes = encoder.OutputSize() - start_size;
-    if (selection.valid && selection.selected_bytes != 0 &&
-        actual_bytes != selection.selected_bytes) {
+    const uint64_t actual_bytes =
+        encoder.ProjectedFinalOutputSize() - start_size;
+    if (selection.valid && selection.baseline_bytes != 0 &&
+        actual_bytes != selection.baseline_bytes) {
       fprintf(stderr,
-          "winner replay mismatch at region %u: expected %" PRIu64
+          "baseline replay mismatch at region %u: expected %" PRIu64
           ", got %" PRIu64 "\n",
-          region, selection.selected_bytes, actual_bytes);
+          region, selection.baseline_bytes, actual_bytes);
       close(input_fd);
       return false;
     }
@@ -1207,17 +1549,25 @@ bool RunDonorWinnerSearch(const std::string& input_path,
         close(input_fd);
         return false;
       }
+      const uint32_t next_region = region + 1;
       fprintf(paused,
           "recipient_region=%u\nrecipient_offset=%" PRIu64
           "\nnew_trials=%" PRIu64 "\n",
-          region + 1, position, new_trials);
+          next_region, RecipientOffset(next_region), new_trials);
       const bool ok = SyncFile(paused) && WriteStatus(ledger_path,
-          "region_limit", region + 1, new_trials, {}, 0);
+          "region_limit", next_region, new_trials, {}, 0);
       fclose(paused);
       close(input_fd);
       *output_bytes = 0;
       return ok;
     }
+  }
+
+  const uint64_t target_bytes = std::min(input_bytes, config.stop_offset);
+  if (position > target_bytes ||
+      !encode_baseline(target_bytes - position)) {
+    close(input_fd);
+    return false;
   }
 
   encoder.Flush();
@@ -1233,7 +1583,7 @@ bool RunDonorWinnerSearch(const std::string& input_path,
   fprintf(complete,
       "regions=%zu\ninput_bytes=%" PRIu64 "\nnew_trials=%" PRIu64
       "\npid=%ld\n",
-      complete_regions, input_bytes, new_trials,
+      complete_regions, target_bytes, new_trials,
       static_cast<long>(getpid()));
   const bool ok = SyncFile(complete);
   fclose(complete);

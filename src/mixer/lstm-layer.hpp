@@ -6,34 +6,9 @@
 #include <algorithm>
 #include <numeric>
 
-#define FAST_TANH tanh //fast_tanh
-#define FAST_TANH_VEC tanh //fast_tanh_vec
+#define FAST_TANH tanh
+#define FAST_TANH_VEC tanh
 namespace {
-// inline float fast_tanh(const float x)
-// {
-//     const float ax = fabs(x);
-//     const float x2 = x * x;
-
-//     return(x * (2.45550750702956f + 2.45550750702956f * ax +
-//         (0.893229853513558f + 0.821226666969744f * ax) * x2) /
-//         (2.44506634652299f + (2.44506634652299f + x2) *
-//             fabs(x + 0.814642734961073f * x * ax)));
-// }
-
-// float fast_tanh(float x){
-//   float x2 = x * x;
-//   float a = x * (135135.0f + x2 * (17325.0f + x2 * (378.0f + x2)));
-//   float b = 135135.0f + x2 * (62370.0f + x2 * (3150.0f + x2 * 28.0f));
-//   return a / b;
-// }
-// 
-// template <class _Tp>
-// inline std::valarray<_Tp> fast_tanh_vec(const std::valarray<_Tp>& __x) {
-//   std::valarray<_Tp> __tmp(__x.size());
-//   for (size_t __i = 0; __i < __x.size(); ++__i)
-//     __tmp[__i] = fast_tanh(__x[__i]);
-//   return __tmp;
-// }
 
 inline void Adam(std::valarray<float>* g, std::valarray<float>* m,
     std::valarray<float>* v, std::valarray<float>* w, float learning_rate,

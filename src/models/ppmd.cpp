@@ -1203,6 +1203,7 @@ uint trT[256];
 uint band_sqp[4][256];
 uint band_trF[4][256];
 uint band_trT[4][256];
+bool compute_order_bands = true;
 int effective_order;
 uint last_escape_depth = 0;
 uint escape_ema_q = 0;
@@ -1383,6 +1384,7 @@ void ppmd_PrepareByte( void ) {
   uint band_end[4] = {};
   int context_order = effective_order;
   auto capture_bands = [&]() {
+    if (!compute_order_bands) return;
     for (int band = 0; band < 4; ++band) {
       if (band_end[band] == 0 && context_order <= band_limit[band]) {
         band_end[band] = SQ_ptr;
@@ -1418,10 +1420,12 @@ void ppmd_PrepareByte( void ) {
       capture_bands();
     }
   }
-  for (int band = 0; band < 4; ++band) {
-    if (band_end[band] == 0) band_end[band] = SQ_ptr;
-    ConvertShadowSQ(band_sqp[band], band_trF[band], band_trT[band],
-        band_end[band]);
+  if (compute_order_bands) {
+    for (int band = 0; band < 4; ++band) {
+      if (band_end[band] == 0) band_end[band] = SQ_ptr;
+      ConvertShadowSQ(band_sqp[band], band_trF[band], band_trT[band],
+          band_end[band]);
+    }
   }
   EscCount++;
   NumMasked = 0;
@@ -1477,14 +1481,16 @@ void ppmd_UpdateByte( uint c ) {
 unsigned long long counter_ = 0;
 unsigned long long last_mmap_remap_counter_ = 0;
 
+#if !FX4_DONOR_FORK_DISCOVERY
 static void DropPpmHeapResidency(ppmd_Model* ppmd_model) {
-  // MADV_DONTNEED clears present PTEs for the shared file mapping and drops
-  // them from VmRSS. Later faults reload the same bytes from ppm.temp/page
-  // cache, so compression decisions stay bit-identical without remapping.
+  // Keep the file mapping at a stable address because the model stores raw
+  // pointers into it. MADV_DONTNEED evicts resident shared pages without
+  // changing model bytes or compression decisions.
   if (madvise(ppmd_model->HeapStart, mmap_size, MADV_DONTNEED) != 0) {
     exit(EXIT_FAILURE);
   }
 }
+#endif
 
 PPMD::PPMD(int order, int memory, const unsigned int& bit_context,
     const std::vector<bool>& vocab) : ByteModel(vocab), byte_(bit_context) {
@@ -1522,13 +1528,26 @@ std::valarray<float>& PPMD::Predict() {
 }
 
 const std::array<float, 4>& PPMD::PredictOrderBands() {
+  // Full-vocabulary streams need no filtered copy (the !vocab_full_ path's
+  // local band_tree_*_ arrays exist specifically to mask out disabled
+  // bytes, which cannot occur here). Read the already-built PPMd trees
+  // directly and skip copying 4*256 counters every byte -- same numeric
+  // values, one fewer array pass.
   for (int band = 0; band < 4; ++band) {
-    const unsigned int total = band_tree_total_[band][tree_context_];
-    const unsigned int zero = band_tree_zero_[band][tree_context_];
+    const unsigned int total = vocab_full_
+        ? ppmd_model_->band_trT[band][tree_context_]
+        : band_tree_total_[band][tree_context_];
+    const unsigned int zero = vocab_full_
+        ? ppmd_model_->band_trF[band][tree_context_]
+        : band_tree_zero_[band][tree_context_];
     band_outputs_[band] = total == 0 ? 0.5f :
         static_cast<float>(total - zero) / static_cast<float>(total);
   }
   return band_outputs_;
+}
+
+void PPMD::SetOrderBandsNeeded(bool needed) {
+  ppmd_model_->compute_order_bands = needed;
 }
 
 unsigned int PPMD::EffectiveOrder() const {
@@ -1559,10 +1578,12 @@ void PPMD::ByteUpdate() {
       tree_zero_[i] = ppmd_model_->trF[i];
       tree_total_[i] = ppmd_model_->trT[i];
     }
-    for (int band = 0; band < 4; ++band) {
-      for (int i = 0; i < 256; ++i) {
-        band_tree_zero_[band][i] = ppmd_model_->band_trF[band][i];
-        band_tree_total_[band][i] = ppmd_model_->band_trT[band][i];
+    if (ppmd_model_->compute_order_bands) {
+      for (int band = 0; band < 4; ++band) {
+        for (int i = 0; i < 256; ++i) {
+          band_tree_zero_[band][i] = ppmd_model_->band_trF[band][i];
+          band_tree_total_[band][i] = ppmd_model_->band_trT[band][i];
+        }
       }
     }
     for (unsigned char c : disabled_bytes_) {
@@ -1577,36 +1598,34 @@ void PPMD::ByteUpdate() {
           else tree_zero_[node] = 0;
         }
       }
-      for (int band = 0; band < 4; ++band) {
-        const unsigned int band_mass =
-            ppmd_model_->band_sqp[band][c] ?
-            ppmd_model_->band_sqp[band][c] : 1U;
-        for (int bit_index = 8; bit_index != 0; --bit_index) {
-          const unsigned int node = (256U + c) >> bit_index;
-          const unsigned int bit = (c >> (bit_index - 1)) & 1U;
-          if (band_tree_total_[band][node] >= band_mass) {
-            band_tree_total_[band][node] -= band_mass;
-          } else {
-            band_tree_total_[band][node] = 0;
-          }
-          if (bit == 0) {
-            if (band_tree_zero_[band][node] >= band_mass) {
-              band_tree_zero_[band][node] -= band_mass;
+      if (ppmd_model_->compute_order_bands) {
+        for (int band = 0; band < 4; ++band) {
+          const unsigned int band_mass =
+              ppmd_model_->band_sqp[band][c] ?
+              ppmd_model_->band_sqp[band][c] : 1U;
+          for (int bit_index = 8; bit_index != 0; --bit_index) {
+            const unsigned int node = (256U + c) >> bit_index;
+            const unsigned int bit = (c >> (bit_index - 1)) & 1U;
+            if (band_tree_total_[band][node] >= band_mass) {
+              band_tree_total_[band][node] -= band_mass;
             } else {
-              band_tree_zero_[band][node] = 0;
+              band_tree_total_[band][node] = 0;
+            }
+            if (bit == 0) {
+              if (band_tree_zero_[band][node] >= band_mass) {
+                band_tree_zero_[band][node] -= band_mass;
+              } else {
+                band_tree_zero_[band][node] = 0;
+              }
             }
           }
         }
       }
     }
-  } else {
-    for (int band = 0; band < 4; ++band) {
-      for (int i = 0; i < 256; ++i) {
-        band_tree_zero_[band][i] = ppmd_model_->band_trF[band][i];
-        band_tree_total_[band][i] = ppmd_model_->band_trT[band][i];
-      }
-    }
   }
+  // vocab_full_ case: no copy needed here at all -- PredictOrderBands()
+  // (and PPMD::Predict()/tree_zero_/tree_total_'s own vocab_full_ branch,
+  // unchanged above) read straight from ppmd_model_'s trees.
   for (int i = 0; i < 256; ++i) {
     probs_[i] = ppmd_model_->sqp[i];
     if (probs_[i] < 1) probs_[i] = 1;
