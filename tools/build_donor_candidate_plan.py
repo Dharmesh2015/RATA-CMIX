@@ -84,7 +84,10 @@ def main() -> int:
     with args.edges.open(newline="", encoding="utf-8") as source:
         for row in csv.DictReader(source):
             recipient = int(row["recipient_region"])
-            donor = int(row["donor_seed_offset"])
+            donor_text = row.get("donor_seed_offset") or row.get("donor_offset")
+            if donor_text is None:
+                raise SystemExit("edge CSV requires donor_seed_offset or donor_offset")
+            donor = int(donor_text)
             gain = proxy_gain(row)
             key = (recipient, donor)
             if key in seen:
@@ -102,6 +105,7 @@ def main() -> int:
                 deferred_rows.append((recipient, donor, gain))
                 continue
             row["_gain"] = str(gain)
+            row["_donor"] = str(donor)
             causal[recipient].append(row)
 
     selected: list[tuple[int, int, int, int]] = []
@@ -109,14 +113,14 @@ def main() -> int:
         rows.sort(
             key=lambda row: (
                 -int(row["_gain"]),
-                int(row["donor_seed_offset"]),
+                int(row["_donor"]),
             )
         )
         for rank, row in enumerate(rows[: args.max_per_recipient]):
             selected.append(
                 (
                     recipient,
-                    int(row["donor_seed_offset"]),
+                    int(row["_donor"]),
                     int(row["_gain"]),
                     rank,
                 )

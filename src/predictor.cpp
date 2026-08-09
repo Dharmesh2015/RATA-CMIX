@@ -26,8 +26,17 @@ Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled)
   AddWord();
   AddMatch();
   AddDoubleIndirect();
+  // Construct the accepted mixer/LSTM before auxiliary models consume rand().
+  // This preserves the baseline LSTM initialization exactly.
   AddMixers();
+#if FX4_MINI_CMIX
+  mini_shared_map_.assign(256u * 100000u, 0);
+  AddMiniCmix();
+#endif
   auxiliary_size_ = 3;
+#if FX4_MINI_CMIX
+  mini_cmix_recent_error_.fill(0.25f);
+#endif
 }
 
 void Predictor::FreeFxcmMemory() {
@@ -50,7 +59,7 @@ void Predictor::EnablePostR1Portfolio(std::uint32_t mask) {
 
 void Predictor::SetPostR1Span(std::uint64_t logical_offset,
     std::uint32_t mask, std::uint8_t stream_class,
-    std::uint8_t profile_id) {
+    std::uint8_t profile_id, std::uint16_t mini_model_mask) {
 #if FX4_SELECTIVE_POSTR1
   if (mask != 0 && !postr1_experts_) EnablePostR1Portfolio(mask);
   if (!postr1_experts_) return;
@@ -61,7 +70,8 @@ void Predictor::SetPostR1Span(std::uint64_t logical_offset,
   }
   postr1_residual_gain_ = (profile_id >> 6) & 3u;
   postr1_experts_->SetSpan(logical_offset, mask,
-      static_cast<PostR1Experts::StreamClass>(stream_class), profile_id);
+      static_cast<PostR1Experts::StreamClass>(stream_class), profile_id,
+      mini_model_mask);
   byte_model_->SetOrderBandsNeeded(
       (postr1_experts_->training_mask() & PostR1Experts::kPpmdEscapeOrder) != 0);
 #else
@@ -69,6 +79,7 @@ void Predictor::SetPostR1Span(std::uint64_t logical_offset,
   (void)mask;
   (void)stream_class;
   (void)profile_id;
+  (void)mini_model_mask;
 #endif
 }
 
@@ -83,6 +94,14 @@ void Predictor::SetPostR1DonorProfile(
 #else
   (void)bytes;
   (void)segment_lengths;
+#endif
+}
+
+bool Predictor::HasPostR1DonorProfile() const {
+#if FX4_SELECTIVE_POSTR1
+  return postr1_experts_ && postr1_experts_->HasDonorProfile();
+#else
+  return false;
 #endif
 }
 
@@ -235,6 +254,111 @@ void Predictor::AddDoubleIndirect() {
   indirect_ns_models_.emplace_back(manager_.nonstationary_, manager_.ind5,  manager_.bit_context_, delta, manager_.shared_map_);
 }
 
+#if FX4_MINI_CMIX
+void Predictor::AddMiniCmix() {
+  constexpr int direct_limit = 30;
+  constexpr float direct_delta = 0.0f;
+  for (unsigned int order = 0; order < 3; ++order) {
+    const Context& context =
+        manager_.AddContextHashContext(manager_.bit_context_, order, 8);
+    mini_direct_models_.emplace_back(context.GetContext(),
+        manager_.bit_context_, direct_limit, direct_delta, context.Size());
+  }
+  {
+    const Context& context =
+        manager_.AddContextHashContext(manager_.bit_context_, 3, 8);
+    mini_direct_hash_models_.emplace_back(context.GetContext(),
+        manager_.bit_context_, direct_limit, direct_delta, 100000);
+  }
+
+  const std::vector<std::vector<unsigned int>> word_indirect = {
+      {1, 2, 3}, {1, 2, 3, 4}, {7}, {7, 2}};
+  for (const auto& params : word_indirect) {
+    const Context& context = manager_.AddSparseContext(manager_.words_, params);
+    mini_indirect_models_.emplace_back(manager_.nonstationary_,
+        context.GetContext(), manager_.bit_context_, 200,
+        mini_shared_map_);
+  }
+
+  {
+    const Context& context =
+        manager_.AddContextHashContext(manager_.bit_context_, 2, 8);
+    mini_match_models_.emplace_back(manager_.history_, context.GetContext(),
+        manager_.bit_context_, 200, 0.5, std::min<unsigned long long>(
+            2000000, context.Size()), &mini_longest_match_);
+  }
+  {
+    const Context& context = manager_.AddSparseContext(
+        manager_.words_, std::vector<unsigned int>{7});
+    mini_match_models_.emplace_back(manager_.history_, context.GetContext(),
+        manager_.bit_context_, 200, 0.5, 2000000,
+        &mini_longest_match_);
+  }
+  {
+    const Context& context = manager_.AddSparseContext(
+        manager_.words_, std::vector<unsigned int>{1});
+    // Upstream cmix uses 500,000 slots here. The current DirectHash layout
+    // would consume roughly 640 MiB at that size; 100,000 keeps this
+    // complementary expert within the Hutter memory budget.
+    mini_direct_hash_models_.emplace_back(context.GetContext(),
+        manager_.bit_context_, direct_limit, direct_delta, 100000);
+  }
+}
+
+float Predictor::PredictMiniCmix(std::uint16_t model_mask) {
+  model_mask &= 0x07ffu;
+  mini_cmix_inputs_.fill(0.0f);
+  mini_cmix_model_probabilities_.fill(0.5f);
+  mini_cmix_inputs_[0] = 1.0f;
+  auto add_prediction = [this](unsigned int model, float probability) {
+    const float bounded = std::max(1.0e-4f,
+        std::min(1.0f - 1.0e-4f, probability));
+    mini_cmix_model_probabilities_[model] = bounded;
+    mini_cmix_inputs_[model + 1] = std::max(-4.0f,
+        std::min(4.0f, sigmoid_.Logit(bounded)));
+  };
+  for (unsigned int i = 0; i < mini_direct_models_.size(); ++i)
+    add_prediction(i, mini_direct_models_[i].Predict()[0]);
+  add_prediction(3, mini_direct_hash_models_[0].Predict()[0]);
+  for (unsigned int i = 0; i < mini_indirect_models_.size(); ++i)
+    add_prediction(4 + i, mini_indirect_models_[i].Predict()[0]);
+  for (unsigned int i = 0; i < mini_match_models_.size(); ++i)
+    add_prediction(8 + i, mini_match_models_[i].Predict()[0]);
+  add_prediction(10, mini_direct_hash_models_[1].Predict()[0]);
+
+  mini_cmix_context_ = ((manager_.bpos & 7u) << 4) |
+      ((manager_.line_class_ & 7u) << 1) |
+      static_cast<unsigned int>(manager_.wrt_state_ != 0);
+  float logit = 0.0f;
+  unsigned int selected = 0;
+  for (unsigned int model = 0; model < kMiniCmixModelCount; ++model) {
+    if (model_mask & (1u << model)) {
+      logit += mini_cmix_inputs_[model + 1];
+      ++selected;
+    }
+  }
+  if (selected) logit /= static_cast<float>(selected);
+  logit = std::max(-8.0f, std::min(8.0f, logit));
+  mini_cmix_probability_ = Sigmoid::Logistic(logit);
+  return mini_cmix_probability_;
+}
+
+void Predictor::PerceiveMiniCmix(int bit, std::uint16_t model_mask) {
+  (void)model_mask;
+  for (auto& model : mini_direct_models_) model.Perceive(bit);
+  for (auto& model : mini_direct_hash_models_) model.Perceive(bit);
+  for (auto& model : mini_indirect_models_) model.Perceive(bit);
+  for (auto& model : mini_match_models_) model.Perceive(bit);
+}
+void Predictor::ByteUpdateMiniCmix(std::uint16_t model_mask) {
+  (void)model_mask;
+  for (auto& model : mini_direct_models_) model.ByteUpdate();
+  for (auto& model : mini_direct_hash_models_) model.ByteUpdate();
+  for (auto& model : mini_indirect_models_) model.ByteUpdate();
+  for (auto& model : mini_match_models_) model.ByteUpdate();
+}
+#endif
+
 unsigned int Discretize(float p) {
   return 1 + 4094 * p;
 }
@@ -296,6 +420,22 @@ float byte_mixer_output=0.0f;
 
 float Predictor::Predict() {
   unsigned int input_index = 0;
+#if FX4_SELECTIVE_POSTR1
+  float mini_cmix_probability = 0.5f;
+  std::array<float, 11> mini_model_probabilities{};
+  mini_model_probabilities.fill(0.5f);
+#if FX4_MINI_CMIX
+  mini_cmix_tracking_ = postr1_experts_ &&
+      postr1_experts_->MiniCmixTrackingNeeded();
+  mini_cmix_used_ = postr1_experts_ && postr1_experts_->MiniCmixNeeded();
+  mini_cmix_model_mask_ = mini_cmix_used_
+      ? postr1_experts_->MiniCmixModelMask() : 0u;
+  if (mini_cmix_tracking_) {
+    mini_cmix_probability = PredictMiniCmix(mini_cmix_model_mask_);
+    mini_model_probabilities = mini_cmix_model_probabilities_;
+  }
+#endif
+#endif
   auto bracket_model_output = bracket_model_->Predict()[0];
   layers_[0].SetInput(input_index++, bracket_model_output);
 
@@ -365,8 +505,8 @@ float Predictor::Predict() {
   postr1_training =
       postr1_experts_ && postr1_experts_->training_mask() != 0;
 #endif
-  float selected_fxcm_logit = layers_[0].Inputs()[fxcm_model_index];
-  float selected_fxcm_probability =
+  const float selected_fxcm_logit = layers_[0].Inputs()[fxcm_model_index];
+  const float selected_fxcm_probability =
       Sigmoid::Logistic(selected_fxcm_logit);
   float auxiliary_average = selected_fxcm_probability;
   auxiliary_average +=
@@ -399,7 +539,8 @@ float Predictor::Predict() {
     postr1_experts_->SetModelSignals(
         Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]),
         Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]),
-        aggregate_fxcm_probability,
+        aggregate_fxcm_probability, mini_cmix_probability,
+        mini_model_probabilities,
         byte_model_->PredictOrderBands(), byte_model_->EffectiveOrder(),
         byte_model_->LastEscapeDepth(), byte_model_->RecentEscapeRate(),
         PostR1ResidualProbability(),
@@ -436,6 +577,9 @@ void Predictor::Perceive(int bit) {
   for (unsigned int i = 0; i < indirect_r_models_.size(); ++i) {
     indirect_r_models_[i].Perceive(bit);
   }
+#if FX4_MINI_CMIX
+  if (mini_cmix_tracking_) PerceiveMiniCmix(bit, 0x07ffu);
+#endif
   byte_model_->Perceive(bit);
 
   byte_mixer_->Perceive(bit);
@@ -469,6 +613,9 @@ void Predictor::Perceive(int bit) {
     for (unsigned int i = 0; i < indirect_r_models_.size(); ++i) {
       indirect_r_models_[i].ByteUpdate();
     }
+#if FX4_MINI_CMIX
+    if (mini_cmix_tracking_) ByteUpdateMiniCmix(0x07ffu);
+#endif
     byte_model_->ByteUpdate();
 
     const std::valarray<float>& p = byte_model_->BytePredict();
@@ -589,6 +736,9 @@ void Predictor::Pretrain(int bit) {
   for (unsigned int i = 0; i < indirect_r_models_.size(); ++i) {
     indirect_r_models_[i].Predict();
   }
+#if FX4_MINI_CMIX
+  PredictMiniCmix(0x07ffu);
+#endif
 
   bracket_model_->Perceive(bit);
   fxcm_model_.Perceive(bit);
@@ -605,6 +755,9 @@ void Predictor::Pretrain(int bit) {
   for (unsigned int i = 0; i < indirect_r_models_.size(); ++i) {
     indirect_r_models_[i].Perceive(bit);
   }
+#if FX4_MINI_CMIX
+  PerceiveMiniCmix(bit, 0x07ffu);
+#endif
 
   bool byte_update = false;
   if (manager_.bit_context_ >= 128) byte_update = true;
@@ -624,6 +777,9 @@ void Predictor::Pretrain(int bit) {
     for (unsigned int i = 0; i < indirect_r_models_.size(); ++i) {
       indirect_r_models_[i].ByteUpdate();
     }
+#if FX4_MINI_CMIX
+    ByteUpdateMiniCmix(0x07ffu);
+#endif
     manager_.bit_context_ = 1;
   }
 }

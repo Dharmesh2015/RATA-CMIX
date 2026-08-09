@@ -1,0 +1,23 @@
+	Command being timed: "env FX4_RESEARCH_DONOR_BOOTSTRAP=/root/fx4_postr1_selective_20260809/donors421.bin FX4_RESEARCH_DONOR_PROFILE=1 FX4_RESEARCH_DONOR_SEGMENTS=4096,2048,2048,4096,4096,4096,2048 FX4_DONOR_PLAN=/root/fx4_postr1_selective_20260809/page421.f4cp FX4_POSTR1_ORACLE_ONLY=1 FX4_POSTR1_SPAN_ORACLE=/root/fx4_postr1_selective_20260809/page421.span_oracle.csv taskset -c 7 /root/fx4_selective_build_20260809_c/cmix_page_oracle -n /root/fx4_selective_build_20260809_c/dictionary/english.dic region421.postr1 page421.oracle.fx4"
+	User time (seconds): 552.58
+	System time (seconds): 20.51
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 9:33.33
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 8447984
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 6146
+	Minor (reclaiming a frame) page faults: 3705048
+	Voluntary context switches: 16
+	Involuntary context switches: 1711
+	Swaps: 0
+	File system inputs: 3864
+	File system outputs: 635120
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

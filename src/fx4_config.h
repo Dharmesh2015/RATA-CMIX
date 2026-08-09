@@ -115,6 +115,13 @@
 #define FX4_SELECTIVE_POSTR1 0
 #endif
 
+// Eleven complementary cmix predictors condensed into one post-R1 expert.
+// Keep this independent from the other post-R1 experts so donor-only builds
+// do not pay its prediction and update cost.
+#ifndef FX4_MINI_CMIX
+#define FX4_MINI_CMIX 0
+#endif
+
 
 // Reversible block portfolio between R1 and the entropy models. Compression
 // opts in with FX4_POSTR1_TRANSFORM_PLAN; the resulting F4PT stream is

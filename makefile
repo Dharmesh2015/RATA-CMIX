@@ -8,6 +8,8 @@ PAGE_INDEX_OUT ?= postr1_page_index
 R1_MAP_OUT ?= emit_r1_map
 PAGE_DONOR_RANKER_OUT ?= postr1_page_donor_ranker
 DONOR ?= 0
+POSTR1 ?= 0
+MINI_CMIX ?= 0
 DONOR_DISCOVERY ?= 0
 DONOR_DISCOVERY_SOURCE :=
 DONOR_DISCOVERY_HEADER :=
@@ -17,13 +19,20 @@ POSTR1_HEADER :=
 POSTR1_OBJECT :=
 ifeq ($(DONOR_DISCOVERY),1)
 DONOR := 1
-CFLAGS_DEFINES += -DFX4_DONOR_FORK_DISCOVERY=1 -DFX4_SELECTIVE_POSTR1=1
+POSTR1 := 1
+CFLAGS_DEFINES += -DFX4_DONOR_FORK_DISCOVERY=1
 DONOR_DISCOVERY_SOURCE := src/donor_fork_discovery.cpp src/donor_winner_search.cpp
 DONOR_DISCOVERY_HEADER := src/donor_fork_discovery.h src/donor_winner_search.h
 DONOR_DISCOVERY_OBJECT := donor_fork_discovery.o donor_winner_search.o
+endif
+ifeq ($(POSTR1),1)
+CFLAGS_DEFINES += -DFX4_SELECTIVE_POSTR1=1
 POSTR1_SOURCE := src/models/postr1_experts.cpp
 POSTR1_HEADER := src/models/postr1_experts.h
 POSTR1_OBJECT := postr1_experts.o
+endif
+ifeq ($(MINI_CMIX),1)
+CFLAGS_DEFINES += -DFX4_MINI_CMIX=1
 endif
 DONOR_SOURCE :=
 DONOR_HEADER :=

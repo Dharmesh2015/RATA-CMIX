@@ -29,6 +29,7 @@ F4TX_OPERATION = struct.Struct("<BIII")
 F4CP_HEADER = struct.Struct("<4sHHIIQH32s")
 F4CP_DONOR = struct.Struct("<HIHB")
 F4CP_SPAN = struct.Struct("<QII BB")
+F4CP_SPAN_V6 = struct.Struct("<QII BBH")
 TRACE_HEADER = struct.Struct("<4sHHQ")
 
 
@@ -67,6 +68,9 @@ EXPERTS = {
     "episodic_cache": 1 << 9,
     "context_mixer": 1 << 12,
     "oracle": 1 << 14,
+    "donor_profile": 1 << 15,
+    "mini_cmix": 1 << 16,
+    "legacy_donor_replay": 1 << 17,
 }
 
 STREAM_CLASSES = {
@@ -111,6 +115,7 @@ class ExpertChoice:
     mask: int
     stream_class: int
     profile: int
+    mini_model_mask: int = 0
 
 
 @dataclass
@@ -192,6 +197,27 @@ def load_pmd1(path: Path, offset: int) -> TransformChoice:
     )
 
 
+def parse_mini_models(text: str, expert_mask: int) -> int:
+    text = text.strip().lower()
+    if not text:
+        return 0x07FF if expert_mask & EXPERTS["mini_cmix"] else 0
+    if text in {"all", "1-11"}:
+        return 0x07FF
+    if text.startswith("0x") or text.isdigit() and int(text) > 11:
+        value = int(text, 0)
+    else:
+        value = 0
+        for item in text.replace("|", "+").replace(",", "+").split("+"):
+            model = int(item)
+            if not 1 <= model <= 11:
+                raise ValueError("mini_models entries must be 1..11")
+            value |= 1 << (model - 1)
+    if not 0 < value <= 0x07FF:
+        raise ValueError("mini_models mask must select one or more of 11 models")
+    if not expert_mask & EXPERTS["mini_cmix"]:
+        raise ValueError("mini_models requires mini_cmix in experts")
+    return value
+
 def load_expert_csv(path: Path | None) -> list[ExpertChoice]:
     if path is None:
         return []
@@ -206,19 +232,21 @@ def load_expert_csv(path: Path | None) -> list[ExpertChoice]:
             if not 0 <= semantic_profile < 64:
                 raise ValueError("profile must be 0..63")
             stream_class = STREAM_CLASSES[row.get("stream_class", "mixed").lower()]
+            expert_mask = parse_mask(row["experts"], EXPERTS)
             result.append(
                 ExpertChoice(
                     int(row["offset"], 0),
                     int(row["length"], 0),
-                    parse_mask(row["experts"], EXPERTS),
+                    expert_mask,
                     stream_class,
                     semantic_profile | (gain_code << 6),
+                    parse_mini_models(row.get("mini_models", ""), expert_mask),
                 )
             )
     return result
 
 
-def load_donor_csv(path: Path | None) -> list[DonorChoice]:
+def load_donor_csv(path: Path | None, profile_bank: bool = False) -> list[DonorChoice]:
     if path is None:
         return []
     result: list[DonorChoice] = []
@@ -226,9 +254,12 @@ def load_donor_csv(path: Path | None) -> list[DonorChoice]:
         for row in csv.DictReader(source):
             if row.get("keep", "1").strip().lower() in {"0", "false", "no"}:
                 continue
+            owner_field = "profile" if profile_bank else "recipient"
+            if owner_field not in row or not row[owner_field].strip():
+                raise ValueError(f"donor CSV requires {owner_field}")
             result.append(
                 DonorChoice(
-                    int(row["recipient"], 0),
+                    int(row[owner_field], 0),
                     int(row["donor_offset"], 0),
                     int(row["length"], 0),
                     int(row.get("order", "0"), 0),
@@ -327,7 +358,8 @@ def write_f4tx(path: Path, stream_size: int, blocks: list[TransformChoice]) -> N
 
 
 def write_f4cp(path: Path, entropy_size: int, stream_digest: bytes,
-               donors: list[DonorChoice], experts: list[ExpertChoice]) -> None:
+               donors: list[DonorChoice], experts: list[ExpertChoice],
+               profile_bank: bool = False) -> None:
     donors = sorted(donors, key=lambda item: (item.recipient, item.order, item.donor_offset))
     experts = sorted(experts, key=lambda item: item.offset)
     previous_end = 0
@@ -335,14 +367,34 @@ def write_f4cp(path: Path, entropy_size: int, stream_digest: bytes,
         if span.length <= 0 or span.mask == 0 or span.offset < previous_end or span.offset + span.length > entropy_size:
             raise ValueError(f"invalid/overlapping expert span at {span.offset}")
         previous_end = span.offset + span.length
+    if profile_bank:
+        first_use: dict[int, int] = {}
+        for span in experts:
+            if span.mask & EXPERTS["donor_profile"]:
+                profile = span.profile & 63
+                first_use[profile] = min(first_use.get(profile, span.offset), span.offset)
+        for donor in donors:
+            if donor.recipient not in first_use or not 0 <= donor.recipient < 64:
+                raise ValueError(f"donor profile {donor.recipient} has no selected span")
+            if donor.donor_offset + donor.length > first_use[donor.recipient]:
+                raise ValueError(f"donor profile {donor.recipient} is not causal")
+    version = 6 if any(span.mini_model_mask for span in experts) else (5 if profile_bank else 4)
+    if version == 6 and donors and not profile_bank:
+        raise ValueError("F4CP v6 donors require --donor-profile-bank")
     output = bytearray(
-        F4CP_HEADER.pack(b"F4CP", 4, 0, MIB, 0, entropy_size, len(donors), stream_digest)
+        F4CP_HEADER.pack(b"F4CP", version, 0, MIB, 0, entropy_size, len(donors), stream_digest)
     )
     for donor in donors:
         output.extend(F4CP_DONOR.pack(donor.recipient, donor.donor_offset, donor.length, donor.order))
     output.extend(struct.pack("<I", len(experts)))
     for span in experts:
-        output.extend(F4CP_SPAN.pack(span.offset, span.length, span.mask, span.stream_class, span.profile))
+        if version >= 6:
+            output.extend(F4CP_SPAN_V6.pack(
+                span.offset, span.length, span.mask, span.stream_class,
+                span.profile, span.mini_model_mask))
+        else:
+            output.extend(F4CP_SPAN.pack(
+                span.offset, span.length, span.mask, span.stream_class, span.profile))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(output)
 
@@ -384,6 +436,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--transform-csv", type=Path)
     parser.add_argument("--expert-csv", type=Path)
     parser.add_argument("--donor-csv", type=Path)
+    parser.add_argument("--donor-profile-bank", action="store_true",
+                        help="interpret donor CSV owner as reusable profile 0..63")
     parser.add_argument("--cost-trace", type=Path)
     parser.add_argument("--pmd1-json", type=Path)
     parser.add_argument("--pmd1-offset", type=lambda value: int(value, 0), default=0)
@@ -407,11 +461,11 @@ def main() -> int:
     write_f4tx(transform_path, stream_size, blocks)
 
     experts = load_expert_csv(args.expert_csv)
-    donors = load_donor_csv(args.donor_csv)
+    donors = load_donor_csv(args.donor_csv, args.donor_profile_bank)
     plan_path = args.prefix.with_suffix(".f4cp")
     entropy_size = args.entropy_size or stream_size
     if experts or donors:
-        write_f4cp(plan_path, entropy_size, digest, donors, experts)
+        write_f4cp(plan_path, entropy_size, digest, donors, experts, args.donor_profile_bank)
     else:
         plan_path.unlink(missing_ok=True)
 
@@ -424,6 +478,7 @@ def main() -> int:
         "physical_reordering": any(block.physical_order != index for index, block in enumerate(blocks)),
         "expert_spans": len(experts),
         "donor_edges": len(donors),
+        "donor_profile_bank": args.donor_profile_bank,
         "transform_plan": str(transform_path),
         "predictor_plan": str(plan_path) if plan_path.exists() else None,
         "candidate_manifest": str(manifest_path),

@@ -21,6 +21,7 @@ class DonorPlan {
     uint32_t expert_mask;
     uint8_t stream_class;
     uint8_t profile_id;
+    uint16_t mini_model_mask;
   };
 
   static constexpr uint32_t kChunkSize = 1u << 20;
@@ -30,6 +31,7 @@ class DonorPlan {
   bool LoadExternal(const char* path, uint64_t stream_size);
   bool ReadArchive(std::ifstream* input, uint64_t stream_size);
   bool WriteArchive(std::ofstream* output) const;
+  size_t SerializedArchiveSize() const;
 
   bool empty() const {
     return assignments_.empty() && expert_spans_.empty();
@@ -45,20 +47,6 @@ class DonorPlan {
   bool ReplaySeed(
       uint32_t donor_offset, uint32_t length, Predictor* predictor);
   void CaptureByte(uint64_t position, uint8_t byte);
-
-  // Exact serialized-archive cost helpers. Both route through the identical
-  // field-encoding routines WriteArchive() uses (see donor_plan.cpp), so
-  // discovery/search code can never silently drift from the true archive
-  // byte layout the way an independently maintained formula could.
-  //
-  // SerializedFixedOverhead(): bytes written once per archive regardless of
-  // region count -- version byte + assignment-count u16 + expert-span-count
-  // u32 (7 bytes today; computed, not hardcoded).
-  static size_t SerializedFixedOverhead();
-  // SerializedAssignmentGroupSize(N): exact bytes WriteArchive() spends on N
-  // assignment records (7 bytes each today; computed via the same
-  // fixed-width field writers WriteArchive() uses, not a literal constant).
-  static size_t SerializedAssignmentGroupSize(size_t donor_count);
 
  private:
   struct Assignment {
@@ -76,8 +64,9 @@ class DonorPlan {
 
   bool Initialize(uint64_t stream_size, bool allow_multiple);
   bool ReadExpertSpans(std::istream* input, uint32_t count,
-      bool archive_format);
+      bool archive_format, bool has_mini_model_mask);
   bool ApplyExpertSpanAt(uint64_t position, Predictor* predictor);
+  bool ApplyDonorProfile(uint32_t region, Predictor* predictor);
 
   std::vector<Assignment> assignments_;
   std::vector<ExpertSpan> expert_spans_;
@@ -85,6 +74,7 @@ class DonorPlan {
   std::vector<std::vector<uint32_t>> candidates_by_region_;
   std::vector<std::vector<CandidateSpec>> candidate_specs_by_region_;
   std::vector<std::vector<size_t>> assignments_by_region_;
+  std::vector<std::vector<size_t>> assignments_by_profile_;
   std::vector<Seed> seeds_;
   std::vector<size_t> active_seeds_;
   size_t next_seed_ = 0;
@@ -93,6 +83,8 @@ class DonorPlan {
   uint32_t portfolio_mask_ = 0;
   bool portfolio_enabled_ = false;
   bool discovery_candidates_ = false;
+  uint16_t plan_version_ = 4;
+  bool profile_bank_ = false;
 };
 
 #endif

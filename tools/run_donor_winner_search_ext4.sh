@@ -101,6 +101,7 @@ set +e
       FX4_WINNER_BEAM_WIDTH="${FX4_WINNER_BEAM_WIDTH:-4}" \
       FX4_WINNER_MAX_DEPTH="${FX4_WINNER_MAX_DEPTH:-8}" \
       FX4_WINNER_NEAR_BYTES="${FX4_WINNER_NEAR_BYTES:-64}" \
+      FX4_WINNER_LEAVE_ONE_OUT="${FX4_WINNER_LEAVE_ONE_OUT:-1}" \
   nice -n -10 taskset -c "$cpu" \
   ./cmix -e enwik9 discovery_payload \
   2>&1 | tee -a "$result_root/search.log"
@@ -112,6 +113,11 @@ if [[ -f "$ledger.winner_selected.csv" ]]; then
     "$work_root/candidates.f4cd" "$ledger.winner_selected.csv" \
     "$result_root/current_winners.f4cp" \
     | tee "$result_root/current_winners_summary.json"
+fi
+if [[ -s "$ledger.winner_marginals.csv" ]]; then
+  bash "$work_root/source/tools/find_multi_recipient_donors.sh" \
+    "$ledger.winner_marginals.csv" 0 2 \
+    >"$result_root/multi_recipient_donors.csv"
 fi
 
 sha256sum "$ledger".winner* "$result_root/current_winners.f4cp" \

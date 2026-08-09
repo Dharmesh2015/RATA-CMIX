@@ -41,6 +41,50 @@ def hash_file(path: Path) -> bytes:
     return digest.digest()
 
 
+def varint_size(value: int) -> int:
+    size = 1
+    while value >= 128:
+        value >>= 7
+        size += 1
+    return size
+
+
+def zigzag_size(delta: int) -> int:
+    encoded = delta * 2 if delta >= 0 else (-delta - 1) * 2 + 1
+    return varint_size(encoded)
+
+
+def compact_archive_size(
+    edges: list[tuple[int, int, int, int, int]],
+) -> int:
+    """Exact bytes emitted by DonorPlan archive format v7."""
+    groups: list[tuple[int, list[tuple[int, int, int, int, int]]]] = []
+    for edge in edges:
+        if not groups or groups[-1][0] != edge[0]:
+            groups.append((edge[0], []))
+        groups[-1][1].append(edge)
+
+    # v7 version + flags, followed by the donor-group count.
+    size = 2 + varint_size(len(groups))
+    for recipient, donors in groups:
+        size += varint_size(recipient) + varint_size(len(donors))
+        previous = 0
+        for index, (_recipient, donor, _length, order, _gain) in enumerate(donors):
+            if order != index:
+                raise SystemExit(
+                    f"v7 replay order must be contiguous for region {recipient}"
+                )
+            shifted = donor >> 8
+            size += varint_size(shifted) if index == 0 else zigzag_size(
+                shifted - previous
+            )
+            size += 1  # length_log2
+            previous = shifted
+    size += varint_size(0)  # no shared expert profiles
+    size += varint_size(0)  # no expert spans
+    return size
+
+
 def main() -> int:
     args = parse_args()
     stream_size = args.stream.stat().st_size if args.stream else args.stream_size
@@ -115,11 +159,11 @@ def main() -> int:
             output.write(ASSIGNMENT_V3.pack(recipient, donor, length, order))
 
     gross_gain = sum(edge[4] for edge in edges)
-    archive_plan_bytes = 3 + 7 * len(edges)
+    archive_plan_bytes = compact_archive_size(edges)
     print(
         json.dumps(
             {
-                "format": "F4CP-v3",
+                "format": "F4CP-v3 external / v7 compact archive",
                 "edges": len(edges),
                 "recipient_regions": len({edge[0] for edge in edges}),
                 "distinct_donors": len({(edge[1], edge[2]) for edge in edges}),

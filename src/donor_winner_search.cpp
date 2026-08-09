@@ -56,6 +56,10 @@ constexpr const char* kCandidateHeader =
 constexpr const char* kCostHeader =
     "region,baseline_payload,candidate_payload,assignment_cost,span_cost,"
     "copy_cost,candidate_total,saving_bytes,improvement_percent,status\n";
+constexpr const char* kMarginalHeader =
+    "recipient_region,recipient_offset,profile_donors,removed_donor,"
+    "profile_donor_count,full_payload_bytes,without_payload_bytes,"
+    "marginal_gain_bytes,status\n";
 
 struct DonorWindow {
   uint32_t offset = 0;
@@ -129,6 +133,7 @@ struct SearchConfig {
   uint64_t stop_offset = std::numeric_limits<uint64_t>::max();
   bool planned_only = false;
   bool planned_prefixes = true;
+  bool leave_one_out = true;
 };
 
 uint64_t EnvironmentU64(const char* name, uint64_t fallback) {
@@ -180,6 +185,8 @@ SearchConfig LoadConfig() {
       EnvironmentU32("FX4_WINNER_PLANNED_ONLY", 0, 0, 1) != 0;
   config.planned_prefixes =
       EnvironmentU32("FX4_WINNER_PLANNED_PREFIXES", 1, 0, 1) != 0;
+  config.leave_one_out =
+      EnvironmentU32("FX4_WINNER_LEAVE_ONE_OUT", 1, 0, 1) != 0;
   return config;
 }
 
@@ -256,6 +263,10 @@ std::string CostAccountingPath(const std::string& base) {
   return base + ".cost_accounting.csv";
 }
 
+std::string MarginalPath(const std::string& base) {
+  return base + ".winner_marginals.csv";
+}
+
 std::string StatusPath(const std::string& base) {
   return base + ".winner.status";
 }
@@ -290,7 +301,8 @@ bool EnsureLedgers(const std::string& base) {
       EnsureCsv(SelectionPath(base), kSelectionHeader) &&
       EnsureCsv(SpanPath(base), kSpanHeader) &&
       EnsureCsv(CandidatePath(base), kCandidateHeader) &&
-      EnsureCsv(CostAccountingPath(base), kCostHeader);
+      EnsureCsv(CostAccountingPath(base), kCostHeader) &&
+      EnsureCsv(MarginalPath(base), kMarginalHeader);
 }
 
 bool AppendRow(const std::string& path, const std::string& row) {
@@ -302,17 +314,41 @@ bool AppendRow(const std::string& path, const std::string& row) {
   return ok;
 }
 
-// Exact donor-plan metadata cost for a sequence of N assignments, routed
-// through DonorPlan's real WriteArchive() field encoders (see donor_plan.cpp)
-// rather than an independently maintained formula. This intentionally
-// includes DonorPlan::SerializedFixedOverhead(), which carries the
-// version/count/expert-span-count header bytes that a prior "3 + 7*N"
-// estimate omitted (a 4-byte undercount from the missing expert-span-count
-// u32 that WriteArchive() always emits).
-uint64_t DonorPlanMetadataCost(size_t donor_count) {
-  if (donor_count == 0) return 0;
-  return DonorPlan::SerializedFixedOverhead() +
-      DonorPlan::SerializedAssignmentGroupSize(donor_count);
+size_t CompactVarintSize(uint64_t value) {
+  size_t bytes = 1;
+  while (value >= 128u) {
+    value >>= 7;
+    ++bytes;
+  }
+  return bytes;
+}
+
+uint64_t CompactSignedDelta(int64_t value) {
+  return value >= 0
+      ? static_cast<uint64_t>(value) << 1
+      : (static_cast<uint64_t>(-(value + 1)) << 1) | 1u;
+}
+
+// Exact v7 bytes for one recipient's donor sequence. Discovery and production
+// now rank the same delta-coded offset representation.
+uint64_t DonorPlanMetadataCost(
+    uint32_t recipient, const DonorSequence& sequence) {
+  if (sequence.empty()) return 0;
+  uint64_t bytes =
+      2 + CompactVarintSize(1) +
+      CompactVarintSize(recipient) + CompactVarintSize(sequence.size());
+  int64_t previous_shifted_offset = 0;
+  for (size_t index = 0; index < sequence.size(); ++index) {
+    const int64_t shifted_offset = sequence[index].offset >> 8;
+    const uint64_t encoded_offset = index == 0
+        ? static_cast<uint64_t>(shifted_offset)
+        : CompactSignedDelta(shifted_offset - previous_shifted_offset);
+    bytes += CompactVarintSize(encoded_offset) + 1;
+    previous_shifted_offset = shifted_offset;
+  }
+  bytes += CompactVarintSize(0);  // no shared expert profiles
+  bytes += CompactVarintSize(0);  // no expert spans
+  return bytes;
 }
 
 // ceil(baseline * 0.01) via integer arithmetic: ceil(a/100) = (a+99)/100.
@@ -584,6 +620,13 @@ bool ParseSequence(const std::string& text, DonorSequence* sequence) {
   return true;
 }
 
+std::string MarginalKey(uint32_t region, const DonorSequence& profile,
+    const DonorWindow& removed) {
+  return std::to_string(region) + "|" + SequenceText(profile) + "|" +
+      std::to_string(removed.offset) + ":" +
+      std::to_string(removed.length);
+}
+
 std::string TrialKey(uint32_t region, const DonorSequence& sequence) {
   return std::to_string(region) + "|" + SequenceText(sequence);
 }
@@ -620,6 +663,36 @@ bool LoadTrials(const std::string& base,
   return true;
 }
 
+bool LoadMarginals(const std::string& base,
+    std::unordered_set<std::string>* completed) {
+  std::ifstream input(MarginalPath(base));
+  if (!input.is_open()) return false;
+  std::string line;
+  if (!std::getline(input, line) || line + "\n" != kMarginalHeader) {
+    return false;
+  }
+  while (std::getline(input, line)) {
+    const std::vector<std::string> fields = Split(line, ',');
+    if (fields.size() != 9) return false;
+    uint64_t region = 0;
+    uint64_t recipient_offset = 0;
+    if (!ParseU64(fields[0], &region) ||
+        !ParseU64(fields[1], &recipient_offset) ||
+        region > std::numeric_limits<uint32_t>::max() ||
+        recipient_offset != RecipientOffset(static_cast<uint32_t>(region))) {
+      return false;
+    }
+    DonorSequence profile;
+    DonorSequence removed;
+    if (!ParseSequence(fields[2], &profile) ||
+        !ParseSequence(fields[3], &removed) || removed.size() != 1) {
+      return false;
+    }
+    completed->insert(MarginalKey(
+        static_cast<uint32_t>(region), profile, removed.front()));
+  }
+  return true;
+}
 bool LoadSelections(const std::string& base,
     std::vector<SelectionRecord>* selections) {
   std::ifstream input(SelectionPath(base));
@@ -703,13 +776,34 @@ bool AppendTrial(const std::string& base, uint32_t region,
   return WriteStatus(base, stage, region, new_trials, sequence, gain);
 }
 
+bool AppendMarginal(const std::string& base, uint32_t region,
+    const ScoredSequence& full, const DonorWindow& removed,
+    uint64_t without_payload) {
+  const int64_t marginal =
+      static_cast<int64_t>(without_payload) -
+      static_cast<int64_t>(full.payload_bytes);
+  const char* status = marginal > 0 ? "helps" :
+      (marginal < 0 ? "hurts" : "neutral");
+  const std::string profile = SequenceText(full.sequence);
+  const std::string removed_text = SequenceText(DonorSequence{removed});
+  char row[2048] = {};
+  const int length = snprintf(row, sizeof(row),
+      "%u,%" PRIu64 ",%s,%s,%zu,%" PRIu64 ",%" PRIu64
+      ",%" PRId64 ",%s\n",
+      region, RecipientOffset(region), profile.c_str(),
+      removed_text.c_str(), full.sequence.size(), full.payload_bytes,
+      without_payload, marginal, status);
+  return length > 0 && static_cast<size_t>(length) < sizeof(row) &&
+      AppendRow(MarginalPath(base),
+          std::string(row, static_cast<size_t>(length)));
+}
 bool AppendSelection(const std::string& base, uint32_t region,
     const SelectionRecord& selection, uint32_t candidate_count,
     uint64_t exact_trials) {
   const int64_t gain = static_cast<int64_t>(selection.baseline_bytes) -
       static_cast<int64_t>(selection.selected_bytes);
   const int64_t metadata =
-      static_cast<int64_t>(DonorPlanMetadataCost(selection.sequence.size()));
+      static_cast<int64_t>(DonorPlanMetadataCost(region, selection.sequence));
   const std::string donors = selection.sequence.empty()
       ? "-" : SequenceText(selection.sequence);
   char row[2048] = {};
@@ -729,7 +823,7 @@ bool AppendSelection(const std::string& base, uint32_t region,
   // causal span selector (Phase 11) and COPY events (Phase 13) exist.
   return AppendCostAccounting(base, region, selection.baseline_bytes,
       selection.selected_bytes,
-      DonorPlanMetadataCost(selection.sequence.size()), 0, 0);
+      DonorPlanMetadataCost(region, selection.sequence), 0, 0);
 }
 
 bool AppendSpans(const std::string& base, uint32_t region,
@@ -870,7 +964,7 @@ bool ProbeSequence(const DonorSequence& sequence, const char* bytes,
         predictor->EnablePostR1Portfolio(mask);
         predictor->SetPostR1DonorProfile(profile, segment_lengths);
         predictor->SetPostR1Span(position, mask,
-            current_recipient_stream_class, current_recipient_stream_class);
+            current_recipient_stream_class, current_recipient_stream_class, 0);
       }
     }
     message.ok = profile_ok && EncodeRegion(bytes, size, position, encoder,
@@ -1068,18 +1162,19 @@ void AddUniqueWindow(const DonorWindow& candidate,
   if (found == windows->end()) windows->push_back(candidate);
 }
 
-uint64_t TotalBytes(const ScoredSequence& scored) {
-  return scored.payload_bytes + DonorPlanMetadataCost(scored.sequence.size());
+uint64_t TotalBytes(uint32_t region, const ScoredSequence& scored) {
+  return scored.payload_bytes +
+      DonorPlanMetadataCost(region, scored.sequence);
 }
 
-uint64_t TotalBytes(const SelectionRecord& selection) {
+uint64_t TotalBytes(uint32_t region, const SelectionRecord& selection) {
   return selection.selected_bytes +
-      DonorPlanMetadataCost(selection.sequence.size());
+      DonorPlanMetadataCost(region, selection.sequence);
 }
 
-bool BeatsSelection(
+bool BeatsSelection(uint32_t region,
     const ScoredSequence& scored, const SelectionRecord& selection) {
-  return TotalBytes(scored) < TotalBytes(selection);
+  return TotalBytes(region, scored) < TotalBytes(region, selection);
 }
 
 void SortScored(std::vector<ScoredSequence>* sequences) {
@@ -1092,6 +1187,32 @@ void SortScored(std::vector<ScoredSequence>* sequences) {
       });
 }
 
+bool FindBestRawSequence(uint32_t region, uint64_t baseline_bytes,
+    const std::unordered_map<std::string, TrialRecord>& trials,
+    ScoredSequence* best) {
+  best->sequence.clear();
+  best->payload_bytes = baseline_bytes;
+  const std::string prefix = std::to_string(region) + "|";
+  for (const auto& entry : trials) {
+    if (!entry.second.ok || entry.second.payload_bytes >= baseline_bytes ||
+        entry.first.compare(0, prefix.size(), prefix) != 0) {
+      continue;
+    }
+    DonorSequence sequence;
+    if (!ParseSequence(entry.first.substr(prefix.size()), &sequence) ||
+        sequence.empty()) {
+      continue;
+    }
+    const bool better = best->sequence.empty() ||
+        entry.second.payload_bytes < best->payload_bytes ||
+        (entry.second.payload_bytes == best->payload_bytes &&
+         SequenceText(sequence) < SequenceText(best->sequence));
+    if (!better) continue;
+    best->sequence = std::move(sequence);
+    best->payload_bytes = entry.second.payload_bytes;
+  }
+  return !best->sequence.empty();
+}
 bool Evaluate(uint32_t region, const char* stage,
     const DonorSequence& sequence, uint64_t baseline_bytes,
     uint64_t parent_bytes, const char* bytes, size_t size, uint64_t position,
@@ -1140,6 +1261,64 @@ enum class SearchResult {
   kComplete,
 };
 
+SearchResult AttributeDonorMarginals(uint32_t region,
+    const ScoredSequence& full, uint64_t baseline_bytes,
+    const char* bytes, size_t size, uint64_t position,
+    Encoder* encoder, Predictor* predictor, int input_fd,
+    const SearchConfig& config, const std::string& ledger_base,
+    std::unordered_map<std::string, TrialRecord>* trials,
+    std::unordered_set<std::string>* completed_marginals,
+    uint64_t* next_trial_id, uint64_t* new_trials) {
+  for (size_t removed_index = 0;
+       removed_index < full.sequence.size(); ++removed_index) {
+    const DonorWindow removed = full.sequence[removed_index];
+    const std::string marginal_key =
+        MarginalKey(region, full.sequence, removed);
+    if (completed_marginals->count(marginal_key) != 0) continue;
+
+    DonorSequence reduced = full.sequence;
+    reduced.erase(reduced.begin() + removed_index);
+    uint64_t without_payload = baseline_bytes;
+    if (!reduced.empty()) {
+      const std::string trial_key = TrialKey(region, reduced);
+      const auto found = trials->find(trial_key);
+      if (found != trials->end()) {
+        if (!found->second.ok) return SearchResult::kFailed;
+        without_payload = found->second.payload_bytes;
+      } else {
+        if (config.max_new_trials != 0 &&
+            *new_trials >= config.max_new_trials) {
+          return SearchResult::kPaused;
+        }
+        ProbeMessage probe;
+        if (!ProbeSequence(reduced, bytes, size, position, encoder,
+            predictor, input_fd, false, &probe)) {
+          return SearchResult::kFailed;
+        }
+        ++*new_trials;
+        const int64_t marginal = probe.ok
+            ? static_cast<int64_t>(probe.payload_bytes) -
+                static_cast<int64_t>(full.payload_bytes)
+            : 0;
+        if (!AppendTrial(ledger_base, region, (*next_trial_id)++,
+            "leave_one_out", reduced, baseline_bytes, probe.payload_bytes,
+            marginal, probe.ok != 0, config.near_loss_bytes, *new_trials)) {
+          return SearchResult::kFailed;
+        }
+        (*trials)[trial_key] = {probe.ok != 0, probe.payload_bytes};
+        if (!probe.ok) return SearchResult::kFailed;
+        without_payload = probe.payload_bytes;
+      }
+    }
+
+    if (!AppendMarginal(
+        ledger_base, region, full, removed, without_payload)) {
+      return SearchResult::kFailed;
+    }
+    completed_marginals->insert(marginal_key);
+  }
+  return SearchResult::kComplete;
+}
 SearchResult SearchRegion(uint32_t region, const char* bytes, size_t size,
     uint64_t position, Encoder* encoder, Predictor* predictor, int input_fd,
     DonorPlan* donor_plan, const CausalPhraseIndex& phrase_index,
@@ -1230,7 +1409,7 @@ SearchResult SearchRegion(uint32_t region, const char* bytes, size_t size,
           baseline.payload_bytes, baseline.payload_bytes, bytes, size,
           position, encoder, predictor, input_fd, config, ledger_base, trials,
           next_trial_id, new_trials, &paused, &scored) &&
-          BeatsSelection(scored, *selection)) {
+          BeatsSelection(region, scored, *selection)) {
         selection->selected_bytes = scored.payload_bytes;
         selection->sequence = scored.sequence;
       }
@@ -1246,7 +1425,7 @@ SearchResult SearchRegion(uint32_t region, const char* bytes, size_t size,
   std::vector<ScoredSequence> singles;
   auto consider = [&](const ScoredSequence& scored) {
     singles.push_back(scored);
-    if (BeatsSelection(scored, *selection)) {
+    if (BeatsSelection(region, scored, *selection)) {
       selection->selected_bytes = scored.payload_bytes;
       selection->sequence = scored.sequence;
     }
@@ -1342,7 +1521,7 @@ SearchResult SearchRegion(uint32_t region, const char* bytes, size_t size,
           config, ledger_base, trials, next_trial_id, new_trials, &paused,
           &scored)) {
         beam.push_back(scored);
-        if (BeatsSelection(scored, *selection)) {
+        if (BeatsSelection(region, scored, *selection)) {
           selection->selected_bytes = scored.payload_bytes;
           selection->sequence = scored.sequence;
         }
@@ -1372,7 +1551,7 @@ SearchResult SearchRegion(uint32_t region, const char* bytes, size_t size,
               config.near_loss_bytes) {
             expanded.push_back(scored);
           }
-          if (BeatsSelection(scored, *selection)) {
+          if (BeatsSelection(region, scored, *selection)) {
             selection->selected_bytes = scored.payload_bytes;
             selection->sequence = scored.sequence;
           }
@@ -1433,10 +1612,12 @@ bool RunDonorWinnerSearch(const std::string& input_path,
   }
   const size_t complete_regions = recipient_spans.size();
   std::unordered_map<std::string, TrialRecord> trials;
+  std::unordered_set<std::string> completed_marginals;
   std::vector<SelectionRecord> selections(complete_regions);
   uint64_t next_trial_id = 1;
   if (!LoadTrials(ledger_path, &trials, &next_trial_id) ||
-      !LoadSelections(ledger_path, &selections)) {
+      !LoadSelections(ledger_path, &selections) ||
+      !LoadMarginals(ledger_path, &completed_marginals)) {
     close(input_fd);
     return false;
   }
@@ -1521,6 +1702,41 @@ bool RunDonorWinnerSearch(const std::string& input_path,
       selection.valid = true;
       selection.baseline_bytes = 0;
       selection.selected_bytes = 0;
+    }
+
+    if (config.leave_one_out && selection.valid &&
+        selection.baseline_bytes != 0 && region >= config.start_region &&
+        SearchRecipient(region)) {
+      ScoredSequence best_raw;
+      if (FindBestRawSequence(
+          region, selection.baseline_bytes, trials, &best_raw)) {
+        const SearchResult marginal_result = AttributeDonorMarginals(
+            region, best_raw, selection.baseline_bytes, buffer.data(), count,
+            position, &encoder, &predictor, input_fd, config, ledger_path,
+            &trials, &completed_marginals, &next_trial_id, &new_trials);
+        if (marginal_result == SearchResult::kFailed) {
+          close(input_fd);
+          return false;
+        }
+        if (marginal_result == SearchResult::kPaused) {
+          FILE* paused = fopen(PausedPath(ledger_path).c_str(), "wb");
+          if (!paused) {
+            close(input_fd);
+            return false;
+          }
+          fprintf(paused,
+              "recipient_region=%u\nrecipient_offset=%" PRIu64
+              "\nnew_trials=%" PRIu64 "\nphase=leave_one_out\n",
+              region, position, new_trials);
+          const bool ok = SyncFile(paused) && WriteStatus(ledger_path,
+              "leave_one_out_paused", region, new_trials,
+              best_raw.sequence, 0);
+          fclose(paused);
+          close(input_fd);
+          *output_bytes = 0;
+          return ok;
+        }
+      }
     }
 
     if (!EncodeRegion(buffer.data(), count, position, &encoder,

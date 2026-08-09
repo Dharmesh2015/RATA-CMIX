@@ -11,6 +11,7 @@
 #include "models/byte-model.h"
 #include "context-manager.h"
 #include "models/direct.h"
+#include "models/direct-hash.h"
 #include "models/indirect.h"
 #include "models/match.h"
 #include "models/ppmd.h"
@@ -48,10 +49,11 @@ class Predictor {
   void FreeFxcmMemory();
   void EnablePostR1Portfolio(std::uint32_t mask);
   void SetPostR1Span(std::uint64_t logical_offset, std::uint32_t mask,
-      std::uint8_t stream_class, std::uint8_t profile_id);
+      std::uint8_t stream_class, std::uint8_t profile_id,
+      std::uint16_t mini_model_mask);
   void SetPostR1DonorProfile(const std::vector<std::uint8_t>& bytes,
       const std::vector<std::uint32_t>& segment_lengths);
-
+  bool HasPostR1DonorProfile() const;
  private:
   unsigned long long GetNumModels();
   void AddMixer(int layer, const unsigned long long& context,
@@ -62,6 +64,12 @@ class Predictor {
   void AddWord();
   void AddMatch();
   void AddDoubleIndirect();
+#if FX4_MINI_CMIX
+  void AddMiniCmix();
+  float PredictMiniCmix(std::uint16_t model_mask);
+  void PerceiveMiniCmix(int bit, std::uint16_t model_mask);
+  void ByteUpdateMiniCmix(std::uint16_t model_mask);
+#endif
   void AddMixers();
 #if FX4_SPECIALIST_CORRECTOR
   unsigned int SpecialistStreamClass() const;
@@ -77,7 +85,30 @@ class Predictor {
   llvm::SmallVector<Indirect<RunMap>, 1> indirect_r_models_; // run map
   llvm::SmallVector<Direct, 4> direct_models_;
   llvm::SmallVector<Match, 10> match_models_;
-  
+#if FX4_MINI_CMIX
+  llvm::SmallVector<Direct, 3> mini_direct_models_;
+  llvm::SmallVector<DirectHash, 2> mini_direct_hash_models_;
+  llvm::SmallVector<Indirect<Nonstationary>, 4> mini_indirect_models_;
+  llvm::SmallVector<Match, 2> mini_match_models_;
+  std::vector<unsigned char> mini_shared_map_;
+  unsigned long long mini_longest_match_ = 0;
+
+  static constexpr unsigned int kMiniCmixModelCount = 11;
+  static constexpr unsigned int kMiniCmixFeatureCount =
+      kMiniCmixModelCount + 1;
+  static constexpr unsigned int kMiniCmixContextCount = 128;
+  std::array<std::array<float, kMiniCmixFeatureCount>,
+      kMiniCmixContextCount> mini_cmix_weights_{};
+  std::array<float, kMiniCmixFeatureCount> mini_cmix_inputs_{};
+  std::array<float, kMiniCmixModelCount> mini_cmix_model_probabilities_{};
+  std::array<float, kMiniCmixContextCount> mini_cmix_recent_error_{};
+  unsigned int mini_cmix_context_ = 0;
+  float mini_cmix_probability_ = 0.5f;
+  bool mini_cmix_used_ = false;
+  bool mini_cmix_tracking_ = false;
+  std::uint16_t mini_cmix_model_mask_ = 0;
+#endif
+
   std::optional<Bracket> bracket_model_;
   size_t auxiliary_size_ = 3; // FXCM, LSTM, direct PPMd
   SSE sse_;

@@ -97,6 +97,43 @@ bool EnvironmentEnabled(const char* name) {
   const char* value = std::getenv(name);
   return value && *value && std::strcmp(value, "0") != 0;
 }
+
+#if FX4_RESEARCH_DONOR_BOOTSTRAP
+std::vector<std::uint32_t> ResearchDonorSegments(std::size_t total) {
+  const char* specification =
+      std::getenv("FX4_RESEARCH_DONOR_SEGMENTS");
+  if (!specification || !*specification) {
+    return {static_cast<std::uint32_t>(total)};
+  }
+  std::vector<std::uint32_t> segments;
+  std::size_t sum = 0;
+  const char* cursor = specification;
+  while (*cursor) {
+    char* end = nullptr;
+    const unsigned long value = std::strtoul(cursor, &end, 10);
+    if (end == cursor || value == 0 || value > total ||
+        (*end != '\0' && *end != ',')) {
+      std::fprintf(stderr, "invalid FX4_RESEARCH_DONOR_SEGMENTS\n");
+      std::exit(2);
+    }
+    segments.push_back(static_cast<std::uint32_t>(value));
+    sum += value;
+    cursor = *end == ',' ? end + 1 : end;
+  }
+  if (sum != total) {
+    std::fprintf(stderr,
+        "FX4_RESEARCH_DONOR_SEGMENTS total does not match donor bytes\n");
+    std::exit(2);
+  }
+  return segments;
+}
+
+void ConfigureResearchDonorProfile(
+    const std::vector<std::uint8_t>& bytes, Predictor* predictor) {
+  if (!EnvironmentEnabled("FX4_RESEARCH_DONOR_PROFILE")) return;
+  predictor->SetPostR1DonorProfile(bytes, ResearchDonorSegments(bytes.size()));
+}
+#endif
 #endif
 }
 
@@ -768,6 +805,7 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     preprocessor::Pretrain(&p, dictionary);
   }
   ReplayResearchDonor(research_donor, &p);
+  ConfigureResearchDonorProfile(research_donor, &p);
 #endif
   if (!Compress(temp_bytes, &temp_in, &data_out, output_bytes, &p,
       active_donor_plan, active_replay_plan)) {
@@ -868,6 +906,7 @@ bool RunDecompression(const std::string& input_path,
     if (dictionary_used) preprocessor::Pretrain(&p, dictionary);
 #if FX4_RESEARCH_DONOR_BOOTSTRAP
     ReplayResearchDonor(research_donor, &p);
+    ConfigureResearchDonorProfile(research_donor, &p);
 #endif
 
     std::ofstream temp_out(temp_path, std::ios::out | std::ios::binary);

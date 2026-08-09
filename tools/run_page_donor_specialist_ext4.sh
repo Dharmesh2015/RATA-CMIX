@@ -97,6 +97,7 @@ set +e
     FX4_WINNER_PLANNED_ONLY="${FX4_WINNER_PLANNED_ONLY:-1}" \
     FX4_WINNER_PLANNED_PREFIXES="${FX4_WINNER_PLANNED_PREFIXES:-1}" \
     FX4_WINNER_PLANNED_DONORS="${FX4_WINNER_PLANNED_DONORS:-7}" \
+    FX4_WINNER_LEAVE_ONE_OUT="${FX4_WINNER_LEAVE_ONE_OUT:-1}" \
     FX4_WINNER_START_REGION="${FX4_WINNER_START_REGION:-0}" \
     FX4_WINNER_MAX_REGIONS=0 \
     FX4_WINNER_CANDIDATES="${FX4_WINNER_CANDIDATES:-12}" \
@@ -110,7 +111,7 @@ set -e
 
 rm -f discovery_payload discovery_payload.cmix.temp ppm.temp
 echo "exit_status=$status"
-for suffix in winner_selected.csv winner_positive.csv winner_near.csv     winner.status winner.paused winner.complete; do
+for suffix in winner_selected.csv winner_positive.csv winner_near.csv     winner_marginals.csv winner.status winner.paused winner.complete; do
   path="$ledger.$suffix"
   if [[ -f "$path" ]]; then
     echo "==== $path"
@@ -122,6 +123,12 @@ if [[ -s "$ledger.winner_selected.csv" ]]; then
     "$packs_path" "$ledger.winner_selected.csv" "$result_root" "$stop_mib"
   cat "$result_root/region_summary.csv"
   cat "$result_root/class_summary.csv"
+fi
+if [[ -s "$ledger.winner_marginals.csv" ]]; then
+  bash "$work_root/source/tools/find_multi_recipient_donors.sh" \
+    "$ledger.winner_marginals.csv" 0 2 \
+    >"$result_root/multi_recipient_donors.csv"
+  cat "$result_root/multi_recipient_donors.csv"
 fi
 exit "$status"
 

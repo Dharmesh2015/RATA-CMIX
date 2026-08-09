@@ -31,7 +31,9 @@ class PostR1Experts {
     kConfidenceBptt   = 1u << 13,
     kOracle           = 1u << 14,
     kDonorProfile     = 1u << 15,
-    kAllPredictors    = (1u << 16) - 1u,
+    kMiniCmix         = 1u << 16,
+    kLegacyDonorReplay = 1u << 17,
+    kAllPredictors    = (1u << 18) - 1u,
   };
 
   enum class StreamClass : std::uint8_t {
@@ -53,12 +55,14 @@ class PostR1Experts {
 
   void EnablePortfolio(std::uint32_t mask);
   void SetSpan(std::uint64_t logical_offset, std::uint32_t mask,
-      StreamClass stream_class, std::uint8_t profile_id);
+      StreamClass stream_class, std::uint8_t profile_id,
+      std::uint16_t mini_model_mask);
   void SetModelSignals(float ppmd_probability, float lstm_probability,
-      float fxcm_probability, const std::array<float, 4>& ppmd_order_bands,
-      unsigned int ppmd_order, unsigned int escape_depth,
-      float escape_rate, float residual_byte_probability,
-      unsigned int match_length);
+      float fxcm_probability, float mini_cmix_probability,
+      const std::array<float, 11>& mini_model_probabilities,
+      const std::array<float, 4>& ppmd_order_bands, unsigned int ppmd_order,
+      unsigned int escape_depth, float escape_rate,
+      float residual_byte_probability, unsigned int match_length);
 
   float Predict(float baseline_probability, unsigned int bit_context,
       unsigned int bit_position);
@@ -66,17 +70,22 @@ class PostR1Experts {
   void ByteUpdate(std::uint8_t byte);
   void SetDonorProfile(const std::vector<std::uint8_t>& bytes,
       const std::vector<std::uint32_t>& segment_lengths);
-
-  std::uint32_t training_mask() const {
-    const std::uint32_t other =
-        observed_mask_ & ~(kDonorProfile | kContextMixer);
-    return other == 0 ? active_mask_ : observed_mask_;
+  bool HasDonorProfile() const { return !donor_profile_[0].empty(); }
+  bool MiniCmixNeeded() const {
+    return (evaluation_mask_ & kMiniCmix) != 0 && mini_model_mask_ != 0;
   }
+  std::uint16_t MiniCmixModelMask() const { return mini_model_mask_; }
+  bool MiniCmixTrackingNeeded() const {
+    return (observed_mask_ & kMiniCmix) != 0;
+  }
+
+  std::uint32_t training_mask() const { return evaluation_mask_; }
 
  private:
   float donor_confidence() const;
   float profile_donor_confidence() const;
   bool WriteOracle(const char* path) const;
+  bool WriteSpanOracle(const char* path) const;
   static constexpr unsigned int kExpertCount = 12;
   static constexpr unsigned int kMixerFeatures = kExpertCount + 5;
   static constexpr unsigned int kMixerContexts = 2048;
@@ -103,6 +112,15 @@ class PostR1Experts {
   struct OracleStat {
     double loss_bits = 0.0;
     std::uint64_t bits = 0;
+  };
+  struct SpanOracleStat {
+    std::uint64_t offset = 0;
+    std::uint64_t bytes = 0;
+    std::uint64_t bits = 0;
+    std::uint32_t mask = 0;
+    std::uint8_t stream_class = 0;
+    std::uint8_t profile_id = 0;
+    std::array<double, 5> loss_bits{};
   };
   struct DonorSlot {
     std::uint64_t key = 0;
@@ -139,11 +157,13 @@ class PostR1Experts {
   static std::uint32_t MixHash(std::uint64_t value);
 
   std::uint32_t active_mask_ = 0;
+  std::uint32_t evaluation_mask_ = 0;
   std::uint32_t observed_mask_ = 0;
   StreamClass stream_class_ = StreamClass::kMixed;
   StreamClass plan_stream_class_ = StreamClass::kMixed;
   std::array<std::uint16_t, 11> stream_class_score_{};
   std::uint8_t profile_id_ = 0;
+  std::uint16_t mini_model_mask_ = 0;
   std::uint64_t logical_offset_ = 0;
   std::uint64_t bytes_seen_ = 0;
 
@@ -151,6 +171,8 @@ class PostR1Experts {
   float ppmd_probability_ = 0.5f;
   float lstm_probability_ = 0.5f;
   float fxcm_probability_ = 0.5f;
+  float mini_cmix_probability_ = 0.5f;
+  std::array<float, 11> mini_model_probabilities_{};
   float residual_byte_probability_ = 0.5f;
   std::array<float, 4> ppmd_order_bands_{{0.5f, 0.5f, 0.5f, 0.5f}};
   unsigned int ppmd_order_ = 0;
@@ -207,7 +229,13 @@ class PostR1Experts {
   std::uint16_t continuation_length_ = 0;
 
   std::array<OracleStat, kExpertCount + 2> oracle_{};
+  std::vector<SpanOracleStat> span_oracle_;
+  bool oracle_only_ = false;
+  FILE* mini_subset_trace_ = nullptr;
   std::array<std::vector<DonorSlot>, kDonorProfileContexts> donor_profile_;
+  std::array<std::uint8_t, 32> donor_recent_bytes_{};
+  std::uint32_t donor_recent_pos_ = 0;
+  std::uint64_t donor_bytes_seen_ = 0;
   std::uint8_t donor_profile_prediction_ = 0;
   std::uint16_t donor_profile_confidence_ = 0;
   std::uint8_t donor_profile_agreement_ = 0;
