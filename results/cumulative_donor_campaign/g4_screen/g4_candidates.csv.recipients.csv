@@ -1,0 +1,6 @@
+rank,pack_id,recipient_offset,recipient_length,best_phrase_score,best_signature_hits,candidate_count
+0,1,1048219,1049689,482,80,13
+1,2,2097908,1048760,215,35,20
+2,3,3146668,1048846,48,8,8
+3,0,0,1048219,0,0,0
+4,4,4195514,1047961,0,0,0

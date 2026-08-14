@@ -172,9 +172,17 @@ bool DonorPlan::LoadExternal(const char* path, uint64_t stream_size) {
   expert_spans_.clear();
   assignments_.reserve(count);
   for (uint16_t index = 0; index < count; ++index) {
+    const uint16_t recipient = ReadU16(&input);
+    const uint32_t donor_offset = ReadU32(&input);
+    uint32_t length = kSeedSize;
+    if (version >= 2) {
+      const uint16_t encoded_length = ReadU16(&input);
+      // The external format stores donor length in 16 bits. Reserve zero for
+      // 65,536 so the maximum legal window survives the production archive.
+      length = encoded_length == 0 ? 65536u : encoded_length;
+    }
     Assignment assignment{
-        ReadU16(&input), ReadU32(&input),
-        version == 1 ? kSeedSize : ReadU16(&input),
+        recipient, donor_offset, length,
         version >= 3
             ? static_cast<uint16_t>(static_cast<uint8_t>(input.get()))
             : index};
@@ -594,6 +602,7 @@ bool DonorPlan::Initialize(uint64_t stream_size, bool allow_multiple) {
   uint16_t previous = 0xffff;
   uint16_t previous_order = 0xffff;
   uint32_t previous_offset = kNoDonor;
+  uint32_t previous_length = 0;
   std::vector<std::pair<uint32_t, uint32_t>> offsets;
   offsets.reserve(assignments_.size());
   for (size_t assignment_index = 0;
@@ -613,7 +622,9 @@ bool DonorPlan::Initialize(uint64_t stream_size, bool allow_multiple) {
       return false;
     }
     if (assignment.recipient == previous) {
-      if (!allow_multiple || assignment.donor_offset == previous_offset ||
+      if (!allow_multiple ||
+          (assignment.donor_offset == previous_offset &&
+           assignment.length == previous_length) ||
           assignment.order == previous_order) {
         return false;
       }
@@ -623,6 +634,7 @@ bool DonorPlan::Initialize(uint64_t stream_size, bool allow_multiple) {
     previous = assignment.recipient;
     previous_order = assignment.order;
     previous_offset = assignment.donor_offset;
+    previous_length = assignment.length;
     if (profile_bank_) {
       assignments_by_profile_[assignment.recipient].push_back(assignment_index);
     } else {
@@ -767,6 +779,11 @@ bool DonorPlan::ApplyDonorProfile(
 }
 
 bool DonorPlan::ReplayAt(uint64_t position, Predictor* predictor) {
+  // F4CD is a shortlist for shadow/fork trials only. Candidate seeds are
+  // captured from the decoded prefix, but they must never alter the main
+  // predictor used as the exact baseline.
+  if (discovery_candidates_) return true;
+
   if (position == 0 && portfolio_mask_ != 0 && !portfolio_enabled_) {
     predictor->EnablePostR1Portfolio(portfolio_mask_);
     portfolio_enabled_ = true;
@@ -780,13 +797,13 @@ bool DonorPlan::ReplayAt(uint64_t position, Predictor* predictor) {
   if (donor_profile_active) {
     const ExpertSpan& span = expert_spans_[active_expert_span_];
     if (position != span.offset) return true;
+    if (profile_bank_) {
+      return ApplyDonorProfile(span.profile_id & 63u, predictor);
+    }
     // Research-only isolated recipient tests may install the exact donor
     // bytes before byte zero. Production plans rebuild the same profile from
     // earlier decoded bytes.
     if (predictor->HasPostR1DonorProfile()) return true;
-    if (profile_bank_) {
-      return ApplyDonorProfile(span.profile_id & 63u, predictor);
-    }
     if (position % kChunkSize != 0) return false;
     return ApplyDonorProfile(
         static_cast<uint32_t>(position / kChunkSize), predictor);

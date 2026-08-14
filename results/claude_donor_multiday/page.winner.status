@@ -1,0 +1,7 @@
+phase=pair
+recipient_region=173
+recipient_offset=124570
+new_trials_this_run=191
+gain_bytes=0
+donors=107264:16384;107520:1024
+pid=47267

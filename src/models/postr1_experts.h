@@ -98,6 +98,7 @@ class PostR1Experts {
       kPhraseCandidates * kPhraseHashes + 1;
   static constexpr unsigned int kDonorProfileContexts = 4;
   static constexpr unsigned int kDonorProfileSlots = 1u << 15;
+  static constexpr unsigned int kDonorGateContexts = 32;
 
   struct Counts {
     std::uint16_t zero = 1;
@@ -231,6 +232,7 @@ class PostR1Experts {
   std::array<OracleStat, kExpertCount + 2> oracle_{};
   std::vector<SpanOracleStat> span_oracle_;
   bool oracle_only_ = false;
+  bool oracle_summary_enabled_ = false;
   FILE* mini_subset_trace_ = nullptr;
   std::array<std::vector<DonorSlot>, kDonorProfileContexts> donor_profile_;
   std::array<std::uint8_t, 32> donor_recent_bytes_{};
@@ -239,6 +241,9 @@ class PostR1Experts {
   std::uint8_t donor_profile_prediction_ = 0;
   std::uint16_t donor_profile_confidence_ = 0;
   std::uint8_t donor_profile_agreement_ = 0;
+  std::array<std::int32_t, kDonorGateContexts> donor_gate_score_{};
+  std::array<std::uint16_t, kDonorGateContexts> donor_gate_hits_{};
+  std::uint8_t donor_gate_context_ = 0;
 
 };
 

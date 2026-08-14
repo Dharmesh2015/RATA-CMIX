@@ -70,15 +70,16 @@ def valid(offset: int, length: int, recipient_offset: int) -> bool:
 
 def add_candidate(
     profile: list[tuple[int, int, str]],
-    seen: set[int],
+    seen: set[tuple[int, int]],
     offset: int,
     length: int,
     source: str,
     recipient_offset: int,
 ) -> None:
-    if offset not in seen and valid(offset, length, recipient_offset):
+    key = (offset, length)
+    if key not in seen and valid(offset, length, recipient_offset):
         profile.append((offset, length, source))
-        seen.add(offset)
+        seen.add(key)
 
 
 def main() -> int:
@@ -90,12 +91,16 @@ def main() -> int:
     if complete_regions > 0xFFFF:
         raise SystemExit("too many complete regions")
 
-    ranked: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    ranked: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
     with args.candidates.open(newline="", encoding="utf-8-sig") as source:
         for row in csv.DictReader(source):
-            region = int(row["recipient_region"])
+            region = int(row.get("recipient_region") or row["pack_id"])
+            donor_offset = int(
+                row.get("donor_offset") or row["donor_seed_offset"]
+            )
+            donor_length = int(row.get("donor_length") or DEFAULT_LENGTH)
             ranked[region].append(
-                (int(row["candidate_rank"]), int(row["donor_seed_offset"]))
+                (int(row["candidate_rank"]), donor_offset, donor_length)
             )
     for rows in ranked.values():
         rows.sort()
@@ -105,7 +110,7 @@ def main() -> int:
     for region in range(1, complete_regions):
         recipient_offset = region * CHUNK_SIZE
         profile: list[tuple[int, int, str]] = []
-        seen: set[int] = set()
+        seen: set[tuple[int, int]] = set()
         if args.pin_region_421 and region == 421:
             for offset, length in PINNED_421:
                 add_candidate(
@@ -116,14 +121,14 @@ def main() -> int:
                     "pinned_421",
                     recipient_offset,
                 )
-        for _rank, offset in ranked.get(region, []):
+        for _rank, offset, length in ranked.get(region, []):
             if len(profile) >= args.donors_per_region:
                 break
             add_candidate(
                 profile,
                 seen,
                 offset,
-                DEFAULT_LENGTH,
+                length,
                 "proxy_ranked",
                 recipient_offset,
             )
@@ -174,8 +179,11 @@ def main() -> int:
                 digest,
             )
         )
-        for assignment in assignments:
-            output.write(ASSIGNMENT.pack(*assignment))
+        for recipient, offset, length, order in assignments:
+            encoded_length = 0 if length == 65536 else length
+            output.write(ASSIGNMENT.pack(
+                recipient, offset, encoded_length, order
+            ))
 
     manifest = args.manifest or args.output_plan.with_suffix(".csv")
     manifest.parent.mkdir(parents=True, exist_ok=True)

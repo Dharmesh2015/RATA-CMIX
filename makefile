@@ -10,7 +10,10 @@ PAGE_DONOR_RANKER_OUT ?= postr1_page_donor_ranker
 DONOR ?= 0
 POSTR1 ?= 0
 MINI_CMIX ?= 0
+VIRTUAL_REPLAY ?= 0
 DONOR_DISCOVERY ?= 0
+RESEARCH_DONOR_BOOTSTRAP ?= 0
+POSTR1_TRANSFORM ?= 0
 DONOR_DISCOVERY_SOURCE :=
 DONOR_DISCOVERY_HEADER :=
 DONOR_DISCOVERY_OBJECT :=
@@ -33,6 +36,15 @@ POSTR1_OBJECT := postr1_experts.o
 endif
 ifeq ($(MINI_CMIX),1)
 CFLAGS_DEFINES += -DFX4_MINI_CMIX=1
+endif
+ifeq ($(VIRTUAL_REPLAY),1)
+CFLAGS_DEFINES += -DFX4_VIRTUAL_REPLAY=1
+endif
+ifeq ($(RESEARCH_DONOR_BOOTSTRAP),1)
+CFLAGS_DEFINES += -DFX4_RESEARCH_DONOR_BOOTSTRAP=1
+endif
+ifeq ($(POSTR1_TRANSFORM),1)
+CFLAGS_DEFINES += -DFX4_POSTR1_TRANSFORM=1
 endif
 DONOR_SOURCE :=
 DONOR_HEADER :=
@@ -116,3 +128,9 @@ clean:
 	rm -f $(PAGE_DONOR_RANKER_OUT)
 
 all: cmix remap
+
+# Research build: every optional path remains plan-gated at runtime. With no
+# F4CP/F4VR plan it produces the accepted baseline prediction stream.
+.PHONY: selective
+selective:
+	$(MAKE) cmix DONOR=1 POSTR1=1 MINI_CMIX=1 VIRTUAL_REPLAY=1 OUT=$(OUT)

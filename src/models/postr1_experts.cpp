@@ -40,6 +40,8 @@ std::uint64_t DonorContextHash(
 PostR1Experts::PostR1Experts() {
   expert_probability_.fill(0.5f);
   mixer_error_.fill(8192);
+  const char* oracle_path = std::getenv("FX4_POSTR1_ORACLE");
+  oracle_summary_enabled_ = oracle_path && *oracle_path;
   const char* oracle_only = std::getenv("FX4_POSTR1_ORACLE_ONLY");
   oracle_only_ = oracle_only && std::strcmp(oracle_only, "0") != 0;
   const char* trace_path = std::getenv("FX4_MINI_SUBSET_TRACE");
@@ -273,6 +275,9 @@ void PostR1Experts::SetDonorProfile(
   donor_profile_prediction_ = 0;
   donor_profile_confidence_ = 0;
   donor_profile_agreement_ = 0;
+  donor_gate_score_.fill(0);
+  donor_gate_hits_.fill(0);
+  donor_gate_context_ = 0;
   donor_recent_bytes_.fill(0);
   donor_recent_pos_ = 0;
   donor_bytes_seen_ = 0;
@@ -493,6 +498,8 @@ float PostR1Experts::Predict(float baseline_probability,
   }
   const unsigned int probability_bucket =
       std::min(31u, static_cast<unsigned int>(baseline_probability_ * 32.0f));
+  donor_gate_context_ = static_cast<std::uint8_t>(
+      bit_position | ((probability_bucket >> 3) << 3));
   const std::uint32_t micro_context = MixHash(
       probability_bucket | (bit_position << 5) |
       ((residual_history_ & 255u) << 8) |
@@ -548,9 +555,19 @@ float PostR1Experts::Predict(float baseline_probability,
 
     float gate = 0.0f;
     if (i == 10) {
-      // Exact donor continuation hits are usable immediately. Page-level
-      // exact coding still rejects every harmful profile.
-      gate = profile_donor_confidence() > 0.0f ? 1.0f : 0.0f;
+      // Learn from earlier exact hits in this recipient before trusting the
+      // profile. The 32 direct regimes keep this causal and cheap while
+      // avoiding false-positive donor matches in otherwise easy contexts.
+      const unsigned int context = donor_gate_context_;
+      if (donor_profile_agreement_ >= 2 &&
+          profile_donor_confidence() > 0.0f) {
+        gate = 1.0f;
+      } else if (profile_donor_confidence() > 0.0f &&
+          donor_gate_hits_[context] >= 8 &&
+          donor_gate_score_[context] > 16) {
+        gate = std::min(1.0f,
+            static_cast<float>(donor_gate_score_[context]) / 128.0f);
+      }
     } else if (i == 11) {
       // The subset and correction strength are explicitly selected and paid
       // for in F4CP v6, so do not add a second hidden online gate.
@@ -569,9 +586,7 @@ float PostR1Experts::Predict(float baseline_probability,
     mixer_input_[i] = delta * gate;
   }
 
-  const bool donor_only =
-      (evaluation_mask_ & ~(kDonorProfile | kContextMixer)) == 0;
-  if (!donor_only) {
+  if (evaluation_mask_ & kContextMixer) {
     mixer_input_[kExpertCount] = 1.0f;
     mixer_input_[kExpertCount + 4] =
         std::min(4.0f, static_cast<float>(match_length_) / 16.0f);
@@ -646,6 +661,25 @@ void PostR1Experts::Perceive(int bit) {
   }
   const int residual = bit ^ last_hard_prediction_;
   const unsigned int bit_position = last_bit_position_;
+  if ((evaluation_mask_ & kDonorProfile) != 0 &&
+      std::fabs(expert_delta_[10]) > 1.0e-6f) {
+    const float donor_gain =
+        0.25f * (1.0f + static_cast<float>((profile_id_ >> 6) & 3u));
+    const float candidate = Logistic(
+        Logit(baseline_probability_) + donor_gain * expert_delta_[10]);
+    const float base_mass = bit ? baseline_probability_
+                                : 1.0f - baseline_probability_;
+    const float candidate_mass = bit ? candidate : 1.0f - candidate;
+    const float gain = std::log2(ClampProbability(candidate_mass) /
+        ClampProbability(base_mass));
+    const int scaled = std::max(-2048, std::min(2048,
+        static_cast<int>(gain * 256.0f)));
+    std::int32_t& score = donor_gate_score_[donor_gate_context_];
+    score -= score / 128;
+    score = std::max(-32768, std::min(32768, score + scaled));
+    std::uint16_t& hits = donor_gate_hits_[donor_gate_context_];
+    if (hits != 0xffffu) ++hits;
+  }
   UpdateExpertGains(bit);
   const std::uint8_t previous = recent_bytes_[(recent_pos_ - 1) & 63u];
   const std::uint8_t previous2 = recent_bytes_[(recent_pos_ - 2) & 63u];
@@ -761,11 +795,13 @@ void PostR1Experts::Perceive(int bit) {
       stat->loss_bits += bit_loss(probability);
       ++stat->bits;
     };
-    add_loss(&oracle_[0], baseline_probability_);
-    for (unsigned int i = 0; i < kExpertCount; ++i) {
-      add_loss(&oracle_[i + 1], expert_probability_[i]);
+    if (oracle_summary_enabled_) {
+      add_loss(&oracle_[0], baseline_probability_);
+      for (unsigned int i = 0; i < kExpertCount; ++i) {
+        add_loss(&oracle_[i + 1], expert_probability_[i]);
+      }
+      add_loss(&oracle_[kExpertCount + 1], final_probability_);
     }
-    add_loss(&oracle_[kExpertCount + 1], final_probability_);
 
     if (!span_oracle_.empty()) {
       SpanOracleStat& span = span_oracle_.back();
@@ -774,12 +810,25 @@ void PostR1Experts::Perceive(int bit) {
       const std::array<std::uint32_t, 4> alternatives{{
           0u, kMiniCmix | context, kDonorProfile | context,
           kMiniCmix | kDonorProfile | context}};
-      span.loss_bits[0] += bit_loss(baseline_probability_);
+      std::array<double, 4> losses{};
+      losses[0] = bit_loss(baseline_probability_);
       for (unsigned int i = 1; i < alternatives.size(); ++i) {
-        span.loss_bits[i] += bit_loss(Logistic(
-            base_logit + CorrectionFor(alternatives[i])));
+        const std::uint32_t required = alternatives[i] & ~kContextMixer;
+        if ((evaluation_mask_ & required) != required) {
+          losses[i] = losses[0];
+        } else if (i == 3 && (evaluation_mask_ & kMiniCmix) == 0) {
+          losses[i] = losses[2];
+        } else {
+          losses[i] = bit_loss(Logistic(
+              base_logit + CorrectionFor(alternatives[i])));
+        }
+        span.loss_bits[i] += losses[i];
       }
-      span.loss_bits[4] += bit_loss(final_probability_);
+      span.loss_bits[0] += losses[0];
+      unsigned int selected = 0;
+      if (evaluation_mask_ & kMiniCmix) selected |= 1u;
+      if (evaluation_mask_ & kDonorProfile) selected |= 2u;
+      span.loss_bits[4] += losses[selected];
       ++span.bits;
     }
   }

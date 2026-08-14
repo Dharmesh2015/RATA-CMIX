@@ -1,0 +1,11 @@
+{
+  "format": "F4CP-v3",
+  "assignments": 0,
+  "recipient_regions": 0,
+  "gross_exact_gain_bytes": 0,
+  "archive_plan_bytes": 3,
+  "net_exact_gain_bytes": -3,
+  "external_plan_bytes": 58,
+  "stream_bytes": 587138826,
+  "stream_sha256": "7826ff63dedd526c119dda08e6e044be8fa8f6e89a55f3d6b1f3447cdfc5c1ce"
+}

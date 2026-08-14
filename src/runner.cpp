@@ -92,7 +92,7 @@ bool CopyResearchStream(const std::string& source, const char* destination) {
 #endif
 
 #if FX4_RESEARCH_STREAM_DUMP || FX4_SCR2 || FX4_DONOR_PLAN || \
-    FX4_POSTR1_TRANSFORM
+    FX4_POSTR1_TRANSFORM || FX4_RESEARCH_DONOR_BOOTSTRAP
 bool EnvironmentEnabled(const char* name) {
   const char* value = std::getenv(name);
   return value && *value && std::strcmp(value, "0") != 0;
@@ -652,9 +652,10 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
 #if FX4_POSTR1_TRANSFORM
   const char* postr1_plan_path = std::getenv("FX4_POSTR1_TRANSFORM_PLAN");
   if (postr1_plan_path && *postr1_plan_path) {
-    if (!post_wrt_side_path) {
+    if (!post_wrt_side_path && !raw_entropy_input) {
       fprintf(stderr,
-          "FX4_POSTR1_TRANSFORM_PLAN is valid only after R1 in the -e path\n");
+          "FX4_POSTR1_TRANSFORM_PLAN requires -e or "
+          "FX4_RAW_ENTROPY_INPUT=1\n");
       return false;
     }
     std::uint64_t before_transform = 0;
@@ -719,7 +720,13 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
   temp_in.seekg(0, std::ios::beg);
 
   std::vector<bool> vocab(256, false);
-  if (temp_bytes < kMinVocabFileSize) {
+  const bool force_full_vocab =
+#if FX4_DONOR_PLAN
+      EnvironmentEnabled("FX4_FORCE_FULL_VOCAB");
+#else
+      false;
+#endif
+  if (force_full_vocab || temp_bytes < kMinVocabFileSize) {
     std::fill(vocab.begin(), vocab.end(), true);
   } else {
     ExtractVocab(temp_bytes, &temp_in, &vocab);
@@ -804,7 +811,9 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
   else if (dictionary) {
     preprocessor::Pretrain(&p, dictionary);
   }
-  ReplayResearchDonor(research_donor, &p);
+  if (!EnvironmentEnabled("FX4_RESEARCH_DONOR_PROFILE_ONLY")) {
+    ReplayResearchDonor(research_donor, &p);
+  }
   ConfigureResearchDonorProfile(research_donor, &p);
 #endif
   if (!Compress(temp_bytes, &temp_in, &data_out, output_bytes, &p,
@@ -905,7 +914,9 @@ bool RunDecompression(const std::string& input_path,
     Predictor p(vocab, scr2_used);
     if (dictionary_used) preprocessor::Pretrain(&p, dictionary);
 #if FX4_RESEARCH_DONOR_BOOTSTRAP
-    ReplayResearchDonor(research_donor, &p);
+    if (!EnvironmentEnabled("FX4_RESEARCH_DONOR_PROFILE_ONLY")) {
+      ReplayResearchDonor(research_donor, &p);
+    }
     ConfigureResearchDonorProfile(research_donor, &p);
 #endif
 
@@ -948,8 +959,7 @@ bool RunDecompression(const std::string& input_path,
 
 #if FX4_DONOR_PLAN
   if (EnvironmentEnabled("FX4_RAW_ENTROPY_OUTPUT")) {
-    if (post_wrt_side_path || scr2_used || postr1_transform_used ||
-        virtual_replay_used ||
+    if (post_wrt_side_path || scr2_used || virtual_replay_used ||
         !CopyResearchStream(temp_path, output_path.c_str())) {
       return false;
     }

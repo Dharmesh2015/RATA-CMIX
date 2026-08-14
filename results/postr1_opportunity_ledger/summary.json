@@ -1,0 +1,78 @@
+{
+  "groups": 531,
+  "candidate_edges": 5734,
+  "candidate_sources": 348,
+  "recipients_with_donor_candidate": 524,
+  "exact_accepted": [
+    {
+      "name": "C421-D388-7",
+      "recipient_offset": 441450496,
+      "recipient_length": 1048576,
+      "source_group": 388,
+      "donor_windows": "407573504:4096;407581696:2048;407775744:2048;407787520:4096;407793664:4096;407799808:4096;407810048:2048",
+      "baseline_archive_bytes": 198857,
+      "payload_bytes": 197309,
+      "plan_bytes": 25,
+      "all_in_bytes": 197334,
+      "net_saving_bytes": 1523,
+      "confidence": "exact_isolated_roundtrip",
+      "remaining_gate": "full_prefix_validation"
+    },
+    {
+      "name": "G389-D388-7",
+      "recipient_offset": 407838930,
+      "recipient_length": 1041373,
+      "source_group": 388,
+      "donor_windows": "407573504:4096;407581696:2048;407775744:2048;407787520:4096;407793664:4096;407799808:4096;407810048:2048",
+      "baseline_archive_bytes": 290286,
+      "payload_bytes": 287496,
+      "plan_bytes": 25,
+      "all_in_bytes": 287521,
+      "net_saving_bytes": 2765,
+      "confidence": "exact_isolated_roundtrip",
+      "remaining_gate": "full_prefix_validation"
+    },
+    {
+      "name": "G3-D2-2",
+      "recipient_offset": 3146668,
+      "recipient_length": 1048846,
+      "source_group": 2,
+      "donor_windows": "2097920:16384;3080960:65536",
+      "baseline_archive_bytes": 126072,
+      "payload_bytes": 120548,
+      "plan_bytes": 25,
+      "all_in_bytes": 120573,
+      "net_saving_bytes": 5499,
+      "confidence": "exact_isolated_roundtrip",
+      "remaining_gate": "full_prefix_validation"
+    }
+  ],
+  "screening_projection": {
+    "donor_expected_net_bytes": 100411.44399588503,
+    "donor_high_gross_bytes": 942647.7607634506,
+    "scr2_raw_saving_bytes": 22037713,
+    "scr2_entropy_saving_bytes": 0,
+    "mini11_entropy_saving_bytes": 0
+  },
+  "scr2_mapping": {
+    "marker": 0,
+    "patterns": 128,
+    "macro_hits": 1968028,
+    "escaped_markers": 25,
+    "decoded_size": 587138826,
+    "original_sha256": "7826ff63dedd526c119dda08e6e044be8fa8f6e89a55f3d6b1f3447cdfc5c1ce"
+  },
+  "mini_oracle": {
+    "trace_rows": 599,
+    "classes": 4
+  },
+  "calibration": {
+    "accepted_entropy_gain_bytes": 1548,
+    "accepted_plan_bytes": 25,
+    "accepted_overlap_windows": 34.0,
+    "validated_source_discount": 0.25,
+    "new_source_discount": 0.1,
+    "warning": "proxy estimates are ranking aids, not additive archive savings"
+  },
+  "production_acceptance": "Keep an edge only when exact warm-prefix payload gain exceeds all profile, assignment, span, executable, and transform metadata bytes."
+}

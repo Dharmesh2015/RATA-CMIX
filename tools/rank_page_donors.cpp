@@ -244,6 +244,18 @@ std::uint8_t WindowClass(std::uint64_t key) {
   return static_cast<std::uint8_t>(key & 15u);
 }
 
+std::uint32_t SourcePackId(
+    const std::vector<Pack>& packs, std::uint32_t offset) {
+  const auto found = std::upper_bound(packs.begin(), packs.end(), offset,
+      [](std::uint32_t value, const Pack& pack) {
+        return value < pack.offset;
+      });
+  if (found == packs.begin()) return std::numeric_limits<std::uint32_t>::max();
+  const Pack& pack = *(found - 1);
+  return static_cast<std::uint64_t>(offset) < pack.offset + pack.length
+      ? pack.id : std::numeric_limits<std::uint32_t>::max();
+}
+
 void Usage() {
   std::cerr << "usage: postr1_page_donor_ranker POST_R1 RECIPIENTS_CSV "
                "OUT_CSV [TOP_K] [STOP_OFFSET]\n";
@@ -317,7 +329,9 @@ int main(int argc, char** argv) {
                 "recipient_class,donor_class\n";
 
   std::unordered_map<std::uint64_t, Posting> postings;
+  std::unordered_map<std::uint64_t, Posting> fallback_postings;
   postings.reserve(2000000);
+  fallback_postings.reserve(2000000);
   std::size_t indexed_pack = 0;
   std::vector<RecipientScore> recipient_scores;
   recipient_scores.reserve(packs.size());
@@ -334,6 +348,7 @@ int main(int argc, char** argv) {
     for (const std::uint64_t signature :
          Signatures(stream + offset, length)) {
       postings[SignatureKey(signature, donor_pack.stream_class)].Add(key);
+      fallback_postings[signature].Add(key);
     }
   };
 
@@ -405,6 +420,43 @@ int main(int argc, char** argv) {
       }
     }
 
+    // A first-of-class recipient has no same-class history by definition.
+    // In that case only, admit structure-matching donors from other classes
+    // as discovery candidates. Exact warm arithmetic coding remains the
+    // acceptance gate, so this fallback cannot alter a production plan by
+    // itself.
+    if (scores.empty()) {
+      for (unsigned int length_index = 0;
+           length_index < kDonorLengths.size(); ++length_index) {
+        const std::uint32_t length = kDonorLengths[length_index];
+        if (length > pack.length) continue;
+        const std::uint64_t last = pack.offset + pack.length - length;
+        const std::uint64_t stride = std::max<std::uint64_t>(length, 4096u);
+        for (std::uint64_t position = pack.offset;;) {
+          for (const std::uint64_t signature :
+               Signatures(stream + position, length)) {
+            const auto found = fallback_postings.find(signature);
+            if (found == fallback_postings.end()) continue;
+            for (std::uint8_t i = 0; i < found->second.count; ++i) {
+              const std::uint64_t donor_key = found->second.offsets[i];
+              const std::uint32_t donor_offset = WindowOffset(donor_key);
+              const std::uint32_t donor_length = WindowLength(donor_key);
+              if (donor_length == 0 ||
+                  static_cast<std::uint64_t>(donor_offset) + donor_length >
+                      pack.offset) {
+                continue;
+              }
+              CandidateScore& score = scores[donor_key];
+              score.score += 1u + length_index * 2u;
+              ++score.hits;
+            }
+          }
+          if (position == last) break;
+          position = std::min(last, position + stride);
+        }
+      }
+    }
+
     std::vector<std::pair<std::uint64_t, CandidateScore>> all_ranked(
         scores.begin(), scores.end());
     std::sort(all_ranked.begin(), all_ranked.end(),
@@ -419,11 +471,18 @@ int main(int argc, char** argv) {
         });
     std::vector<std::pair<std::uint64_t, CandidateScore>> ranked;
     ranked.reserve(std::min<std::size_t>(top_k, all_ranked.size()));
-    std::unordered_set<std::uint32_t> source_buckets;
+    // Reserve the first pass for distinct page-aligned source groups. The old
+    // 64 KiB buckets could fill every candidate slot from one 1 MiB donor
+    // group, which made an apparently broad campaign repeatedly test G388.
+    std::unordered_set<std::uint32_t> source_groups;
     for (unsigned int pass = 0; pass < 2 && ranked.size() < top_k; ++pass) {
       for (const auto& candidate : all_ranked) {
-        const std::uint32_t bucket = WindowOffset(candidate.first) >> 16;
-        if (pass == 0 && !source_buckets.insert(bucket).second) continue;
+        const std::uint32_t source_group =
+            SourcePackId(packs, WindowOffset(candidate.first));
+        if (source_group == std::numeric_limits<std::uint32_t>::max()) {
+          continue;
+        }
+        if (pass == 0 && !source_groups.insert(source_group).second) continue;
         if (std::find_if(ranked.begin(), ranked.end(),
                 [&](const auto& selected) {
                   return selected.first == candidate.first;

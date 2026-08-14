@@ -82,6 +82,14 @@ echo "  compression CPU: $cpu"
 echo "  trial CPU: $trial_cpu"
 echo "  max new trials: ${FX4_DONOR_MAX_NEW_TRIALS:-0}"
 echo "  max new regions: ${FX4_WINNER_MAX_REGIONS:-0}"
+echo "  stop offset: ${FX4_WINNER_STOP_OFFSET:-full}"
+echo "  grouped recipients: ${FX4_WINNER_PACKS_CSV:-default 1MiB}"
+echo "  ranked candidates: ${FX4_WINNER_PAGE_CANDIDATES_CSV:-internal}"
+echo "  recipient filter: ${FX4_WINNER_RECIPIENTS_CSV:-all}"
+echo "  quick singles: ${FX4_WINNER_QUICK_SINGLES:-0}"
+echo "  donor strength: ${FX4_WINNER_DONOR_STRENGTH:-1}"
+echo "  context mixer: ${FX4_WINNER_CONTEXT_MIXER:-0}"
+echo "  incremental metadata: ${FX4_WINNER_METADATA_BYTES:-29} bytes"
 
 set +e
 /usr/bin/time -v -o "$result_root/search.time.txt" \
@@ -92,6 +100,11 @@ set +e
       FX4_DONOR_MAX_NEW_TRIALS="${FX4_DONOR_MAX_NEW_TRIALS:-0}" \
       FX4_WINNER_MAX_REGIONS="${FX4_WINNER_MAX_REGIONS:-0}" \
       FX4_WINNER_START_REGION="${FX4_WINNER_START_REGION:-1}" \
+      FX4_WINNER_STOP_OFFSET="${FX4_WINNER_STOP_OFFSET:-18446744073709551615}" \
+      FX4_WINNER_PACKS_CSV="${FX4_WINNER_PACKS_CSV:-}" \
+      FX4_WINNER_PAGE_CANDIDATES_CSV="${FX4_WINNER_PAGE_CANDIDATES_CSV:-}" \
+      FX4_WINNER_RECIPIENTS_CSV="${FX4_WINNER_RECIPIENTS_CSV:-}" \
+      FX4_WINNER_RECIPIENT_LIMIT="${FX4_WINNER_RECIPIENT_LIMIT:-0}" \
       FX4_WINNER_TOP_SPANS="${FX4_WINNER_TOP_SPANS:-8}" \
       FX4_WINNER_CANDIDATES="${FX4_WINNER_CANDIDATES:-12}" \
       FX4_WINNER_REFINE_OFFSETS="${FX4_WINNER_REFINE_OFFSETS:-4}" \
@@ -102,6 +115,13 @@ set +e
       FX4_WINNER_MAX_DEPTH="${FX4_WINNER_MAX_DEPTH:-8}" \
       FX4_WINNER_NEAR_BYTES="${FX4_WINNER_NEAR_BYTES:-64}" \
       FX4_WINNER_LEAVE_ONE_OUT="${FX4_WINNER_LEAVE_ONE_OUT:-1}" \
+      FX4_WINNER_PLANNED_DONORS="${FX4_WINNER_PLANNED_DONORS:-7}" \
+      FX4_WINNER_PLANNED_ONLY="${FX4_WINNER_PLANNED_ONLY:-0}" \
+      FX4_WINNER_PLANNED_PREFIXES="${FX4_WINNER_PLANNED_PREFIXES:-1}" \
+      FX4_WINNER_QUICK_SINGLES="${FX4_WINNER_QUICK_SINGLES:-0}" \
+      FX4_WINNER_DONOR_STRENGTH="${FX4_WINNER_DONOR_STRENGTH:-1}" \
+      FX4_WINNER_CONTEXT_MIXER="${FX4_WINNER_CONTEXT_MIXER:-0}" \
+      FX4_WINNER_METADATA_BYTES="${FX4_WINNER_METADATA_BYTES:-29}" \
   nice -n -10 taskset -c "$cpu" \
   ./cmix -e enwik9 discovery_payload \
   2>&1 | tee -a "$result_root/search.log"
@@ -114,7 +134,7 @@ if [[ -f "$ledger.winner_selected.csv" ]]; then
     "$result_root/current_winners.f4cp" \
     | tee "$result_root/current_winners_summary.json"
 fi
-if [[ -s "$ledger.winner_marginals.csv" ]]; then
+if [[ -f "$ledger.winner_marginals.csv" ]] && [[ $(wc -l < "$ledger.winner_marginals.csv") -gt 1 ]]; then
   bash "$work_root/source/tools/find_multi_recipient_donors.sh" \
     "$ledger.winner_marginals.csv" 0 2 \
     >"$result_root/multi_recipient_donors.csv"

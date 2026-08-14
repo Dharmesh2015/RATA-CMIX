@@ -104,6 +104,18 @@ bool Predictor::HasPostR1DonorProfile() const {
   return false;
 #endif
 }
+#if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
+void Predictor::SetPostR1BranchSignals(PostR1Experts* target) const {
+  std::array<float, 11> mini_model_probabilities{};
+  mini_model_probabilities.fill(0.5f);
+  target->SetModelSignals(donor_branch_ppmd_probability_,
+      donor_branch_lstm_probability_, donor_branch_fxcm_probability_, 0.5f,
+      mini_model_probabilities, donor_branch_ppmd_order_bands_,
+      donor_branch_ppmd_order_, donor_branch_escape_depth_,
+      donor_branch_escape_rate_, donor_branch_residual_probability_,
+      donor_branch_match_length_);
+}
+#endif
 
 #if FX4_SELECTIVE_POSTR1
 void Predictor::UpdatePostR1ResidualDistribution() {
@@ -532,6 +544,20 @@ float Predictor::Predict() {
   p = PredictSpecialist(p, layers_[0].Inputs()[ppmd_model_index],
       layers_[0].Inputs()[byte_mixer_index],
       selected_fxcm_logit);
+#endif
+#if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
+  donor_branch_ppmd_probability_ =
+      Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]);
+  donor_branch_lstm_probability_ =
+      Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]);
+  donor_branch_fxcm_probability_ = aggregate_fxcm_probability;
+  donor_branch_ppmd_order_bands_ = byte_model_->PredictOrderBands();
+  donor_branch_ppmd_order_ = byte_model_->EffectiveOrder();
+  donor_branch_escape_depth_ = byte_model_->LastEscapeDepth();
+  donor_branch_escape_rate_ = byte_model_->RecentEscapeRate();
+  donor_branch_residual_probability_ = PostR1ResidualProbability();
+  donor_branch_match_length_ =
+      static_cast<unsigned int>(manager_.longest_match_);
 #endif
 #if FX4_SELECTIVE_POSTR1
   postr1_prediction_used_ = false;

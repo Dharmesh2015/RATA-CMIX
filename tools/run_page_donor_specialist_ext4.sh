@@ -84,6 +84,11 @@ if [[ "$use_ranked" == 1 ]]; then
     "FX4_WINNER_PAGE_CANDIDATES_CSV=$candidate_path"
   )
 fi
+if [[ -n "${FX4_WINNER_RECIPIENTS_CSV:-}" ]]; then
+  rank_env+=(
+    "FX4_WINNER_RECIPIENTS_CSV=$FX4_WINNER_RECIPIENTS_CSV"
+  )
+fi
 set +e
 /usr/bin/time -v -o "$result_root/latest.time.txt" \
   env \
@@ -99,7 +104,7 @@ set +e
     FX4_WINNER_PLANNED_DONORS="${FX4_WINNER_PLANNED_DONORS:-7}" \
     FX4_WINNER_LEAVE_ONE_OUT="${FX4_WINNER_LEAVE_ONE_OUT:-1}" \
     FX4_WINNER_START_REGION="${FX4_WINNER_START_REGION:-0}" \
-    FX4_WINNER_MAX_REGIONS=0 \
+    FX4_WINNER_MAX_REGIONS="${FX4_WINNER_MAX_REGIONS:-0}" \
     FX4_WINNER_CANDIDATES="${FX4_WINNER_CANDIDATES:-12}" \
     FX4_DONOR_MAX_NEW_TRIALS="${FX4_DONOR_MAX_NEW_TRIALS:-0}" \
     FX4_DONOR_TRIAL_CPU="$cpu" \

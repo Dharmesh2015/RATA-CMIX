@@ -1,0 +1,121 @@
+cmix-lex
+Compress:
+    to compress enwik9: cmix -e enwik9 [output]
+    to create a header for hutter prize: cmix -h comp_dict_size comp_new_order_size decomp_input_size
+    with dictionary:    cmix -c [dictionary] [input] [output]
+    without dictionary: cmix -c [input] [output]
+    no preprocessing:   cmix -n [input] [output]
+    only preprocessing: cmix -s [dictionary] [input] [output]
+                        cmix -s [input] [output]
+Decompress:
+    with dictionary:    cmix -d [dictionary] [input] [output]
+    without dictionary: cmix -d [input] [output]
+cmix-lex
+Compress:
+    to compress enwik9: cmix -e enwik9 [output]
+    to create a header for hutter prize: cmix -h comp_dict_size comp_new_order_size decomp_input_size
+    with dictionary:    cmix -c [dictionary] [input] [output]
+    without dictionary: cmix -c [input] [output]
+    no preprocessing:   cmix -n [input] [output]
+    only preprocessing: cmix -s [dictionary] [input] [output]
+                        cmix -s [input] [output]
+Decompress:
+    with dictionary:    cmix -d [dictionary] [input] [output]
+    without dictionary: cmix -d [input] [output]
+587138826 bytes -> 0 bytes in 69.75 s.
+587138826 bytes -> 0 bytes in 112.14 s.
+587138826 bytes -> 0 bytes in 127.68 s.
+587138826 bytes -> 0 bytes in 100.44 s.
+587138826 bytes -> 0 bytes in 112.69 s.
+587138826 bytes -> 0 bytes in 121.09 s.
+587138826 bytes -> 0 bytes in 100.95 s.
+587138826 bytes -> 0 bytes in 101.55 s.
+587138826 bytes -> 0 bytes in 104.80 s.
+587138826 bytes -> 0 bytes in 106.40 s.
+587138826 bytes -> 0 bytes in 95.97 s.
+587138826 bytes -> 0 bytes in 94.34 s.
+587138826 bytes -> 0 bytes in 106.54 s.
+587138826 bytes -> 0 bytes in 116.08 s.
+587138826 bytes -> 0 bytes in 124.91 s.
+587138826 bytes -> 0 bytes in 102.21 s.
+587138826 bytes -> 0 bytes in 105.67 s.
+587138826 bytes -> 0 bytes in 95.74 s.
+587138826 bytes -> 0 bytes in 102.22 s.
+587138826 bytes -> 0 bytes in 107.55 s.
+587138826 bytes -> 0 bytes in 119.61 s.
+587138826 bytes -> 0 bytes in 102.97 s.
+587138826 bytes -> 0 bytes in 91.83 s.
+587138826 bytes -> 0 bytes in 91.93 s.
+587138826 bytes -> 0 bytes in 91.34 s.
+587138826 bytes -> 0 bytes in 93.17 s.
+587138826 bytes -> 0 bytes in 102.55 s.
+587138826 bytes -> 0 bytes in 98.68 s.
+587138826 bytes -> 0 bytes in 97.45 s.
+587138826 bytes -> 0 bytes in 100.31 s.
+587138826 bytes -> 0 bytes in 96.80 s.
+587138826 bytes -> 0 bytes in 99.50 s.
+587138826 bytes -> 0 bytes in 100.31 s.
+587138826 bytes -> 0 bytes in 99.00 s.
+587138826 bytes -> 0 bytes in 103.53 s.
+587138826 bytes -> 0 bytes in 103.07 s.
+587138826 bytes -> 0 bytes in 106.03 s.
+587138826 bytes -> 0 bytes in 105.24 s.
+587138826 bytes -> 0 bytes in 100.52 s.
+587138826 bytes -> 0 bytes in 101.10 s.
+587138826 bytes -> 0 bytes in 114.41 s.
+587138826 bytes -> 0 bytes in 105.78 s.
+587138826 bytes -> 0 bytes in 107.40 s.
+587138826 bytes -> 0 bytes in 106.51 s.
+587138826 bytes -> 0 bytes in 109.40 s.
+587138826 bytes -> 0 bytes in 105.13 s.
+587138826 bytes -> 0 bytes in 111.49 s.
+587138826 bytes -> 0 bytes in 108.68 s.
+587138826 bytes -> 0 bytes in 109.56 s.
+587138826 bytes -> 0 bytes in 108.48 s.
+587138826 bytes -> 0 bytes in 104.81 s.
+587138826 bytes -> 0 bytes in 106.12 s.
+587138826 bytes -> 0 bytes in 108.57 s.
+587138826 bytes -> 0 bytes in 106.62 s.
+587138826 bytes -> 0 bytes in 108.94 s.
+587138826 bytes -> 0 bytes in 111.62 s.
+587138826 bytes -> 0 bytes in 114.57 s.
+587138826 bytes -> 0 bytes in 112.46 s.
+587138826 bytes -> 0 bytes in 115.81 s.
+587138826 bytes -> 0 bytes in 113.50 s.
+587138826 bytes -> 0 bytes in 108.86 s.
+587138826 bytes -> 0 bytes in 112.34 s.
+587138826 bytes -> 0 bytes in 117.74 s.
+587138826 bytes -> 0 bytes in 120.99 s.
+587138826 bytes -> 0 bytes in 120.80 s.
+587138826 bytes -> 0 bytes in 112.03 s.
+587138826 bytes -> 0 bytes in 121.94 s.
+587138826 bytes -> 0 bytes in 118.71 s.
+587138826 bytes -> 0 bytes in 121.64 s.
+587138826 bytes -> 0 bytes in 120.24 s.
+587138826 bytes -> 0 bytes in 116.30 s.
+587138826 bytes -> 0 bytes in 117.05 s.
+587138826 bytes -> 0 bytes in 120.06 s.
+587138826 bytes -> 0 bytes in 121.00 s.
+587138826 bytes -> 0 bytes in 123.86 s.
+587138826 bytes -> 0 bytes in 124.24 s.
+587138826 bytes -> 0 bytes in 117.77 s.
+587138826 bytes -> 0 bytes in 121.59 s.
+587138826 bytes -> 0 bytes in 119.32 s.
+587138826 bytes -> 0 bytes in 124.81 s.
+587138826 bytes -> 0 bytes in 124.73 s.
+587138826 bytes -> 0 bytes in 120.00 s.
+587138826 bytes -> 0 bytes in 124.32 s.
+587138826 bytes -> 0 bytes in 128.38 s.
+587138826 bytes -> 0 bytes in 121.65 s.
+587138826 bytes -> 0 bytes in 120.68 s.
+587138826 bytes -> 0 bytes in 120.17 s.
+587138826 bytes -> 0 bytes in 131.23 s.
+587138826 bytes -> 0 bytes in 132.11 s.
+587138826 bytes -> 0 bytes in 123.18 s.
+587138826 bytes -> 0 bytes in 121.79 s.
+587138826 bytes -> 0 bytes in 123.46 s.
+587138826 bytes -> 0 bytes in 129.88 s.
+587138826 bytes -> 0 bytes in 130.78 s.
+587138826 bytes -> 0 bytes in 147.47 s.
+587138826 bytes -> 0 bytes in 167.27 s.
+587138826 bytes -> 0 bytes in 157.34 s.

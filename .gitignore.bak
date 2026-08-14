@@ -1,0 +1,17 @@
+scripts/
+cmix
+remap
+pgo_data/
+progress.log
+run/
+changes.v2
+logs
+"tools/upx" 
+research/
+/cmix_*
+/emit_r1_map
+/postr1_page_index
+/postr1_page_donor_ranker
+ppm.temp
+results/span_oracle_validation/*.temp
+results/donor_multiday_seed/*.csv.shared.csv

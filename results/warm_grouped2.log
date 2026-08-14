@@ -1,0 +1,63 @@
+native used
+rm -f *.o
+rm -f cmix
+rm -f remap
+rm -f postr1_page_index
+rm -f emit_r1_map
+rm -f postr1_page_donor_ranker
+native used
+clang++-17 -m64 -std=c++17 -O3 -march=native -DNDEBUG \
+	tools/rank_page_donors.cpp -o postr1_page_donor_ranker
+native used
+clang++-17 -DSEED=923 -DUPDATE_LIMIT=3000 -DNDEBUG -DFX4_STDERR_PROGRESS=0 -DFX4_PROGRESS_LOG=0 -DFX4_LSTM_MID_BRIDGE=2 -DFX4_DONOR_FORK_DISCOVERY=1 -DFX4_SELECTIVE_POSTR1=1 -DFX4_DONOR_PLAN=1 -m64 -Wall -std=c++17 -ffp-model=fast -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-threadsafe-statics -Wno-unknown-escape-sequence -Wno-unused-variable -Wno-unneeded-internal-declaration -Wno-unused-but-set-variable -Wno-format  -march=native -mtune=native -O3 -fdata-sections -ffunction-sections src/coder/decoder.cpp src/coder/encoder.cpp src/context-manager.cpp src/contexts/bit-context.cpp src/contexts/bracket-context.cpp src/contexts/combined-context.cpp src/contexts/context-hash.cpp src/contexts/indirect-hash.cpp src/contexts/interval-hash.cpp src/contexts/interval.cpp src/contexts/sparse.cpp src/models/bracket.cpp src/models/byte-model.cpp src/models/direct-hash.cpp src/models/direct.cpp src/models/match.cpp src/models/fxcmv1.cpp src/models/postr1_experts.cpp src/models/ppmd.cpp src/states/nonstationary.cpp src/states/run-map.cpp src/mixer/byte-mixer.cpp src/mixer/mixer-input.cpp src/mixer/mixer.cpp src/mixer/sigmoid.cpp src/mixer/sse.cpp -c src/predictor.cpp
+clang++-17 -DSEED=923 -DUPDATE_LIMIT=3000 -DNDEBUG -DFX4_STDERR_PROGRESS=0 -DFX4_PROGRESS_LOG=0 -DFX4_LSTM_MID_BRIDGE=2 -DFX4_DONOR_FORK_DISCOVERY=1 -DFX4_SELECTIVE_POSTR1=1 -DFX4_DONOR_PLAN=1 -m64 -Wall -std=c++17 -ffp-model=fast -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-threadsafe-statics -Wno-unknown-escape-sequence -Wno-unused-variable -Wno-unneeded-internal-declaration -Wno-unused-but-set-variable -Wno-format  -march=native -mtune=native -Os -fdata-sections -ffunction-sections src/preprocess/preprocessor.cpp src/preprocess/dictionary.cpp -c 
+clang++-17 -DSEED=923 -DUPDATE_LIMIT=3000 -DNDEBUG -DFX4_STDERR_PROGRESS=0 -DFX4_PROGRESS_LOG=0 -DFX4_LSTM_MID_BRIDGE=2 -DFX4_DONOR_FORK_DISCOVERY=1 -DFX4_SELECTIVE_POSTR1=1 -DFX4_DONOR_PLAN=1 -m64 -Wall -std=c++17 -ffp-model=fast -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-threadsafe-statics -Wno-unknown-escape-sequence -Wno-unused-variable -Wno-unneeded-internal-declaration -Wno-unused-but-set-variable -Wno-format -Oz -fdata-sections -ffunction-sections -march=native -mtune=native src/donor_plan.cpp src/donor_fork_discovery.cpp src/donor_winner_search.cpp src/r1_reorder_transform.cpp src/scr2_transform.cpp src/virtual_replay_plan.cpp src/postr1_transform.cpp src/runner.cpp -c
+clang++-17 -m64 -Wl,--gc-sections -std=c++17 bit-context.o bracket-context.o bracket.o byte-mixer.o byte-model.o combined-context.o context-hash.o context-manager.o decoder.o dictionary.o direct-hash.o direct.o donor_plan.o donor_fork_discovery.o donor_winner_search.o encoder.o indirect-hash.o interval-hash.o interval.o match.o mixer-input.o mixer.o nonstationary.o fxcmv1.o postr1_experts.o ppmd.o predictor.o preprocessor.o r1_reorder_transform.o scr2_transform.o virtual_replay_plan.o postr1_transform.o run-map.o runner.o sigmoid.o sparse.o sse.o -s -o cmix_page_donor
+rm -f *.o
+cmix-lex
+Compress:
+    to compress enwik9: cmix -e enwik9 [output]
+    to create a header for hutter prize: cmix -h comp_dict_size comp_new_order_size decomp_input_size
+    with dictionary:    cmix -c [dictionary] [input] [output]
+    without dictionary: cmix -c [input] [output]
+    no preprocessing:   cmix -n [input] [output]
+    only preprocessing: cmix -s [dictionary] [input] [output]
+                        cmix -s [input] [output]
+Decompress:
+    with dictionary:    cmix -d [dictionary] [input] [output]
+    without dictionary: cmix -d [input] [output]
+exit_status=255
+==== /mnt/d/mywork/myideas/latestcompressor/fx4-cmix/results/warm_grouped_1mib/page.winner_selected.csv
+recipient_region,recipient_offset,baseline_payload_bytes,selected_payload_bytes,gain_bytes,net_gain_bytes,donor_count,donors,candidate_count,exact_trials
+==== /mnt/d/mywork/myideas/latestcompressor/fx4-cmix/results/warm_grouped_1mib/page.winner_positive.csv
+recipient_region,recipient_offset,trial_id,stage,depth,donor_count,donors,baseline_payload_bytes,trial_payload_bytes,gain_bytes,marginal_gain_bytes,status
+==== /mnt/d/mywork/myideas/latestcompressor/fx4-cmix/results/warm_grouped_1mib/page.winner_near.csv
+recipient_region,recipient_offset,trial_id,stage,depth,donor_count,donors,baseline_payload_bytes,trial_payload_bytes,gain_bytes,marginal_gain_bytes,status
+==== /mnt/d/mywork/myideas/latestcompressor/fx4-cmix/results/warm_grouped_1mib/page.winner_marginals.csv
+recipient_region,recipient_offset,profile_donors,removed_donor,profile_donor_count,full_payload_bytes,without_payload_bytes,marginal_gain_bytes,status
+post_r1_mib,pages,winner_pages,baseline_bytes,selected_bytes,net_gain_bytes
+0,0,0,0,0,0
+1,0,0,0,0,0
+2,0,0,0,0,0
+3,0,0,0,0,0
+4,0,0,0,0,0
+5,0,0,0,0,0
+6,0,0,0,0,0
+7,0,0,0,0,0
+8,0,0,0,0,0
+9,0,0,0,0,0
+10,0,0,0,0,0
+11,0,0,0,0,0
+12,0,0,0,0,0
+13,0,0,0,0,0
+14,0,0,0,0,0
+15,0,0,0,0,0
+16,0,0,0,0,0
+17,0,0,0,0,0
+18,0,0,0,0,0
+19,0,0,0,0,0
+20,0,0,0,0,0
+21,0,0,0,0,0
+22,0,0,0,0,0
+class_name,pages,winner_pages,baseline_bytes,selected_bytes,net_gain_bytes
+marginal ledger has no recipient rows

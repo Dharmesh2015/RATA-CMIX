@@ -385,7 +385,9 @@ def write_f4cp(path: Path, entropy_size: int, stream_digest: bytes,
         F4CP_HEADER.pack(b"F4CP", version, 0, MIB, 0, entropy_size, len(donors), stream_digest)
     )
     for donor in donors:
-        output.extend(F4CP_DONOR.pack(donor.recipient, donor.donor_offset, donor.length, donor.order))
+        encoded_length = 0 if donor.length == 65536 else donor.length
+        output.extend(F4CP_DONOR.pack(
+            donor.recipient, donor.donor_offset, encoded_length, donor.order))
     output.extend(struct.pack("<I", len(experts)))
     for span in experts:
         if version >= 6:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import array
 import bisect
+import csv
 import json
 import struct
 import sys
@@ -126,11 +127,43 @@ class AhoCorasick:
 
 
 @dataclass(frozen=True)
+class Region:
+    region_id: int
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
 class Candidate:
     start: int
     end: int
     pattern: int
     gross_bytes: float
+    region: int = -1
+
+
+def load_regions(path: Path, expected_size: int) -> list[Region]:
+    regions: list[Region] = []
+    with path.open(newline="", encoding="utf-8-sig") as source:
+        for row in csv.DictReader(source):
+            region = Region(
+                int(row["pack_id"]),
+                int(row["post_r1_start"]),
+                int(row["post_r1_end"]),
+            )
+            if region.end <= region.start:
+                raise ValueError("invalid group boundary")
+            if regions and (
+                region.region_id != regions[-1].region_id + 1
+                or region.start != regions[-1].end
+            ):
+                raise ValueError("groups are not contiguous")
+            if not regions and (region.region_id != 0 or region.start != 0):
+                raise ValueError("groups must start at byte zero")
+            regions.append(region)
+    if not regions or regions[-1].end != expected_size:
+        raise ValueError("groups do not cover the complete stream")
+    return regions
 
 
 def find_candidates(
@@ -138,6 +171,7 @@ def find_candidates(
     costs: array.array[float],
     patterns: list[bytes],
     minimum_gross: float,
+    regions: list[Region] | None = None,
 ) -> list[Candidate]:
     prefix = array.array("d", [0.0])
     running = 0.0
@@ -146,6 +180,7 @@ def find_candidates(
         prefix.append(running)
     matcher = AhoCorasick(patterns)
     candidates: list[Candidate] = []
+    region_ends = [region.end for region in regions] if regions else []
     node = 0
     for pos, byte in enumerate(data):
         while node and byte not in matcher.next[node]:
@@ -157,9 +192,19 @@ def find_candidates(
             end = pos + 1
             if start // IO_BLOCK != (end - 1) // IO_BLOCK:
                 continue
+            region_id = -1
+            if regions:
+                region_index = bisect.bisect_right(region_ends, start)
+                if (
+                    region_index >= len(regions)
+                    or end > regions[region_index].end
+                ):
+                    continue
+                region_id = regions[region_index].region_id
             gross = (prefix[end] - prefix[start]) / 8.0
             if gross >= minimum_gross:
-                candidates.append(Candidate(start, end, pattern_id, gross))
+                candidates.append(Candidate(
+                    start, end, pattern_id, gross, region_id))
     return candidates
 
 
@@ -267,6 +312,63 @@ def serialize_payload(
     return bytes(payload), id_map
 
 
+def plan_net(
+    selected: list[Candidate], patterns: list[bytes], fixed_bytes: int
+) -> tuple[float, int]:
+    if not selected:
+        return 0.0, 0
+    payload, _ = serialize_payload(selected, patterns)
+    return (
+        sum(item.gross_bytes for item in selected)
+        - len(payload)
+        - fixed_bytes,
+        len(payload),
+    )
+
+
+def group_marginals(
+    selected: list[Candidate], patterns: list[bytes], fixed_bytes: int
+) -> dict[int, float]:
+    full_net, _ = plan_net(selected, patterns, fixed_bytes)
+    result: dict[int, float] = {}
+    for region in sorted({item.region for item in selected}):
+        without = [item for item in selected if item.region != region]
+        without_net, _ = plan_net(without, patterns, fixed_bytes)
+        result[region] = full_net - without_net
+    return result
+
+
+def prune_selective_groups(
+    candidates: list[Candidate],
+    patterns: list[bytes],
+    event_tax: float,
+    minimum_group_net: float,
+    fixed_bytes: int,
+) -> tuple[list[Candidate], dict[int, float]]:
+    allowed = {item.region for item in candidates}
+    while allowed:
+        selected = prune_plan(
+            [item for item in candidates if item.region in allowed],
+            patterns,
+            event_tax,
+        )
+        if not selected:
+            return [], {}
+        marginals = group_marginals(selected, patterns, fixed_bytes)
+        rejected = [
+            (margin, region)
+            for region, margin in marginals.items()
+            if margin + 1.0e-9 < minimum_group_net
+        ]
+        if not rejected:
+            return selected, marginals
+        # Shared pattern definitions make group costs non-additive. Removing
+        # one group and recomputing keeps every accepted group profitable.
+        _margin, region = min(rejected)
+        allowed.remove(region)
+    return [], {}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("stream", type=Path)
@@ -277,23 +379,72 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minimum-gross", type=float, default=2.25)
     parser.add_argument("--event-tax", type=float, default=3.0)
     parser.add_argument("--minimum-net", type=float, default=8.0)
+    parser.add_argument("--groups-csv", type=Path)
+    parser.add_argument("--group", type=int, action="append", default=[])
+    parser.add_argument("--minimum-group-net", type=float, default=0.0)
+    parser.add_argument("--fixed-plan-bytes", type=int, default=0)
+    parser.add_argument("--group-report", type=Path)
+    parser.add_argument(
+        "--prefix-hex",
+        default="",
+        help="bytes prepended by the compressor before prediction, as hex",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    data = args.stream.read_bytes()
+    logical_data = args.stream.read_bytes()
+    try:
+        prefix = bytes.fromhex(args.prefix_hex)
+    except ValueError as error:
+        raise ValueError("--prefix-hex must contain complete hex bytes") from error
+    data = prefix + logical_data
     patterns = load_patterns(args.scr2_meta)
     costs = load_costs(args.trace, len(data))
-    candidates = find_candidates(
-        data, costs, patterns, args.minimum_gross
+    regions = (
+        load_regions(args.groups_csv, len(logical_data))
+        if args.groups_csv else None
     )
-    selected = prune_plan(candidates, patterns, args.event_tax)
+    if regions and prefix:
+        regions = [
+            Region(region.region_id, region.start + len(prefix),
+                   region.end + len(prefix))
+            for region in regions
+        ]
+    if args.group and not regions:
+        raise ValueError("--group requires --groups-csv")
+    allowed_groups = set(args.group)
+    if regions and allowed_groups:
+        known_groups = {region.region_id for region in regions}
+        unknown = allowed_groups - known_groups
+        if unknown:
+            raise ValueError(f"unknown group IDs: {sorted(unknown)}")
+    candidates = find_candidates(
+        data, costs, patterns, args.minimum_gross, regions
+    )
+    if allowed_groups:
+        candidates = [
+            item for item in candidates if item.region in allowed_groups
+        ]
+    if regions:
+        selected, marginals = prune_selective_groups(
+            candidates,
+            patterns,
+            args.event_tax,
+            args.minimum_group_net,
+            args.fixed_plan_bytes,
+        )
+    else:
+        selected = prune_plan(candidates, patterns, args.event_tax)
+        marginals = {}
     payload, _id_map = serialize_payload(selected, patterns) if selected else (b"", {})
     gross = sum(item.gross_bytes for item in selected)
-    estimated_net = gross - len(payload)
+    estimated_net = gross - len(payload) - args.fixed_plan_bytes
     result = {
         "stream_bytes": len(data),
+        "logical_stream_bytes": len(logical_data),
+        "predictor_prefix_bytes": len(prefix),
         "patterns_considered": len(patterns),
         "candidate_occurrences": len(candidates),
         "selected_patterns": len({item.pattern for item in selected}),
@@ -301,8 +452,48 @@ def main() -> int:
         "selected_logical_bytes": sum(item.end - item.start for item in selected),
         "baseline_cost_removed_bytes": gross,
         "archive_plan_bytes": len(payload),
+        "fixed_plan_bytes": args.fixed_plan_bytes,
         "estimated_net_saving_bytes": estimated_net,
+        "selected_groups": len({item.region for item in selected}) if regions else 0,
+        "minimum_group_net_bytes": args.minimum_group_net if regions else None,
     }
+    if regions:
+        group_report = args.group_report or args.output_plan.with_suffix(
+            args.output_plan.suffix + ".groups.csv"
+        )
+        candidate_counts: dict[int, int] = {}
+        selected_counts: dict[int, int] = {}
+        selected_gross: dict[int, float] = {}
+        for item in candidates:
+            candidate_counts[item.region] = candidate_counts.get(item.region, 0) + 1
+        for item in selected:
+            selected_counts[item.region] = selected_counts.get(item.region, 0) + 1
+            selected_gross[item.region] = (
+                selected_gross.get(item.region, 0.0) + item.gross_bytes
+            )
+        group_report.parent.mkdir(parents=True, exist_ok=True)
+        with group_report.open("w", newline="", encoding="utf-8") as output:
+            writer = csv.writer(output)
+            writer.writerow([
+                "pack_id", "post_r1_start", "post_r1_end",
+                "candidate_occurrences", "selected_events",
+                "selected_gross_bytes", "marginal_net_bytes", "status",
+            ])
+            for region in regions:
+                if allowed_groups and region.region_id not in allowed_groups:
+                    continue
+                selected_count = selected_counts.get(region.region_id, 0)
+                writer.writerow([
+                    region.region_id,
+                    region.start,
+                    region.end,
+                    candidate_counts.get(region.region_id, 0),
+                    selected_count,
+                    f"{selected_gross.get(region.region_id, 0.0):.6f}",
+                    f"{marginals.get(region.region_id, 0.0):.6f}",
+                    "selected" if selected_count else "baseline",
+                ])
+        result["group_report"] = str(group_report)
     report_path = args.report or args.output_plan.with_suffix(
         args.output_plan.suffix + ".json"
     )

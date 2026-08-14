@@ -54,6 +54,9 @@ class Predictor {
   void SetPostR1DonorProfile(const std::vector<std::uint8_t>& bytes,
       const std::vector<std::uint32_t>& segment_lengths);
   bool HasPostR1DonorProfile() const;
+#if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
+  void SetPostR1BranchSignals(PostR1Experts* target) const;
+#endif
  private:
   unsigned long long GetNumModels();
   void AddMixer(int layer, const unsigned long long& context,
@@ -131,6 +134,18 @@ class Predictor {
   std::array<float, 512> postr1_mass_{};
   std::array<float, 256> postr1_residual_one_{};
   unsigned int postr1_residual_gain_ = 0;
+#if FX4_DONOR_FORK_DISCOVERY
+  float donor_branch_ppmd_probability_ = 0.5f;
+  float donor_branch_lstm_probability_ = 0.5f;
+  float donor_branch_fxcm_probability_ = 0.5f;
+  std::array<float, 4> donor_branch_ppmd_order_bands_{{
+      0.5f, 0.5f, 0.5f, 0.5f}};
+  unsigned int donor_branch_ppmd_order_ = 0;
+  unsigned int donor_branch_escape_depth_ = 0;
+  float donor_branch_escape_rate_ = 0.0f;
+  float donor_branch_residual_probability_ = 0.5f;
+  unsigned int donor_branch_match_length_ = 0;
+#endif
 #endif
 #if FX4_SPECIALIST_CORRECTOR
   static constexpr unsigned int kSpecialistCoarseContexts = 64;

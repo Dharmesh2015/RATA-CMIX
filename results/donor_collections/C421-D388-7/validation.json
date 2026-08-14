@@ -1,0 +1,20 @@
+{
+  "schema": "FX4_DONOR_VALIDATION_V1",
+  "validated_on": "2026-08-11",
+  "recipient_sha256": "57b608513a11690ed1a7822e964d0cb420b6f7dc6459504c0ec3925540c73ec4",
+  "donor_bundle_sha256": "064663031cd35f4e6a25e840fd6ac7c38ff1d152afd129eb822419172d52060a",
+  "accepted_archive_sha256": "73a0990ae71ac1e27000f1c36c706e2d87f18bb259236a7946821f58c25cd9df",
+  "trace_reproduction_sha256": "73a0990ae71ac1e27000f1c36c706e2d87f18bb259236a7946821f58c25cd9df",
+  "trace_reproduction_bytes": 197309,
+  "trace_reproduction_wall_seconds": 437.1,
+  "trace_reproduction_max_rss_kib": 8106040,
+  "trace_reproduction_major_page_faults": 6145,
+  "scr2_default_candidate_occurrences": 21,
+  "scr2_zero_tax_candidate_occurrences": 6890,
+  "scr2_selected_events": 0,
+  "scr2_plan_bytes": 0,
+  "scr2_decision": "rejected_no_cost_positive_plan",
+  "probability_state_result": "unchanged because no virtual-replay event was selected",
+  "roundtrip_evidence": "trace archive is byte-identical to the preserved exact-roundtrip accepted archive",
+  "remaining_gate": "full_prefix_validation"
+}

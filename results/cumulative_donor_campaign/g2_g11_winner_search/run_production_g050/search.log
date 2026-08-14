@@ -1,0 +1,18 @@
+199227 bytes -> 1094862 bytes in 225.20 s.
+100593 bytes -> 411996 bytes in 118.82 s.
+
+r1 encoded tail reorder: stream=586459321->587138826 tail=45332670 side=679489 r0=526364 r1=2001835 r2=614080 prelude=7041 suffix=84410 blocks=243425 order=payload_lex side=d86a_lehmer stage=post_wrt
+
+Loaded 44515 words
+cmix-lex
+Compress:
+    to compress enwik9: cmix -e enwik9 [output]
+    to create a header for hutter prize: cmix -h comp_dict_size comp_new_order_size decomp_input_size
+    with dictionary:    cmix -c [dictionary] [input] [output]
+    without dictionary: cmix -c [input] [output]
+    no preprocessing:   cmix -n [input] [output]
+    only preprocessing: cmix -s [dictionary] [input] [output]
+                        cmix -s [input] [output]
+Decompress:
+    with dictionary:    cmix -d [dictionary] [input] [output]
+    without dictionary: cmix -d [input] [output]

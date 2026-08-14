@@ -1,0 +1,2 @@
+offset,length,bits,mask,stream_class,profile_id,baseline_bytes,mini_bytes,donor_bytes,combined_bytes,selected_bytes,mini_gain_bytes,donor_gain_bytes,combined_gain_bytes,best_mode,best_gain_bytes
+1048219,1049689,7917865,49152,9,64,143385.856282,143385.856287,143477.752685,143477.752685,143477.752685,-5.48828393221e-06,-91.8964036344,-91.8964036344,baseline,0

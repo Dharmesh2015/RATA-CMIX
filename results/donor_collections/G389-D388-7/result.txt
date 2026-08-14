@@ -1,0 +1,23 @@
+G389-D388-7:
+Recipient:             407,838,930:1,041,373 (end 408,880,303)
+Donor source group:    D388
+Donor count:           7
+Donor bytes:           22,528
+
+Cold/isolated baseline: 290,286 bytes
+7 donors:               287,496 bytes
+F4CP plan:                   25 bytes
+All-in:                 287,521 bytes
+Saving:                   2,765 bytes
+
+Donor locations:
+  1. offset 407,573,504, length 4,096, end 407,577,600
+  2. offset 407,581,696, length 2,048, end 407,583,744
+  3. offset 407,775,744, length 2,048, end 407,777,792
+  4. offset 407,787,520, length 4,096, end 407,791,616
+  5. offset 407,793,664, length 4,096, end 407,797,760
+  6. offset 407,799,808, length 4,096, end 407,803,904
+  7. offset 407,810,048, length 2,048, end 407,812,096
+
+Roundtrip evidence:    exact_isolated_roundtrip
+Full-prefix status:    full_prefix_validation

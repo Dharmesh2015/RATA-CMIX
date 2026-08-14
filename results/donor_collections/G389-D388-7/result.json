@@ -1,0 +1,61 @@
+{
+  "schema": "FX4_DONOR_COLLECTION_V1",
+  "name": "G389-D388-7",
+  "recipient_offset": 407838930,
+  "recipient_length": 1041373,
+  "recipient_end": 408880303,
+  "source_group": 388,
+  "donor_count": 7,
+  "donor_bytes": 22528,
+  "donors": [
+    {
+      "index": 1,
+      "offset": 407573504,
+      "length": 4096,
+      "end": 407577600
+    },
+    {
+      "index": 2,
+      "offset": 407581696,
+      "length": 2048,
+      "end": 407583744
+    },
+    {
+      "index": 3,
+      "offset": 407775744,
+      "length": 2048,
+      "end": 407777792
+    },
+    {
+      "index": 4,
+      "offset": 407787520,
+      "length": 4096,
+      "end": 407791616
+    },
+    {
+      "index": 5,
+      "offset": 407793664,
+      "length": 4096,
+      "end": 407797760
+    },
+    {
+      "index": 6,
+      "offset": 407799808,
+      "length": 4096,
+      "end": 407803904
+    },
+    {
+      "index": 7,
+      "offset": 407810048,
+      "length": 2048,
+      "end": 407812096
+    }
+  ],
+  "baseline_archive_bytes": 290286,
+  "payload_bytes": 287496,
+  "plan_bytes": 25,
+  "all_in_bytes": 287521,
+  "net_saving_bytes": 2765,
+  "roundtrip": "exact_isolated_roundtrip",
+  "full_prefix_status": "full_prefix_validation"
+}

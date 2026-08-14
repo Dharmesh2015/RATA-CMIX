@@ -1,0 +1,18 @@
+G3-D2-2:
+Recipient:             3,146,668:1,048,846 (end 4,195,514)
+Donor source group:    D2
+Donor count:           2
+Donor bytes:           81,920
+
+Cold/isolated baseline: 126,072 bytes
+2 donors:               120,548 bytes
+F4CP plan:                   25 bytes
+All-in:                 120,573 bytes
+Saving:                   5,499 bytes
+
+Donor locations:
+  1. offset 2,097,920, length 16,384, end 2,114,304
+  2. offset 3,080,960, length 65,536, end 3,146,496
+
+Roundtrip evidence:    exact_isolated_roundtrip
+Full-prefix status:    full_prefix_validation

@@ -1,0 +1,4 @@
+name,recipient_offset,recipient_length,donor_count,donor_bytes,payload_bytes,plan_bytes,all_in_bytes,net_saving_bytes,full_prefix_status
+C421-D388-7,441450496,1048576,7,22528,197309,25,197334,1523,full_prefix_validation
+G389-D388-7,407838930,1041373,7,22528,287496,25,287521,2765,full_prefix_validation
+G3-D2-2,3146668,1048846,2,81920,120548,25,120573,5499,full_prefix_validation

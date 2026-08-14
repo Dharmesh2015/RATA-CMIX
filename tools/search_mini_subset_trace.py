@@ -24,6 +24,7 @@ STREAM_CLASSES = {
     5: "reference", 6: "url", 7: "identifier", 8: "template",
     9: "list", 10: "mixed",
 }
+STREAM_CLASS_IDS = {name: value for value, name in STREAM_CLASSES.items()}
 TRACE_DTYPE = np.dtype([("bit", "u1"), ("value", "<i2", (13,))])
 
 
@@ -77,17 +78,19 @@ def evaluate_page(records: np.ndarray, beam_width: int) -> tuple[Choice, Choice,
         delta = mini_delta(mask)
         local_without = Choice(mask=mask, loss_bits=baseline_loss)
         local_with = Choice(mask=mask, donor=True, loss_bits=baseline_loss)
-        for gain_code in range(4):
-            mini_scale = 0.0625 * (gain_code + 1) if mask else 0.0
-            donor_scale = 0.25 * (gain_code + 1)
-            if mask:
-                loss = bit_loss(base + np.clip(mini_scale * delta, -1.5, 1.5), actual)
-                if loss < local_without.loss_bits:
-                    local_without = Choice(mask, False, gain_code, 0.0, loss)
-            correction = mini_scale * delta + donor_scale * donor_delta
+        if mask:
+            correction = np.clip(0.0625 * delta, -1.5, 1.5)
+            loss = bit_loss(base + correction, actual)
+            if loss < local_without.loss_bits:
+                local_without = Choice(mask, False, 0, 0.0, loss)
+        if np.any(np.abs(donor_delta) > 1.0e-9):
+            active = int(bool(mask)) + 1
+            correction = 0.0625 * (delta + donor_delta) / active
             loss = bit_loss(base + np.clip(correction, -1.5, 1.5), actual)
             if loss < local_with.loss_bits:
-                local_with = Choice(mask, True, gain_code, 0.0, loss)
+                local_with = Choice(mask, True, 0, 0.0, loss)
+        else:
+            local_with = local_without
         result = (local_without, local_with)
         choice_cache[mask] = result
         return result
@@ -149,6 +152,43 @@ def profile_definition_size(profile: tuple[int, int, int, int]) -> int:
     return varint_size(mask) + 2 + varint_size(mini_mask)
 
 
+def coalesced_spans(
+    rows: list[dict[str, str]],
+    choices: list[Choice],
+    selected: list[int] | set[int],
+) -> list[dict[str, object]]:
+    spans: list[dict[str, object]] = []
+    for index in sorted(selected):
+        row = rows[index]
+        choice = choices[index]
+        offset = int(row["offset"])
+        length = int(row["length"])
+        profile = profile_key(row, choice)
+        if (
+            spans
+            and not choice.donor
+            and not bool(spans[-1]["choice"].donor)
+            and int(spans[-1]["offset"]) + int(spans[-1]["length"]) == offset
+            and spans[-1]["profile"] == profile
+        ):
+            spans[-1]["length"] = int(spans[-1]["length"]) + length
+            spans[-1]["gain_bytes"] = (
+                float(spans[-1]["gain_bytes"]) + choice.gain_bytes
+            )
+            spans[-1]["units"] = int(spans[-1]["units"]) + 1
+            continue
+        spans.append({
+            "offset": offset,
+            "length": length,
+            "profile": profile,
+            "choice": choice,
+            "stream_class": int(row["stream_class"]),
+            "gain_bytes": choice.gain_bytes,
+            "units": 1,
+        })
+    return spans
+
+
 def v7_plan_cost(
     rows: list[dict[str, str]],
     choices: list[Choice],
@@ -156,31 +196,32 @@ def v7_plan_cost(
     fixed: int,
     donor_cost: int,
 ) -> int:
-    ordered = sorted(selected)
-    if not ordered:
+    spans = coalesced_spans(rows, choices, selected)
+    if not spans:
         return 0
-    donor_used = any(choices[index].donor for index in ordered)
+    donor_used = any(
+        bool(span["choice"].donor) for span in spans
+    )
     # donor_cost is the exact v7 prefix through the donor groups. With no
     # donor bank, version + flags + zero group count costs three bytes.
     size = donor_cost if donor_used else 3
     profiles: dict[tuple[int, int, int, int], int] = {}
-    for index in ordered:
-        key = profile_key(rows[index], choices[index])
+    for span in spans:
+        key = span["profile"]
         if key not in profiles:
             profiles[key] = len(profiles)
     size += varint_size(len(profiles))
     size += sum(profile_definition_size(profile) for profile in profiles)
-    size += varint_size(len(ordered))
+    size += varint_size(len(spans))
     previous_end = 0
-    for index in ordered:
-        row = rows[index]
-        offset = int(row["offset"])
-        length = int(row["length"])
+    for span in spans:
+        offset = int(span["offset"])
+        length = int(span["length"])
         if offset < previous_end:
             raise ValueError("selected expert spans overlap")
         size += varint_size(offset - previous_end)
         size += varint_size(length)
-        size += varint_size(profiles[profile_key(row, choices[index])])
+        size += varint_size(profiles[span["profile"]])
         previous_end = offset + length
     return fixed + size
 
@@ -299,7 +340,18 @@ def main() -> int:
         raise SystemExit("truncated F4MT records")
     records = np.memmap(args.trace, mode="r", dtype=TRACE_DTYPE, offset=8)
     with args.spans.open(newline="", encoding="utf-8-sig") as source:
-        rows = [row for row in csv.DictReader(source) if int(row["bits"]) > 0]
+        rows = []
+        for original in csv.DictReader(source):
+            row = dict(original)
+            bits = int(row.get("bits") or int(row["length"]) * 8)
+            if bits <= 0:
+                continue
+            stream_class = row["stream_class"]
+            if not stream_class.isdigit():
+                stream_class = str(STREAM_CLASS_IDS[stream_class])
+            row["bits"] = str(bits)
+            row["stream_class"] = stream_class
+            rows.append(row)
     expected = sum(int(row["bits"]) for row in rows)
     if expected != len(records):
         raise SystemExit(f"trace/span mismatch: {len(records)} records, {expected} bits")
@@ -401,9 +453,9 @@ def main() -> int:
     with args.output.open("w", newline="", encoding="utf-8") as output:
         writer = csv.DictWriter(output, fieldnames=fields)
         writer.writeheader()
-        for index in selected:
-            row = rows[index]
-            choice = choices[index]
+        selected_spans = coalesced_spans(rows, choices, selected)
+        for span in selected_spans:
+            choice = span["choice"]
             experts = []
             if choice.mask:
                 experts.append("mini_cmix")
@@ -414,14 +466,14 @@ def main() -> int:
                 if choice.mask & (1 << model)
             )
             writer.writerow({
-                "offset": row["offset"],
-                "length": row["length"],
+                "offset": span["offset"],
+                "length": span["length"],
                 "experts": "+".join(experts),
-                "stream_class": STREAM_CLASSES[int(row["stream_class"])],
+                "stream_class": STREAM_CLASSES[int(span["stream_class"])],
                 "profile": 0,
                 "residual_gain": 0.25 * (choice.gain_code + 1),
                 "mini_models": models,
-                "oracle_gain_bytes": f"{choice.gain_bytes:.6f}",
+                "oracle_gain_bytes": f"{float(span['gain_bytes']):.6f}",
                 "status": "candidate_exact_test_required",
             })
 
@@ -431,6 +483,7 @@ def main() -> int:
         "pages": len(rows),
         "scenario": scenario,
         "selected_pages": len(selected),
+        "selected_plan_spans": len(coalesced_spans(rows, choices, selected)),
         "baseline_modeled_bytes": baseline_loss,
         "side_data_bytes": side,
         "estimated_net_saving_bytes": estimated_net,

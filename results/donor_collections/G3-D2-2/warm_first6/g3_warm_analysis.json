@@ -1,0 +1,70 @@
+{
+  "baseline_archive_bytes": 855173,
+  "assisted_archive_bytes_including_plan": 855230,
+  "net_archive_saving_bytes": -57,
+  "groups": [
+    {
+      "group": 0,
+      "start": 0,
+      "end": 1048219,
+      "length": 1048219,
+      "baseline_ideal_bytes": 106576.74519415485,
+      "assisted_ideal_bytes": 106576.74519415485,
+      "ideal_saving_bytes": 0.0,
+      "probability_trace_identical": true
+    },
+    {
+      "group": 1,
+      "start": 1048219,
+      "end": 2097908,
+      "length": 1049689,
+      "baseline_ideal_bytes": 143537.06945572334,
+      "assisted_ideal_bytes": 143537.06945572334,
+      "ideal_saving_bytes": 0.0,
+      "probability_trace_identical": true
+    },
+    {
+      "group": 2,
+      "start": 2097908,
+      "end": 3146668,
+      "length": 1048760,
+      "baseline_ideal_bytes": 143103.33707133745,
+      "assisted_ideal_bytes": 143103.33707133745,
+      "ideal_saving_bytes": 0.0,
+      "probability_trace_identical": true
+    },
+    {
+      "group": 3,
+      "start": 3146668,
+      "end": 4195514,
+      "length": 1048846,
+      "baseline_ideal_bytes": 118596.52919722808,
+      "assisted_ideal_bytes": 118625.9987682699,
+      "ideal_saving_bytes": -29.46957104181638,
+      "probability_trace_identical": false
+    },
+    {
+      "group": 4,
+      "start": 4195514,
+      "end": 5243475,
+      "length": 1047961,
+      "baseline_ideal_bytes": 223491.5169717382,
+      "assisted_ideal_bytes": 223491.5169717382,
+      "ideal_saving_bytes": 0.0,
+      "probability_trace_identical": true
+    },
+    {
+      "group": 5,
+      "start": 5243475,
+      "end": 6291800,
+      "length": 1048325,
+      "baseline_ideal_bytes": 119829.97186756805,
+      "assisted_ideal_bytes": 119829.97186756805,
+      "ideal_saving_bytes": 0.0,
+      "probability_trace_identical": true
+    }
+  ],
+  "pre_g3_identical": true,
+  "post_g3_identical": true,
+  "status": "rejected_warm_loss_no_decompression"
+}

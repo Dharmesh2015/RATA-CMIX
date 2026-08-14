@@ -1,0 +1,57 @@
+{
+  "baseline_archive_bytes": 855173,
+  "screen_archive_bytes_including_plan": 855357,
+  "net_archive_saving_bytes": -184,
+  "groups": [
+    {
+      "group": 0,
+      "source": "none",
+      "baseline_ideal_bytes": 106576.74519415485,
+      "screen_ideal_bytes": 106576.74519415485,
+      "ideal_saving_bytes": 0.0,
+      "probability_trace_identical": true
+    },
+    {
+      "group": 1,
+      "source": "D0",
+      "baseline_ideal_bytes": 143537.06945572334,
+      "screen_ideal_bytes": 143574.89734197198,
+      "ideal_saving_bytes": -37.8278862486477,
+      "probability_trace_identical": false
+    },
+    {
+      "group": 2,
+      "source": "D1",
+      "baseline_ideal_bytes": 143103.33707133745,
+      "screen_ideal_bytes": 143136.84130332357,
+      "ideal_saving_bytes": -33.50423198612407,
+      "probability_trace_identical": false
+    },
+    {
+      "group": 3,
+      "source": "D1",
+      "baseline_ideal_bytes": 118596.52919722808,
+      "screen_ideal_bytes": 118622.96357176185,
+      "ideal_saving_bytes": -26.434374533768278,
+      "probability_trace_identical": false
+    },
+    {
+      "group": 4,
+      "source": "none",
+      "baseline_ideal_bytes": 223491.5169717382,
+      "screen_ideal_bytes": 223491.5169717382,
+      "ideal_saving_bytes": 0.0,
+      "probability_trace_identical": true
+    },
+    {
+      "group": 5,
+      "source": "D4",
+      "baseline_ideal_bytes": 119829.97186756805,
+      "screen_ideal_bytes": 119844.15088329515,
+      "ideal_saving_bytes": -14.179015727102524,
+      "probability_trace_identical": false
+    }
+  ],
+  "downstream_isolation": "measured_per_group",
+  "decompression_required": false
+}

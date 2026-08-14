@@ -156,7 +156,9 @@ def main() -> int:
             )
         )
         for recipient, donor, length, order, _gain in edges:
-            output.write(ASSIGNMENT_V3.pack(recipient, donor, length, order))
+            encoded_length = 0 if length == 65536 else length
+            output.write(ASSIGNMENT_V3.pack(
+                recipient, donor, encoded_length, order))
 
     gross_gain = sum(edge[4] for edge in edges)
     archive_plan_bytes = compact_archive_size(edges)

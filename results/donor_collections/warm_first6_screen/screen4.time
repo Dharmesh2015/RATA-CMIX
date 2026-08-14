@@ -1,0 +1,23 @@
+	Command being timed: "env FX4_RAW_ENTROPY_INPUT=1 FX4_FORCE_FULL_VOCAB=1 FX4_DONOR_PLAN=/root/fx4_g3_warm6_20260811_v1/run/screen4.f4cp FX4_VR_COST_TRACE=/root/fx4_g3_warm6_20260811_v1/run/screen4.cost taskset -c 7 ./cmix -n english.dic first6.postr1 screen4.fx4"
+	User time (seconds): 2644.67
+	System time (seconds): 29.62
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 44:36.17
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 8262976
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 41876
+	Minor (reclaiming a frame) page faults: 5262910
+	Voluntary context switches: 31
+	Involuntary context switches: 7594
+	Swaps: 0
+	File system inputs: 872
+	File system outputs: 9211296
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

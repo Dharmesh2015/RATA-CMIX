@@ -1,0 +1,31 @@
+{
+  "schema": "FX4_DONOR_COLLECTION_V1",
+  "name": "G3-D2-2",
+  "recipient_offset": 3146668,
+  "recipient_length": 1048846,
+  "recipient_end": 4195514,
+  "source_group": 2,
+  "donor_count": 2,
+  "donor_bytes": 81920,
+  "donors": [
+    {
+      "index": 1,
+      "offset": 2097920,
+      "length": 16384,
+      "end": 2114304
+    },
+    {
+      "index": 2,
+      "offset": 3080960,
+      "length": 65536,
+      "end": 3146496
+    }
+  ],
+  "baseline_archive_bytes": 126072,
+  "payload_bytes": 120548,
+  "plan_bytes": 25,
+  "all_in_bytes": 120573,
+  "net_saving_bytes": 5499,
+  "roundtrip": "exact_isolated_roundtrip",
+  "full_prefix_status": "full_prefix_validation"
+}
