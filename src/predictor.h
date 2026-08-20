@@ -150,7 +150,7 @@ class Predictor {
 #if FX4_SPECIALIST_CORRECTOR
   static constexpr unsigned int kSpecialistCoarseContexts = 64;
   static constexpr unsigned int kSpecialistContexts = 1024;
-  static constexpr unsigned int kSpecialistFeatures = 5;
+  static constexpr unsigned int kSpecialistFeatures = 8;
   std::array<std::array<float, kSpecialistFeatures>,
       kSpecialistContexts> specialist_weights_{};
   std::array<std::array<float, kSpecialistFeatures>,

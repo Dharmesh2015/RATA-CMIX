@@ -71,6 +71,8 @@ EXPERTS = {
     "donor_profile": 1 << 15,
     "mini_cmix": 1 << 16,
     "legacy_donor_replay": 1 << 17,
+    "url_structure": 1 << 18,
+    "shadow_only": 1 << 19,
 }
 
 STREAM_CLASSES = {

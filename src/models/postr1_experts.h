@@ -33,7 +33,11 @@ class PostR1Experts {
     kDonorProfile     = 1u << 15,
     kMiniCmix         = 1u << 16,
     kLegacyDonorReplay = 1u << 17,
-    kAllPredictors    = (1u << 18) - 1u,
+    kUrlStructure     = 1u << 18,
+    // Train/observe the listed experts while returning the accepted baseline.
+    // This preserves causal state for a later selectively active span.
+    kShadowOnly       = 1u << 19,
+    kAllPredictors    = (1u << 19) - 1u,
   };
 
   enum class StreamClass : std::uint8_t {
@@ -86,7 +90,7 @@ class PostR1Experts {
   float profile_donor_confidence() const;
   bool WriteOracle(const char* path) const;
   bool WriteSpanOracle(const char* path) const;
-  static constexpr unsigned int kExpertCount = 12;
+  static constexpr unsigned int kExpertCount = 13;
   static constexpr unsigned int kMixerFeatures = kExpertCount + 5;
   static constexpr unsigned int kMixerContexts = 2048;
   static constexpr unsigned int kCountTableSize = 1u << 16;
@@ -99,6 +103,21 @@ class PostR1Experts {
   static constexpr unsigned int kDonorProfileContexts = 4;
   static constexpr unsigned int kDonorProfileSlots = 1u << 15;
   static constexpr unsigned int kDonorGateContexts = 32;
+  static constexpr unsigned int kUrlPhaseTableSize = 1u << 12;
+  static constexpr unsigned int kUrlShapeTableSize = 1u << 13;
+  static constexpr unsigned int kUrlContinuationTableSize = 1u << 12;
+
+  enum class UrlPhase : std::uint8_t {
+    kOutside = 0,
+    kHost = 1,
+    kPort = 2,
+    kPath = 3,
+    kQueryKey = 4,
+    kQueryValue = 5,
+    kFragment = 6,
+    kPercentFirst = 7,
+    kPercentSecond = 8,
+  };
 
   struct Counts {
     std::uint16_t zero = 1;
@@ -121,7 +140,9 @@ class PostR1Experts {
     std::uint32_t mask = 0;
     std::uint8_t stream_class = 0;
     std::uint8_t profile_id = 0;
-    std::array<double, 5> loss_bits{};
+    std::array<double, 9> loss_bits{};
+    std::array<double, kExpertCount> singleton_loss_bits{};
+    std::array<std::array<double, 4>, 6> gain_sweep_loss_bits{};
   };
   struct DonorSlot {
     std::uint64_t key = 0;
@@ -130,7 +151,7 @@ class PostR1Experts {
   };
 
 
-  float CountProbability(Counts* table, std::uint32_t index) const;
+  float CountProbability(const Counts* table, std::uint32_t index) const;
   void UpdateCount(Counts* table, std::uint32_t index, int bit);
   float ResidualToBit(float residual_probability, float baseline) const;
   float StructuralPrediction(unsigned int bit_position);
@@ -141,6 +162,12 @@ class PostR1Experts {
   float MatchPrediction(unsigned int bit_position);
   std::uint32_t MixerContext(unsigned int bit_position) const;
   float DonorProfilePrediction(unsigned int bit_position) const;
+  float UrlPrediction(unsigned int bit_position) const;
+  void UrlContexts(unsigned int bit_position, std::uint32_t* phase_context,
+      std::uint32_t* shape_context,
+      std::uint32_t* continuation_context) const;
+  void UpdateUrlState(std::uint8_t byte);
+  static std::uint8_t UrlByteClass(std::uint8_t byte);
   void UpdateDonorProfilePrediction();
   static std::uint32_t ExpertMask(unsigned int expert);
   bool ExpertEnabled(unsigned int expert) const;
@@ -202,6 +229,10 @@ class PostR1Experts {
   std::array<Counts, kMicroTableSize> micro_counts_{};
   std::array<Counts, 4096> residual_counts_{};
   std::array<std::array<Counts, kCountTableSize>, 4> cts_counts_{};
+  std::array<Counts, kUrlPhaseTableSize> url_phase_counts_{};
+  std::array<Counts, kUrlShapeTableSize> url_shape_counts_{};
+  std::array<Counts, kUrlContinuationTableSize>
+      url_continuation_counts_{};
   std::array<DmcNode, kDmcNodes> dmc_{};
   std::uint16_t dmc_state_ = 1;
   std::uint32_t dmc_next_free_ = 2;
@@ -218,6 +249,16 @@ class PostR1Experts {
   std::uint8_t last_hard_prediction_ = 0;
   std::uint8_t current_prefix_ = 1;
   std::uint8_t last_bit_position_ = 0;
+  UrlPhase url_phase_ = UrlPhase::kOutside;
+  UrlPhase url_percent_return_phase_ = UrlPhase::kOutside;
+  std::uint8_t url_marker_state_ = 0;
+  std::uint8_t url_previous_class_ = 0;
+  std::uint8_t url_alphabet_mask_ = 0;
+  std::uint8_t url_segment_length_ = 0;
+  std::uint8_t url_label_index_ = 0;
+  std::uint8_t url_parameter_index_ = 0;
+  std::uint8_t url_previous_separator_ = 0;
+  std::uint64_t url_segment_hash_ = 0;
 
   std::vector<std::uint8_t> phrase_ring_;
   std::vector<std::array<std::uint32_t, kPhraseCandidates>> phrase_position_;

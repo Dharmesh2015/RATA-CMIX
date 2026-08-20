@@ -90,6 +90,7 @@ std::uint32_t PostR1Experts::MixHash(std::uint64_t value) {
 }
 
 void PostR1Experts::EnablePortfolio(std::uint32_t mask) {
+  mask &= ~kShadowOnly;
   mask &= ~(kTinySsm | kConfidenceBptt | kLegacyDonorReplay);
   if (mask & kEpisodicCache) {
     mask |= kTokenMatch;
@@ -103,17 +104,18 @@ void PostR1Experts::SetSpan(std::uint64_t logical_offset,
     std::uint32_t mask, StreamClass stream_class, std::uint8_t profile_id,
     std::uint16_t mini_model_mask) {
   logical_offset_ = logical_offset;
+  const bool shadow_only = (mask & kShadowOnly) != 0;
   // TinySSM has no trained update and confidence-gated BPTT would mutate the
   // main LSTM. Keep both archive bits reserved but neutral in this separate
   // post-R1 specialist.
-  evaluation_mask_ =
-      mask & ~(kTinySsm | kConfidenceBptt | kLegacyDonorReplay);
+  evaluation_mask_ = mask & ~(kTinySsm | kConfidenceBptt |
+      kLegacyDonorReplay | kShadowOnly);
   if (evaluation_mask_ & kEpisodicCache) {
     evaluation_mask_ |= kTokenMatch;
     evaluation_mask_ &= ~kEpisodicCache;
   }
   observed_mask_ |= evaluation_mask_;
-  active_mask_ = evaluation_mask_ & ~kOracle;
+  active_mask_ = shadow_only ? 0u : evaluation_mask_ & ~kOracle;
   if (oracle_only_ && (evaluation_mask_ & kOracle)) active_mask_ = 0;
   plan_stream_class_ = stream_class;
   stream_class_ = stream_class == StreamClass::kMixed
@@ -152,7 +154,7 @@ void PostR1Experts::SetModelSignals(float ppmd_probability,
   match_length_ = match_length;
 }
 
-float PostR1Experts::CountProbability(Counts* table,
+float PostR1Experts::CountProbability(const Counts* table,
     std::uint32_t index) const {
   const Counts& counts = table[index];
   return static_cast<float>(counts.one) /
@@ -363,6 +365,232 @@ float PostR1Experts::DonorProfilePrediction(
   return predicted_bit ? 0.5f + strength : 0.5f - strength;
 }
 
+std::uint8_t PostR1Experts::UrlByteClass(std::uint8_t byte) {
+  if (byte >= 'a' && byte <= 'z') return 0;
+  if (byte >= 'A' && byte <= 'Z') return 1;
+  if (byte >= '0' && byte <= '9') return 2;
+  if (byte >= 0x80) return 3;
+  if (byte == '.') return 4;
+  if (byte == '/') return 5;
+  if (byte == ':' || byte == '?' || byte == '&' || byte == '=' ||
+      byte == '#' || byte == '%') {
+    return 6;
+  }
+  return 7;
+}
+
+void PostR1Experts::UrlContexts(unsigned int bit_position,
+    std::uint32_t* phase_context, std::uint32_t* shape_context,
+    std::uint32_t* continuation_context) const {
+  const unsigned int length_bucket =
+      url_segment_length_ == 0 ? 0 :
+      url_segment_length_ <= 3 ? 1 :
+      url_segment_length_ <= 7 ? 2 :
+      url_segment_length_ <= 15 ? 3 : 4;
+  const std::uint64_t phase_key =
+      static_cast<std::uint64_t>(url_phase_) |
+      (static_cast<std::uint64_t>(bit_position) << 4) |
+      (static_cast<std::uint64_t>(current_prefix_) << 7) |
+      (static_cast<std::uint64_t>(url_previous_class_) << 15);
+  const std::uint64_t shape_key = phase_key ^
+      (static_cast<std::uint64_t>(url_alphabet_mask_) << 19) ^
+      (static_cast<std::uint64_t>(length_bucket) << 25) ^
+      (static_cast<std::uint64_t>(
+          std::min<unsigned int>(url_label_index_, 7u)) << 28) ^
+      (static_cast<std::uint64_t>(
+          std::min<unsigned int>(url_parameter_index_, 7u)) << 31);
+  const std::uint64_t continuation_key =
+      url_segment_hash_ ^ (phase_key << 17) ^
+      (static_cast<std::uint64_t>(url_previous_separator_) << 48);
+  *phase_context = MixHash(phase_key) & (kUrlPhaseTableSize - 1u);
+  *shape_context = MixHash(shape_key) & (kUrlShapeTableSize - 1u);
+  *continuation_context =
+      MixHash(continuation_key) & (kUrlContinuationTableSize - 1u);
+}
+
+float PostR1Experts::UrlPrediction(unsigned int bit_position) const {
+  if (url_phase_ == UrlPhase::kOutside) return 0.5f;
+  std::uint32_t phase_context = 0;
+  std::uint32_t shape_context = 0;
+  std::uint32_t continuation_context = 0;
+  UrlContexts(bit_position, &phase_context, &shape_context,
+      &continuation_context);
+  float weighted = 0.0f;
+  float weight = 0.0f;
+  auto add = [&weighted, &weight](const Counts& counts, float probability) {
+    const float evidence = std::min<float>(
+        64.0f, counts.zero + counts.one - 2u);
+    const float local_weight = 1.0f + evidence;
+    weighted += local_weight * probability;
+    weight += local_weight;
+  };
+  add(url_phase_counts_[phase_context],
+      CountProbability(url_phase_counts_.data(), phase_context));
+  add(url_shape_counts_[shape_context],
+      CountProbability(url_shape_counts_.data(), shape_context));
+  if (url_segment_length_ >= 2) {
+    add(url_continuation_counts_[continuation_context],
+        CountProbability(url_continuation_counts_.data(),
+            continuation_context));
+  }
+  return weight > 0.0f ? ClampProbability(weighted / weight) : 0.5f;
+}
+
+void PostR1Experts::UpdateUrlState(std::uint8_t byte) {
+  if (url_phase_ == UrlPhase::kOutside) {
+    if (url_marker_state_ == 0) {
+      url_marker_state_ = byte == 'J' ? 1 : 0;
+    } else if (url_marker_state_ == 1) {
+      url_marker_state_ = byte == '/' ? 2 : (byte == 'J' ? 1 : 0);
+    } else if (byte == '/') {
+      url_phase_ = UrlPhase::kHost;
+      url_marker_state_ = 0;
+      url_segment_length_ = 0;
+      url_alphabet_mask_ = 0;
+      url_label_index_ = 0;
+      url_parameter_index_ = 0;
+      url_segment_hash_ = 0;
+      url_previous_separator_ = '/';
+    } else {
+      url_marker_state_ = byte == 'J' ? 1 : 0;
+    }
+    url_previous_class_ = UrlByteClass(byte);
+    return;
+  }
+
+  const bool terminator = byte <= ' ' || byte == '"' || byte == '\'' ||
+      byte == '<' || byte == '>' || byte == '[' || byte == ']' ||
+      byte == ')' || byte == '}';
+  if (terminator) {
+    url_phase_ = UrlPhase::kOutside;
+    url_percent_return_phase_ = UrlPhase::kOutside;
+    url_marker_state_ = byte == 'J' ? 1 : 0;
+    url_segment_length_ = 0;
+    url_alphabet_mask_ = 0;
+    url_segment_hash_ = 0;
+    url_previous_class_ = UrlByteClass(byte);
+    return;
+  }
+
+  auto append = [this](std::uint8_t value) {
+    const std::uint8_t byte_class = UrlByteClass(value);
+    const unsigned int alphabet_bit =
+        byte_class <= 3 ? byte_class : byte_class == 7 ? 5u : 4u;
+    url_alphabet_mask_ |= static_cast<std::uint8_t>(1u << alphabet_bit);
+    if (url_segment_length_ != 0xffu) ++url_segment_length_;
+    url_segment_hash_ = url_segment_hash_ * 257u + value + 1u;
+    url_previous_class_ = byte_class;
+  };
+  auto transition = [this, byte](UrlPhase phase) {
+    url_phase_ = phase;
+    url_segment_length_ = 0;
+    url_alphabet_mask_ = 0;
+    url_segment_hash_ = 0;
+    url_previous_separator_ = byte;
+    url_previous_class_ = UrlByteClass(byte);
+  };
+
+  if (url_phase_ == UrlPhase::kPercentFirst) {
+    append(byte);
+    url_phase_ = UrlPhase::kPercentSecond;
+    return;
+  }
+  if (url_phase_ == UrlPhase::kPercentSecond) {
+    append(byte);
+    url_phase_ = url_percent_return_phase_;
+    return;
+  }
+  if (byte == '%') {
+    append(byte);
+    url_percent_return_phase_ = url_phase_;
+    url_phase_ = UrlPhase::kPercentFirst;
+    url_previous_separator_ = byte;
+    return;
+  }
+
+  switch (url_phase_) {
+    case UrlPhase::kHost:
+      if (byte == '.') {
+        if (url_label_index_ != 0xffu) ++url_label_index_;
+        transition(UrlPhase::kHost);
+        return;
+      }
+      if (byte == ':') {
+        transition(UrlPhase::kPort);
+        return;
+      }
+      if (byte == '/') {
+        transition(UrlPhase::kPath);
+        return;
+      }
+      if (byte == '?') {
+        transition(UrlPhase::kQueryKey);
+        return;
+      }
+      if (byte == '#') {
+        transition(UrlPhase::kFragment);
+        return;
+      }
+      break;
+    case UrlPhase::kPort:
+      if (byte == '/') {
+        transition(UrlPhase::kPath);
+        return;
+      }
+      if (byte == '?') {
+        transition(UrlPhase::kQueryKey);
+        return;
+      }
+      if (byte == '#') {
+        transition(UrlPhase::kFragment);
+        return;
+      }
+      break;
+    case UrlPhase::kPath:
+      if (byte == '/') {
+        transition(UrlPhase::kPath);
+        return;
+      }
+      if (byte == '?') {
+        transition(UrlPhase::kQueryKey);
+        return;
+      }
+      if (byte == '#') {
+        transition(UrlPhase::kFragment);
+        return;
+      }
+      break;
+    case UrlPhase::kQueryKey:
+      if (byte == '=') {
+        transition(UrlPhase::kQueryValue);
+        return;
+      }
+      if (byte == '&') {
+        if (url_parameter_index_ != 0xffu) ++url_parameter_index_;
+        transition(UrlPhase::kQueryKey);
+        return;
+      }
+      if (byte == '#') {
+        transition(UrlPhase::kFragment);
+        return;
+      }
+      break;
+    case UrlPhase::kQueryValue:
+      if (byte == '&') {
+        if (url_parameter_index_ != 0xffu) ++url_parameter_index_;
+        transition(UrlPhase::kQueryKey);
+        return;
+      }
+      if (byte == '#') {
+        transition(UrlPhase::kFragment);
+        return;
+      }
+      break;
+    default:
+      break;
+  }
+  append(byte);
+}
 void PostR1Experts::UpdateDonorProfilePrediction() {
   donor_profile_confidence_ = 0;
   donor_profile_agreement_ = 0;
@@ -419,7 +647,7 @@ std::uint32_t PostR1Experts::ExpertMask(unsigned int expert) {
   static constexpr std::uint32_t kMasks[kExpertCount] = {
       kStructural, kPpmdEscapeOrder, kSparseVirtualPpm, kWordXmlPpm,
       kResidualLstm, kMicroDiffusion, kRareResidual, kCtsSkipCts,
-      kDmc, kTokenMatch, kDonorProfile, kMiniCmix};
+      kDmc, kTokenMatch, kDonorProfile, kMiniCmix, kUrlStructure};
   return expert < kExpertCount ? kMasks[expert] : 0u;
 }
 
@@ -532,6 +760,9 @@ float PostR1Experts::Predict(float baseline_probability,
   if (evaluation_mask_ & kMiniCmix) {
     expert_probability_[11] = mini_cmix_probability_;
   }
+  if (evaluation_mask_ & kUrlStructure) {
+    expert_probability_[12] = UrlPrediction(bit_position);
+  }
 
   const float base_logit = Logit(baseline_probability_);
   mixer_input_.fill(0.0f);
@@ -572,6 +803,8 @@ float PostR1Experts::Predict(float baseline_probability,
       // The subset and correction strength are explicitly selected and paid
       // for in F4CP v6, so do not add a second hidden online gate.
       gate = 1.0f;
+    } else if (i == 12) {
+      gate = url_phase_ == UrlPhase::kOutside ? 0.0f : 1.0f;
     } else if (observations >= 64) {
       const double total =
           static_cast<double>(expert_gain_total_[mixer_context_][i]);
@@ -626,6 +859,8 @@ float PostR1Experts::CorrectionFor(std::uint32_t mask) const {
         const float mini_gain =
             0.0625f * (1.0f + static_cast<float>((profile_id_ >> 6) & 3u));
         correction += mini_gain * mixer_input_[i];
+      } else if (i == 12) {
+        correction += 0.125f * mixer_input_[i];
       } else {
         generic_sum += mixer_input_[i];
         ++generic_count;
@@ -744,6 +979,20 @@ void PostR1Experts::Perceive(int bit) {
       UpdateCount(cts_counts_[i].data(), context, residual);
     }
   }
+  if ((evaluation_mask_ & kUrlStructure) != 0 &&
+      url_phase_ != UrlPhase::kOutside) {
+    std::uint32_t phase_context = 0;
+    std::uint32_t shape_context = 0;
+    std::uint32_t continuation_context = 0;
+    UrlContexts(bit_position, &phase_context, &shape_context,
+        &continuation_context);
+    UpdateCount(url_phase_counts_.data(), phase_context, bit);
+    UpdateCount(url_shape_counts_.data(), shape_context, bit);
+    if (url_segment_length_ >= 2) {
+      UpdateCount(url_continuation_counts_.data(),
+          continuation_context, bit);
+    }
+  }
   if (evaluation_mask_ & kDmc) {
     DmcNode& node = dmc_[dmc_state_ & (kDmcNodes - 1u)];
     if (node.count[residual] != 0xffff) ++node.count[residual];
@@ -807,28 +1056,65 @@ void PostR1Experts::Perceive(int bit) {
       SpanOracleStat& span = span_oracle_.back();
       const float base_logit = Logit(baseline_probability_);
       const std::uint32_t context = evaluation_mask_ & kContextMixer;
-      const std::array<std::uint32_t, 4> alternatives{{
-          0u, kMiniCmix | context, kDonorProfile | context,
-          kMiniCmix | kDonorProfile | context}};
-      std::array<double, 4> losses{};
+      const std::array<std::uint32_t, 8> alternatives{{
+          0u,
+          kMiniCmix | context,
+          kDonorProfile | context,
+          kMiniCmix | kDonorProfile | context,
+          kUrlStructure | context,
+          kUrlStructure | kMiniCmix | context,
+          kUrlStructure | kDonorProfile | context,
+          kUrlStructure | kMiniCmix | kDonorProfile | context}};
+      std::array<double, 8> losses{};
       losses[0] = bit_loss(baseline_probability_);
       for (unsigned int i = 1; i < alternatives.size(); ++i) {
         const std::uint32_t required = alternatives[i] & ~kContextMixer;
-        if ((evaluation_mask_ & required) != required) {
-          losses[i] = losses[0];
-        } else if (i == 3 && (evaluation_mask_ & kMiniCmix) == 0) {
-          losses[i] = losses[2];
-        } else {
-          losses[i] = bit_loss(Logistic(
-              base_logit + CorrectionFor(alternatives[i])));
-        }
+        losses[i] = (evaluation_mask_ & required) == required
+            ? bit_loss(Logistic(
+                base_logit + CorrectionFor(alternatives[i])))
+            : losses[0];
         span.loss_bits[i] += losses[i];
       }
       span.loss_bits[0] += losses[0];
       unsigned int selected = 0;
       if (evaluation_mask_ & kMiniCmix) selected |= 1u;
       if (evaluation_mask_ & kDonorProfile) selected |= 2u;
-      span.loss_bits[4] += losses[selected];
+      if (evaluation_mask_ & kUrlStructure) selected |= 4u;
+      span.loss_bits[8] += losses[selected];
+      for (unsigned int i = 0; i < kExpertCount; ++i) {
+        const std::uint32_t expert_mask = ExpertMask(i);
+        const float probability = (evaluation_mask_ & expert_mask) != 0
+            ? Logistic(base_logit + CorrectionFor(expert_mask))
+            : baseline_probability_;
+        span.singleton_loss_bits[i] += bit_loss(probability);
+      }
+      const std::array<std::uint32_t, 6> sweep_masks{{
+          kMiniCmix, kDonorProfile, kUrlStructure | kMiniCmix,
+          kUrlStructure | kDonorProfile, kMiniCmix | kDonorProfile,
+          kUrlStructure | kMiniCmix | kDonorProfile}};
+      for (unsigned int mode = 0; mode < sweep_masks.size(); ++mode) {
+        for (unsigned int gain_code = 0; gain_code < 4; ++gain_code) {
+          float correction = 0.0f;
+          if (sweep_masks[mode] & kMiniCmix) {
+            correction += 0.0625f * (1.0f + gain_code) *
+                mixer_input_[11];
+          }
+          if (sweep_masks[mode] & kDonorProfile) {
+            correction += 0.25f * (1.0f + gain_code) *
+                mixer_input_[10];
+          }
+          if (sweep_masks[mode] & kUrlStructure) {
+            correction += 0.125f * mixer_input_[12];
+          }
+          const float probability =
+              (evaluation_mask_ & sweep_masks[mode]) == sweep_masks[mode]
+              ? Logistic(base_logit + std::max(-1.5f,
+                    std::min(1.5f, correction)))
+              : baseline_probability_;
+          span.gain_sweep_loss_bits[mode][gain_code] +=
+              bit_loss(probability);
+        }
+      }
       ++span.bits;
     }
   }
@@ -909,13 +1195,18 @@ void PostR1Experts::UpdateStreamClass(std::uint8_t byte) {
 }
 
 void PostR1Experts::ByteUpdate(std::uint8_t byte) {
-  if (evaluation_mask_ == 0) return;
+  const bool track_url = (observed_mask_ & kUrlStructure) != 0;
+  if (evaluation_mask_ == 0) {
+    if (track_url) UpdateUrlState(byte);
+    return;
+  }
   if ((evaluation_mask_ & kOracle) && !span_oracle_.empty()) {
     ++span_oracle_.back().bytes;
   }
   UpdateStreamClass(byte);
-  const std::uint32_t donor_only = kDonorProfile | kContextMixer;
-  if ((evaluation_mask_ & ~donor_only) == 0) {
+  const std::uint32_t lightweight = kDonorProfile | kContextMixer |
+      kUrlStructure | kOracle | kMiniCmix;
+  if ((evaluation_mask_ & ~lightweight) == 0) {
     recent_bytes_[recent_pos_++ & 63u] = byte;
     ++bytes_seen_;
     if (evaluation_mask_ & kDonorProfile) {
@@ -923,6 +1214,7 @@ void PostR1Experts::ByteUpdate(std::uint8_t byte) {
       ++donor_bytes_seen_;
       UpdateDonorProfilePrediction();
     }
+    if (track_url) UpdateUrlState(byte);
     return;
   }
   UpdateHashes(byte);
@@ -1033,6 +1325,7 @@ void PostR1Experts::ByteUpdate(std::uint8_t byte) {
     ++donor_bytes_seen_;
     UpdateDonorProfilePrediction();
   }
+  if (track_url) UpdateUrlState(byte);
 }
 
 bool PostR1Experts::WriteOracle(const char* path) const {
@@ -1043,7 +1336,7 @@ bool PostR1Experts::WriteOracle(const char* path) const {
       "baseline", "structural", "ppmd_escape_order", "sparse_virtual_ppm",
       "word_xml_ppm", "residual_lstm", "micro_diffusion", "rare_residual",
       "cts_skipcts", "dmc", "token_match", "donor_profile", "mini_cmix",
-      "selected_mixer"};
+      "url_structure", "selected_mixer"};
   output << "model,bits,loss_bits,equivalent_bytes,bpb\n";
   for (unsigned int i = 0; i < kExpertCount + 2; ++i) {
     const OracleStat& stat = oracle_[i];
@@ -1058,29 +1351,93 @@ bool PostR1Experts::WriteSpanOracle(const char* path) const {
   std::ofstream output(path, std::ios::out | std::ios::trunc);
   if (!output.is_open()) return false;
   output.precision(12);
+  static const char* combination_modes[8] = {
+      "baseline", "mini_cmix", "donor_profile", "mini_donor",
+      "url_structure", "url_mini", "url_donor", "url_mini_donor"};
+  static const char* expert_modes[kExpertCount] = {
+      "structural", "ppmd_escape_order", "sparse_virtual_ppm",
+      "word_xml_ppm", "residual_lstm", "micro_diffusion",
+      "rare_residual", "cts_skipcts", "dmc", "token_match",
+      "donor_profile", "mini_cmix", "url_structure"};
+  static const char* sweep_modes[6] = {
+      "mini", "donor", "url_mini", "url_donor", "mini_donor",
+      "url_mini_donor"};
+  static const char* gain_names[4] = {"025", "050", "075", "100"};
+
   output << "offset,length,bits,mask,stream_class,profile_id,"
-            "baseline_bytes,mini_bytes,donor_bytes,combined_bytes,"
-            "selected_bytes,mini_gain_bytes,donor_gain_bytes,"
-            "combined_gain_bytes,best_mode,best_gain_bytes\n";
-  static const char* modes[4] = {"baseline", "mini_cmix", "donor_profile",
-      "mini_donor"};
+            "baseline_bytes,mini_bytes,donor_bytes,mini_donor_bytes,"
+            "url_bytes,url_mini_bytes,url_donor_bytes,"
+            "url_mini_donor_bytes,selected_bytes,mini_gain_bytes,"
+            "donor_gain_bytes,mini_donor_gain_bytes,url_gain_bytes,"
+            "url_mini_gain_bytes,url_donor_gain_bytes,"
+            "url_mini_donor_gain_bytes";
+  for (unsigned int i = 0; i < kExpertCount; ++i) {
+    output << ',' << expert_modes[i] << "_single_gain_bytes";
+  }
+  for (unsigned int mode = 0; mode < 6; ++mode) {
+    for (unsigned int gain = 0; gain < 4; ++gain) {
+      output << ',' << sweep_modes[mode] << "_g" << gain_names[gain]
+             << "_gain_bytes";
+    }
+  }
+  output << ",best_mode,best_gain_bytes" << std::endl;
+
   for (const SpanOracleStat& span : span_oracle_) {
     if (span.bits == 0) continue;
-    unsigned int best = 0;
-    for (unsigned int i = 1; i < 4; ++i) {
-      if (span.loss_bits[i] < span.loss_bits[best]) best = i;
+    const char* best_mode = combination_modes[0];
+    int best_sweep_mode = -1;
+    int best_sweep_gain = -1;
+    double best_loss = span.loss_bits[0];
+    for (unsigned int i = 1; i < 8; ++i) {
+      if (span.loss_bits[i] < best_loss) {
+        best_loss = span.loss_bits[i];
+        best_mode = combination_modes[i];
+        best_sweep_mode = -1;
+      }
     }
+    for (unsigned int i = 0; i < kExpertCount; ++i) {
+      if (span.singleton_loss_bits[i] < best_loss) {
+        best_loss = span.singleton_loss_bits[i];
+        best_mode = expert_modes[i];
+        best_sweep_mode = -1;
+      }
+    }
+    for (unsigned int mode = 0; mode < 6; ++mode) {
+      for (unsigned int gain = 0; gain < 4; ++gain) {
+        if (span.gain_sweep_loss_bits[mode][gain] < best_loss) {
+          best_loss = span.gain_sweep_loss_bits[mode][gain];
+          best_sweep_mode = static_cast<int>(mode);
+          best_sweep_gain = static_cast<int>(gain);
+        }
+      }
+    }
+
     output << span.offset << ',' << span.bytes << ',' << span.bits << ','
            << span.mask << ',' << static_cast<unsigned int>(span.stream_class)
            << ',' << static_cast<unsigned int>(span.profile_id);
     for (double loss : span.loss_bits) output << ',' << loss / 8.0;
-    output << ',' << (span.loss_bits[0] - span.loss_bits[1]) / 8.0
-           << ',' << (span.loss_bits[0] - span.loss_bits[2]) / 8.0
-           << ',' << (span.loss_bits[0] - span.loss_bits[3]) / 8.0
-           << ',' << modes[best]
-           << ',' << (span.loss_bits[0] - span.loss_bits[best]) / 8.0
-           << '\n';
+    for (unsigned int i = 1; i < 8; ++i) {
+      output << ',' << (span.loss_bits[0] - span.loss_bits[i]) / 8.0;
+    }
+    for (unsigned int i = 0; i < kExpertCount; ++i) {
+      output << ',' << (span.loss_bits[0] -
+          span.singleton_loss_bits[i]) / 8.0;
+    }
+    for (unsigned int mode = 0; mode < 6; ++mode) {
+      for (unsigned int gain = 0; gain < 4; ++gain) {
+        output << ',' << (span.loss_bits[0] -
+            span.gain_sweep_loss_bits[mode][gain]) / 8.0;
+      }
+    }
+    output << ',';
+    if (best_sweep_mode >= 0) {
+      output << sweep_modes[best_sweep_mode] << "_g"
+             << gain_names[best_sweep_gain];
+    } else {
+      output << best_mode;
+    }
+    output << ',' << (span.loss_bits[0] - best_loss) / 8.0
+           << std::endl;
   }
   return output.good();
 }
-

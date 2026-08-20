@@ -469,7 +469,10 @@ float Predictor::Predict() {
     ++input_index;
   }
   const float aggregate_fxcm_probability = fxcm_model_.FinalProbability();
-  const auto fxcm_model_index = input_index - 1;
+  const float bounded_fxcm_probability = std::max(1.0e-4f,
+      std::min(1.0f - 1.0e-4f, aggregate_fxcm_probability));
+  const float aggregate_fxcm_logit =
+      sigmoid_.Logit(bounded_fxcm_probability);
 
   for (unsigned int i = 0; i < direct_models_.size(); ++i) {
     const std::valarray<float>& outputs = direct_models_[i].Predict();
@@ -517,13 +520,13 @@ float Predictor::Predict() {
   postr1_training =
       postr1_experts_ && postr1_experts_->training_mask() != 0;
 #endif
-  const float selected_fxcm_logit = layers_[0].Inputs()[fxcm_model_index];
-  const float selected_fxcm_probability =
-      Sigmoid::Logistic(selected_fxcm_logit);
-  float auxiliary_average = selected_fxcm_probability;
-  auxiliary_average +=
+  const float ppmd_probability =
+      Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]);
+  const float lstm_probability =
       Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]);
-  auxiliary_average /= 2.0f;
+  const float auxiliary_average =
+      (bounded_fxcm_probability + lstm_probability + ppmd_probability) /
+      3.0f;
   manager_.auxiliary_context_ = auxiliary_average * 15;
 
   for (unsigned int i = 0; i < mixer_0_.size(); ++i) {
@@ -531,7 +534,7 @@ float Predictor::Predict() {
     layers_[0].SetExtraInput(i, p);
     layers_[1].SetStretchedInput(i, p);
   }
-  layers_[1].SetStretchedInput(mixer_0_.size(), selected_fxcm_logit);
+  layers_[1].SetStretchedInput(mixer_0_.size(), aggregate_fxcm_logit);
   layers_[1].SetStretchedInput(mixer_0_.size() + 1, layers_[0].Inputs()[byte_mixer_index]);
   layers_[1].SetStretchedInput(
       mixer_0_.size() + 2, layers_[0].Inputs()[ppmd_model_index]);
@@ -543,7 +546,7 @@ float Predictor::Predict() {
 #if FX4_SPECIALIST_CORRECTOR
   p = PredictSpecialist(p, layers_[0].Inputs()[ppmd_model_index],
       layers_[0].Inputs()[byte_mixer_index],
-      selected_fxcm_logit);
+      aggregate_fxcm_logit);
 #endif
 #if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
   donor_branch_ppmd_probability_ =
@@ -699,13 +702,21 @@ float Predictor::PredictSpecialist(float base_probability,
   const unsigned int confidence_bucket =
       (confidence >= 0.5f) + (confidence >= 1.5f) +
       (confidence >= 3.0f);
+  const float order_reliability = std::min(1.0f,
+      static_cast<float>(byte_model_->EffectiveOrder() + 1u) / 16.0f);
+  const float escape_penalty = std::min(1.0f,
+      byte_model_->RecentEscapeRate() +
+      static_cast<float>(byte_model_->LastEscapeDepth()) / 8.0f);
+  const float ppmd_reliability =
+      order_reliability * (1.0f - escape_penalty);
+  const unsigned int ppmd_reliability_bucket = ppmd_reliability >= 0.35f;
   specialist_coarse_context_ =
       SpecialistStreamClass() * 8u + (manager_.bpos & 7u);
-  // This is algebraically identical to the old expression whose donor bit
-  // was permanently zero: (((coarse * 2 + disagreement) * 2) * 4) + confidence.
+  // Reuse the old permanently-zero donor bit for a decoder-visible PPMd
+  // reliability split. Low-reliability contexts retain their old indexes.
   specialist_context_ =
-      (specialist_coarse_context_ * 2u + disagreement_bucket) * 8u +
-      confidence_bucket;
+      ((specialist_coarse_context_ * 2u + disagreement_bucket) * 2u +
+       ppmd_reliability_bucket) * 4u + confidence_bucket;
 
   auto bounded_delta = [base_logit](float model_logit) {
     return std::max(-4.0f, std::min(4.0f, model_logit - base_logit));
@@ -716,6 +727,12 @@ float Predictor::PredictSpecialist(float base_probability,
   specialist_inputs_[3] = bounded_delta(fxcm_logit);
   specialist_inputs_[4] =
       std::max(-4.0f, std::min(4.0f, lstm_logit - ppmd_logit));
+  const float match_reliability = std::min(1.0f,
+      static_cast<float>(manager_.longest_match_) / 64.0f);
+  specialist_inputs_[5] = specialist_inputs_[1] * ppmd_reliability;
+  specialist_inputs_[6] = specialist_inputs_[2] *
+      (1.0f - ppmd_reliability);
+  specialist_inputs_[7] = specialist_inputs_[3] * match_reliability;
 
   const auto& weights = specialist_weights_[specialist_context_];
   const auto& coarse_weights =

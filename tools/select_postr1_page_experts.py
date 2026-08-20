@@ -15,12 +15,46 @@ from pathlib import Path
 
 
 MODES = {
+    "structural": ("structural", "structural_single_gain_bytes", 1 << 0),
+    "ppmd_escape_order": (
+        "ppmd_escape_order", "ppmd_escape_order_single_gain_bytes", 1 << 1),
+    "sparse_virtual_ppm": (
+        "sparse_virtual_ppm", "sparse_virtual_ppm_single_gain_bytes", 1 << 2),
+    "word_xml_ppm": (
+        "word_xml_ppm", "word_xml_ppm_single_gain_bytes", 1 << 3),
+    "residual_lstm": (
+        "residual_lstm", "residual_lstm_single_gain_bytes", 1 << 4),
+    "micro_diffusion": (
+        "micro_diffusion", "micro_diffusion_single_gain_bytes", 1 << 5),
+    "rare_residual": (
+        "rare_residual", "rare_residual_single_gain_bytes", 1 << 6),
+    "cts_skipcts": (
+        "cts_skipcts", "cts_skipcts_single_gain_bytes", 1 << 7),
+    "dmc": ("dmc", "dmc_single_gain_bytes", 1 << 8),
+    "token_match": (
+        "token_match", "token_match_single_gain_bytes", 1 << 9),
     "mini_cmix": ("mini_cmix", "mini_gain_bytes", 1 << 16),
     "donor_profile": ("donor_profile", "donor_gain_bytes", 1 << 15),
     "mini_donor": (
         "mini_cmix+donor_profile",
-        "combined_gain_bytes",
+        "mini_donor_gain_bytes",
         (1 << 16) | (1 << 15),
+    ),
+    "url_structure": ("url_structure", "url_gain_bytes", 1 << 18),
+    "url_mini": (
+        "url_structure+mini_cmix",
+        "url_mini_gain_bytes",
+        (1 << 18) | (1 << 16),
+    ),
+    "url_donor": (
+        "url_structure+donor_profile",
+        "url_donor_gain_bytes",
+        (1 << 18) | (1 << 15),
+    ),
+    "url_mini_donor": (
+        "url_structure+mini_cmix+donor_profile",
+        "url_mini_donor_gain_bytes",
+        (1 << 18) | (1 << 16) | (1 << 15),
     ),
 }
 
@@ -48,7 +82,7 @@ def parse_args() -> argparse.Namespace:
         help="original expert CSV used to recover exact span lengths",
     )
     parser.add_argument(
-        "--modes", default="mini_cmix,donor_profile,mini_donor",
+        "--modes", default="structural,ppmd_escape_order,sparse_virtual_ppm,word_xml_ppm,residual_lstm,micro_diffusion,rare_residual,cts_skipcts,dmc,token_match,mini_cmix,donor_profile,mini_donor,url_structure,url_mini,url_donor,url_mini_donor",
         help="comma-separated candidate modes",
     )
     parser.add_argument("--min-net-bytes", type=float, default=1.0)
