@@ -56,6 +56,17 @@
 #define FX4_LSTM_GRADIENT_CLIP 10.0f
 #endif
 
+// Research-only LSTM-200 shadow. It is trained continuously from byte zero,
+// but its probability is consumed only by explicitly selected post-R1 spans.
+// The accepted LSTM-170 and final predictor remain untouched.
+#ifndef FX4_SHADOW_LSTM200
+#define FX4_SHADOW_LSTM200 0
+#endif
+
+#ifndef FX4_SHADOW_LSTM_CELLS
+#define FX4_SHADOW_LSTM_CELLS 200
+#endif
+
 // Versioned donor-plan support is research-only until exact net archive gain
 // exceeds its metadata and executable cost.
 #ifndef FX4_DONOR_PLAN
@@ -121,6 +132,19 @@
 #ifndef FX4_MINI_CMIX
 #define FX4_MINI_CMIX 0
 #endif
+// Gauss/interlacement recurrence expert. Discovery builds enable this to
+// measure it page-wise; production builds leave it out unless its aggregate
+// archive saving pays for the measured S1 delta.
+#ifndef FX4_TOPOLOGY_RECURRENCE
+#define FX4_TOPOLOGY_RECURRENCE 0
+#endif
+
+// Tiny deterministic causal-convolution residual expert. It is compiled only
+// for discovery or after measured aggregate savings pay its final S1 cost.
+#ifndef FX4_CAUSAL_CNN
+#define FX4_CAUSAL_CNN 0
+#endif
+
 
 
 // Reversible block portfolio between R1 and the entropy models. Compression

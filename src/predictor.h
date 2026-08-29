@@ -54,6 +54,10 @@ class Predictor {
   void SetPostR1DonorProfile(const std::vector<std::uint8_t>& bytes,
       const std::vector<std::uint32_t>& segment_lengths);
   bool HasPostR1DonorProfile() const;
+  float PpmdByteProbability(std::uint8_t byte) const;
+  unsigned int PpmdEffectiveOrder() const;
+  unsigned int PpmdEscapeDepth() const;
+  float PpmdEscapeRate() const;
 #if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
   void SetPostR1BranchSignals(PostR1Experts* target) const;
 #endif
@@ -126,10 +130,15 @@ class Predictor {
   float fxcm_neutral_input_ = 0.0f;
   std::optional<PPMD::PPMD> byte_model_;
   std::optional<ByteMixer> byte_mixer_;
+#if FX4_SHADOW_LSTM200
+  std::optional<ByteMixer> shadow_lstm200_;
+  float shadow_lstm200_output_ = 0.5f;
+#endif
   std::vector<bool> vocab_;
   FXCM fxcm_model_;
 #if FX4_SELECTIVE_POSTR1
   std::unique_ptr<PostR1Experts> postr1_experts_;
+  std::uint32_t postr1_portfolio_mask_ = 0;
   bool postr1_prediction_used_ = false;
   std::array<float, 512> postr1_mass_{};
   std::array<float, 256> postr1_residual_one_{};
@@ -137,6 +146,9 @@ class Predictor {
 #if FX4_DONOR_FORK_DISCOVERY
   float donor_branch_ppmd_probability_ = 0.5f;
   float donor_branch_lstm_probability_ = 0.5f;
+#if FX4_SHADOW_LSTM200
+  float donor_branch_shadow_lstm_probability_ = 0.5f;
+#endif
   float donor_branch_fxcm_probability_ = 0.5f;
   std::array<float, 4> donor_branch_ppmd_order_bands_{{
       0.5f, 0.5f, 0.5f, 0.5f}};
@@ -150,7 +162,7 @@ class Predictor {
 #if FX4_SPECIALIST_CORRECTOR
   static constexpr unsigned int kSpecialistCoarseContexts = 64;
   static constexpr unsigned int kSpecialistContexts = 1024;
-  static constexpr unsigned int kSpecialistFeatures = 8;
+  static constexpr unsigned int kSpecialistFeatures = 5;
   std::array<std::array<float, kSpecialistFeatures>,
       kSpecialistContexts> specialist_weights_{};
   std::array<std::array<float, kSpecialistFeatures>,

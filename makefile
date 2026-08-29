@@ -10,7 +10,10 @@ PAGE_DONOR_RANKER_OUT ?= postr1_page_donor_ranker
 DONOR ?= 0
 POSTR1 ?= 0
 MINI_CMIX ?= 0
+SHADOW_LSTM200 ?= 0
 VIRTUAL_REPLAY ?= 0
+TOPOLOGY ?= 0
+CAUSAL_CNN ?= 0
 DONOR_DISCOVERY ?= 0
 RESEARCH_DONOR_BOOTSTRAP ?= 0
 POSTR1_TRANSFORM ?= 0
@@ -37,8 +40,17 @@ endif
 ifeq ($(MINI_CMIX),1)
 CFLAGS_DEFINES += -DFX4_MINI_CMIX=1
 endif
+ifeq ($(SHADOW_LSTM200),1)
+CFLAGS_DEFINES += -DFX4_SHADOW_LSTM200=1
+endif
 ifeq ($(VIRTUAL_REPLAY),1)
 CFLAGS_DEFINES += -DFX4_VIRTUAL_REPLAY=1
+endif
+ifeq ($(TOPOLOGY),1)
+CFLAGS_DEFINES += -DFX4_TOPOLOGY_RECURRENCE=1
+endif
+ifeq ($(CAUSAL_CNN),1)
+CFLAGS_DEFINES += -DFX4_CAUSAL_CNN=1
 endif
 ifeq ($(RESEARCH_DONOR_BOOTSTRAP),1)
 CFLAGS_DEFINES += -DFX4_RESEARCH_DONOR_BOOTSTRAP=1
@@ -133,4 +145,10 @@ all: cmix remap
 # F4CP/F4VR plan it produces the accepted baseline prediction stream.
 .PHONY: selective
 selective:
-	$(MAKE) cmix DONOR=1 POSTR1=1 MINI_CMIX=1 VIRTUAL_REPLAY=1 OUT=$(OUT)
+	$(MAKE) cmix DONOR=1 POSTR1=1 MINI_CMIX=1 SHADOW_LSTM200=1 VIRTUAL_REPLAY=1 TOPOLOGY=1 CAUSAL_CNN=1 OUT=$(OUT)
+
+# Lean state-preserving SCR2 winner path. This keeps the accepted core and
+# excludes the dormant discovery experts from the production binary.
+.PHONY: causal_scr2
+causal_scr2:
+	$(MAKE) cmix VIRTUAL_REPLAY=1 OUT=$(OUT)

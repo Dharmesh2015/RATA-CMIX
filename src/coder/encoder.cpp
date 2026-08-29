@@ -46,6 +46,15 @@ Encoder Encoder::Clone() const {
   return branch;
 }
 
+Encoder Encoder::CloneCountOnly() const {
+  Encoder branch(os_, p_);
+  branch.x1_ = x1_;
+  branch.x2_ = x2_;
+  branch.count_only_ = true;
+  branch.count_only_bytes_ = OutputSize();
+  return branch;
+}
+
 void Encoder::Encode(int bit) {
   const unsigned int p = Discretize(p_->Predict());
   if (trace_byte_active_) {
@@ -95,6 +104,21 @@ void Encoder::ObserveKnownByte(unsigned int byte) {
   for (int bit = 7; bit >= 0; --bit) {
     ObserveKnownBit((byte >> bit) & 1);
   }
+}
+
+double Encoder::ObserveKnownBitCost(int bit) {
+  const float probability = p_->Predict();
+  const double mass = bit ? probability : 1.0 - probability;
+  p_->Perceive(bit);
+  return -std::log2(mass);
+}
+
+double Encoder::ObserveKnownByteCost(unsigned int byte) {
+  double cost = 0.0;
+  for (int bit = 7; bit >= 0; --bit) {
+    cost += ObserveKnownBitCost((byte >> bit) & 1);
+  }
+  return cost;
 }
 
 void Encoder::BeginTraceByte(unsigned long long offset, unsigned int actual_byte,

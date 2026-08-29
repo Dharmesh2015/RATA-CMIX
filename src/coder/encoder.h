@@ -14,6 +14,8 @@ class Encoder {
   void EncodeRawBit(int bit, unsigned int p = 32768);
   void ObserveKnownBit(int bit);
   void ObserveKnownByte(unsigned int byte);
+  double ObserveKnownBitCost(int bit);
+  double ObserveKnownByteCost(unsigned int byte);
   void BeginTraceByte(unsigned long long offset, unsigned int actual_byte,
       unsigned int prev4);
   void EndTraceByte();
@@ -40,6 +42,9 @@ class Encoder {
   // clones). Only one of the resulting branches should ever call Flush()
   // or write to the shared output stream.
   Encoder Clone() const;
+  // Discovery branches only need the current interval and emitted-byte count.
+  // Avoid copying the complete archive buffer into every count-only trial.
+  Encoder CloneCountOnly() const;
 
   static unsigned int DiscretizeProbability(float p);
 

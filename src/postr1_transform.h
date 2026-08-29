@@ -25,7 +25,10 @@ enum Stage : std::uint16_t {
   kXorReference = 1u << 8,
   kWikiNative2 = 1u << 9,
   kPhraseMacros = 1u << 10,
-  kAllStages = (1u << 11) - 1u,
+  // Uses the immutable SCR2 table compiled into S1. Unlike
+  // kScr2Shorthand, the dictionary is not repeated in every block payload.
+  kScr2SharedShorthand = 1u << 11,
+  kAllStages = (1u << 12) - 1u,
 };
 
 struct Operation {

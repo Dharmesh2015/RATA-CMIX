@@ -39,7 +39,6 @@ std::uint64_t DonorContextHash(
 
 PostR1Experts::PostR1Experts() {
   expert_probability_.fill(0.5f);
-  mixer_error_.fill(8192);
   const char* oracle_path = std::getenv("FX4_POSTR1_ORACLE");
   oracle_summary_enabled_ = oracle_path && *oracle_path;
   const char* oracle_only = std::getenv("FX4_POSTR1_ORACLE_ONLY");
@@ -89,14 +88,69 @@ std::uint32_t PostR1Experts::MixHash(std::uint64_t value) {
   return static_cast<std::uint32_t>(value ^ (value >> 32));
 }
 
+void PostR1Experts::EnsureTables(std::uint32_t mask) {
+  const std::uint32_t adaptive_mask = kStructural | kPpmdEscapeOrder |
+      kSparseVirtualPpm | kWordXmlPpm | kResidualLstm |
+      kMicroDiffusion | kRareResidual | kCtsSkipCts | kDmc |
+      kTokenMatch | kContextMixer | kCausalCnn;
+  if ((mask & adaptive_mask) != 0 && !adaptive_state_) {
+    adaptive_state_ = std::make_unique<AdaptiveState>();
+  }
+  if ((mask & kStructural) != 0 && !structural_counts_) {
+    structural_counts_ =
+        std::make_unique<std::array<Counts, 4096>>();
+  }
+  if ((mask & kPpmdEscapeOrder) != 0 && !ppmd_calibration_counts_) {
+    ppmd_calibration_counts_ =
+        std::make_unique<std::array<Counts, kPpmdCalibrationSize>>();
+  }
+  if ((mask & kSparseVirtualPpm) != 0 && !sparse_counts_) {
+    sparse_counts_ =
+        std::make_unique<std::array<FullCountTable, 3>>();
+  }
+  if ((mask & kWordXmlPpm) != 0 && !word_xml_counts_) {
+    word_xml_counts_ = std::make_unique<FullCountTable>();
+  }
+  if ((mask & kMicroDiffusion) != 0 && !micro_counts_) {
+    micro_counts_ =
+        std::make_unique<std::array<Counts, kMicroTableSize>>();
+  }
+  if ((mask & kRareResidual) != 0 && !residual_counts_) {
+    residual_counts_ =
+        std::make_unique<std::array<Counts, 4096>>();
+  }
+  if ((mask & kCtsSkipCts) != 0 && !cts_counts_) {
+    cts_counts_ =
+        std::make_unique<std::array<FullCountTable, 4>>();
+  }
+  if ((mask & kUrlStructure) != 0 && !url_phase_counts_) {
+    url_phase_counts_ =
+        std::make_unique<std::array<Counts, kUrlPhaseTableSize>>();
+    url_shape_counts_ =
+        std::make_unique<std::array<Counts, kUrlShapeTableSize>>();
+    url_continuation_counts_ = std::make_unique<
+        std::array<Counts, kUrlContinuationTableSize>>();
+  }
+  if ((mask & kDmc) != 0 && !dmc_) {
+    dmc_ = std::make_unique<std::array<DmcNode, kDmcNodes>>();
+  }
+}
+
 void PostR1Experts::EnablePortfolio(std::uint32_t mask) {
   mask &= ~kShadowOnly;
-  mask &= ~(kTinySsm | kConfidenceBptt | kLegacyDonorReplay);
+  mask &= ~(kConfidenceBptt | kLegacyDonorReplay);
+#if !FX4_CAUSAL_CNN
+  mask &= ~kCausalCnn;
+#endif
+#if !FX4_TOPOLOGY_RECURRENCE
+  mask &= ~kTopologyRecurrence;
+#endif
   if (mask & kEpisodicCache) {
     mask |= kTokenMatch;
     mask &= ~kEpisodicCache;
   }
   observed_mask_ |= mask;
+  EnsureTables(mask);
   if (observed_mask_ & kTokenMatch) EnsureEpisodic();
 }
 
@@ -104,17 +158,23 @@ void PostR1Experts::SetSpan(std::uint64_t logical_offset,
     std::uint32_t mask, StreamClass stream_class, std::uint8_t profile_id,
     std::uint16_t mini_model_mask) {
   logical_offset_ = logical_offset;
+#if !FX4_TOPOLOGY_RECURRENCE
+  mask &= ~kTopologyRecurrence;
+#endif
+#if !FX4_CAUSAL_CNN
+  mask &= ~kCausalCnn;
+#endif
   const bool shadow_only = (mask & kShadowOnly) != 0;
-  // TinySSM has no trained update and confidence-gated BPTT would mutate the
-  // main LSTM. Keep both archive bits reserved but neutral in this separate
-  // post-R1 specialist.
-  evaluation_mask_ = mask & ~(kTinySsm | kConfidenceBptt |
+  // Confidence-gated BPTT would mutate the main LSTM. Keep that legacy bit
+  // neutral; the retired TinySSM bit now identifies the isolated causal CNN.
+  evaluation_mask_ = mask & ~(kConfidenceBptt |
       kLegacyDonorReplay | kShadowOnly);
   if (evaluation_mask_ & kEpisodicCache) {
     evaluation_mask_ |= kTokenMatch;
     evaluation_mask_ &= ~kEpisodicCache;
   }
   observed_mask_ |= evaluation_mask_;
+  EnsureTables(evaluation_mask_);
   active_mask_ = shadow_only ? 0u : evaluation_mask_ & ~kOracle;
   if (oracle_only_ && (evaluation_mask_ & kOracle)) active_mask_ = 0;
   plan_stream_class_ = stream_class;
@@ -124,6 +184,18 @@ void PostR1Experts::SetSpan(std::uint64_t logical_offset,
   mini_model_mask_ = (evaluation_mask_ & kMiniCmix)
       ? static_cast<std::uint16_t>(mini_model_mask & 0x07ffu) : 0u;
   if (evaluation_mask_ & kTokenMatch) EnsureEpisodic();
+#if FX4_TOPOLOGY_RECURRENCE
+  if (evaluation_mask_ & kTopologyRecurrence) {
+    topology_.reset();
+    EnsureTopology();
+  }
+#endif
+#if FX4_CAUSAL_CNN
+  if (evaluation_mask_ & kCausalCnn) {
+    causal_cnn_.reset();
+    EnsureCausalCnn();
+  }
+#endif
   if (evaluation_mask_ & kOracle) {
     SpanOracleStat span;
     span.offset = logical_offset;
@@ -135,14 +207,16 @@ void PostR1Experts::SetSpan(std::uint64_t logical_offset,
 }
 
 void PostR1Experts::SetModelSignals(float ppmd_probability,
-    float lstm_probability, float fxcm_probability,
-    float mini_cmix_probability,
+    float lstm_probability, float shadow_lstm200_probability,
+    float fxcm_probability, float mini_cmix_probability,
     const std::array<float, 11>& mini_model_probabilities,
     const std::array<float, 4>& ppmd_order_bands, unsigned int ppmd_order,
     unsigned int escape_depth, float escape_rate,
     float residual_byte_probability, unsigned int match_length) {
   ppmd_probability_ = ClampProbability(ppmd_probability);
   lstm_probability_ = ClampProbability(lstm_probability);
+  shadow_lstm200_probability_ =
+      ClampProbability(shadow_lstm200_probability);
   fxcm_probability_ = ClampProbability(fxcm_probability);
   mini_cmix_probability_ = ClampProbability(mini_cmix_probability);
   mini_model_probabilities_ = mini_model_probabilities;
@@ -195,7 +269,7 @@ float PostR1Experts::StructuralPrediction(unsigned int bit_position) {
   const std::uint32_t context =
       ((static_cast<unsigned int>(stream_class_) * 8u + bit_position) * 8u +
        byte_class) * 4u + ((previous2 >> 5) & 3u);
-  return CountProbability(structural_counts_.data(), context & 4095u);
+  return CountProbability(structural_counts_->data(), context & 4095u);
 }
 
 float PostR1Experts::SparsePrediction(unsigned int bit_position) {
@@ -206,10 +280,10 @@ float PostR1Experts::SparsePrediction(unsigned int bit_position) {
     const std::uint32_t context = MixHash(hashes[i] ^
         (static_cast<std::uint64_t>(current_prefix_) << 32) ^ bit_position) &
         (kCountTableSize - 1u);
-    const Counts& counts = sparse_counts_[i][context];
+    const Counts& counts = (*sparse_counts_)[i][context];
     const float evidence = std::min<float>(32.0f,
         counts.zero + counts.one - 2u);
-    weighted += CountProbability(sparse_counts_[i].data(), context) *
+    weighted += CountProbability((*sparse_counts_)[i].data(), context) *
         (1.0f + evidence);
     weight += 1.0f + evidence;
   }
@@ -221,7 +295,7 @@ float PostR1Experts::WordXmlPrediction(unsigned int bit_position) {
       (static_cast<std::uint64_t>(stream_class_) << 48) ^
       (static_cast<std::uint64_t>(current_prefix_) << 16) ^ bit_position) &
       (kCountTableSize - 1u);
-  return CountProbability(word_xml_counts_.data(), context);
+  return CountProbability(word_xml_counts_->data(), context);
 }
 
 float PostR1Experts::CtsPrediction(unsigned int bit_position) {
@@ -237,17 +311,17 @@ float PostR1Experts::CtsPrediction(unsigned int bit_position) {
         (residual_history_ & mask) ^ Rotl32(same_bit_skip, 13) ^
         (static_cast<std::uint32_t>(profile_id_) << 24) ^ bit_position) &
         (kCountTableSize - 1u);
-    const Counts& counts = cts_counts_[i][context];
+    const Counts& counts = (*cts_counts_)[i][context];
     const float evidence = 1.0f + std::min<float>(64.0f,
         counts.zero + counts.one - 2u);
-    numerator += CountProbability(cts_counts_[i].data(), context) * evidence;
+    numerator += CountProbability((*cts_counts_)[i].data(), context) * evidence;
     denominator += evidence;
   }
   return ResidualToBit(numerator / denominator, baseline_probability_);
 }
 
 float PostR1Experts::DmcPrediction() {
-  const DmcNode& node = dmc_[dmc_state_ & (kDmcNodes - 1u)];
+  const DmcNode& node = (*dmc_)[dmc_state_ & (kDmcNodes - 1u)];
   const float residual = static_cast<float>(node.count[1]) /
       static_cast<float>(node.count[0] + node.count[1]);
   return ResidualToBit(residual, baseline_probability_);
@@ -286,11 +360,7 @@ void PostR1Experts::SetDonorProfile(
   // Donor winners are measured from an identical warm primary predictor.
   // Reset only the small specialist so independently selected recipients
   // compose without carrying an earlier donor's correction state.
-  for (auto& weights : mixer_weight_) weights.fill(0);
-  mixer_error_.fill(8192);
-  for (auto& gains : expert_gain_total_) gains.fill(0);
-  for (auto& squares : expert_gain_square_) squares.fill(0);
-  expert_observations_.fill(0);
+  if (adaptive_state_) *adaptive_state_ = AdaptiveState{};
   expert_enabled_.fill(false);
   expert_probability_.fill(0.5f);
   expert_delta_.fill(0.0f);
@@ -424,13 +494,13 @@ float PostR1Experts::UrlPrediction(unsigned int bit_position) const {
     weighted += local_weight * probability;
     weight += local_weight;
   };
-  add(url_phase_counts_[phase_context],
-      CountProbability(url_phase_counts_.data(), phase_context));
-  add(url_shape_counts_[shape_context],
-      CountProbability(url_shape_counts_.data(), shape_context));
+  add((*url_phase_counts_)[phase_context],
+      CountProbability(url_phase_counts_->data(), phase_context));
+  add((*url_shape_counts_)[shape_context],
+      CountProbability(url_shape_counts_->data(), shape_context));
   if (url_segment_length_ >= 2) {
-    add(url_continuation_counts_[continuation_context],
-        CountProbability(url_continuation_counts_.data(),
+    add((*url_continuation_counts_)[continuation_context],
+        CountProbability(url_continuation_counts_->data(),
             continuation_context));
   }
   return weight > 0.0f ? ClampProbability(weighted / weight) : 0.5f;
@@ -643,11 +713,408 @@ float PostR1Experts::MatchPrediction(unsigned int bit_position) {
   return predicted_bit ? 0.5f + strength : 0.5f - strength;
 }
 
+#if FX4_TOPOLOGY_RECURRENCE
+void PostR1Experts::EnsureTopology() {
+  if (!topology_) topology_.reset(new TopologyState());
+}
+
+float PostR1Experts::TopologyConfidence() const {
+  if (!topology_ || topology_->repeat_count < 3 ||
+      topology_->event_count < 8) {
+    return 0.0f;
+  }
+  const float repeat_evidence = std::min(1.0f,
+      static_cast<float>(topology_->repeat_count - 2u) * 0.125f);
+  const float density = std::min(1.0f,
+      4.0f * static_cast<float>(topology_->repeat_count) /
+      static_cast<float>(topology_->event_count));
+  return repeat_evidence * density;
+}
+
+float PostR1Experts::TopologyPrediction(unsigned int bit_position) {
+  EnsureTopology();
+  TopologyState& state = *topology_;
+  const std::uint64_t prefix =
+      static_cast<std::uint64_t>(current_prefix_);
+  const std::uint32_t disagreement_bucket =
+      std::min<std::uint32_t>(15u, static_cast<std::uint32_t>(
+          std::fabs(fxcm_probability_ - baseline_probability_) * 64.0f));
+  state.bit_context[0] = MixHash(
+      state.canonical_hash ^ (prefix << 32) ^
+      (static_cast<std::uint64_t>(bit_position) << 56)) &
+      (kTopologyCountTableSize - 1u);
+  state.bit_context[1] = MixHash(
+      static_cast<std::uint64_t>(state.distance_history) ^
+      (static_cast<std::uint64_t>(state.relation_history) << 32) ^
+      (prefix << 48) ^ (static_cast<std::uint64_t>(bit_position) << 60)) &
+      (kTopologyCountTableSize - 1u);
+  state.bit_context[2] = MixHash(
+      state.canonical_hash ^
+      (static_cast<std::uint64_t>(Rotl32(
+          state.distance_history, 11)) << 16) ^
+      (static_cast<std::uint64_t>(state.relation_history) << 48) ^
+      (static_cast<std::uint64_t>(stream_class_) << 8) ^
+      (static_cast<std::uint64_t>(state.last_token_class) << 12) ^
+      (static_cast<std::uint64_t>(disagreement_bucket) << 20) ^
+      (prefix << 24) ^ bit_position) &
+      (kTopologyCountTableSize - 1u);
+
+  if (bit_position == 0) {
+    std::uint32_t key = MixHash(
+        state.canonical_hash ^
+        (static_cast<std::uint64_t>(state.distance_history) << 17) ^
+        (static_cast<std::uint64_t>(state.relation_history) << 49) ^
+        (static_cast<std::uint64_t>(
+            std::min<std::uint16_t>(state.bytes_since_event, 255u)) << 8) ^
+        static_cast<std::uint64_t>(stream_class_));
+    if (key == 0) key = 1;
+    state.copy_context_key = key;
+    const TopologyCopySlot& copy =
+        state.copy[key & (kTopologyCopySlots - 1u)];
+    state.copy_prediction = copy.prediction;
+    state.copy_confidence = copy.key == key ? copy.confidence : 0;
+  }
+
+  float weighted_probability = 0.0f;
+  float total_weight = 0.0f;
+  for (unsigned int i = 0; i < kTopologyContexts; ++i) {
+    const Counts& counts = state.counts[i][state.bit_context[i]];
+    const float evidence = std::min<float>(
+        64.0f, counts.zero + counts.one - 2u);
+    const float weight = 1.0f + evidence;
+    weighted_probability +=
+        CountProbability(state.counts[i].data(), state.bit_context[i]) *
+        weight;
+    total_weight += weight;
+  }
+  if (state.copy_confidence != 0) {
+    const int predicted_bit =
+        (state.copy_prediction >> (7 - bit_position)) & 1;
+    const float strength = std::min(
+        0.48f, 0.04f + 0.025f * state.copy_confidence);
+    const float probability =
+        predicted_bit ? 0.5f + strength : 0.5f - strength;
+
+    const float weight = 1.0f + 4.0f * state.copy_confidence;
+    weighted_probability += probability * weight;
+    total_weight += weight;
+  }
+  return weighted_probability / total_weight;
+}
+void PostR1Experts::FinishTopologyToken(std::uint64_t token_hash,
+    std::uint16_t token_length, std::uint8_t token_class) {
+  if (!topology_ || token_length == 0) return;
+  TopologyState& state = *topology_;
+  std::uint32_t key = MixHash(token_hash ^
+      (static_cast<std::uint64_t>(token_length) << 48) ^
+      (static_cast<std::uint64_t>(token_class) << 60));
+  if (key == 0) key = 1;
+  TopologyTokenSlot& slot =
+      state.tokens[key & (kTopologyTokenSlots - 1u)];
+  const std::uint32_t current = state.token_ordinal++;
+
+  if (slot.key == key && slot.last != UINT32_MAX && current > slot.last) {
+    const std::uint32_t distance = current - slot.last;
+    const std::uint8_t distance_bucket =
+        distance <= 1 ? 1 : distance <= 2 ? 2 : distance <= 4 ? 3 :
+        distance <= 8 ? 4 : distance <= 16 ? 5 : distance <= 32 ? 6 :
+        distance <= 64 ? 7 : 8;
+    std::uint8_t previous_bucket = 0;
+    if (slot.previous != UINT32_MAX && current > slot.previous) {
+      const std::uint32_t previous_distance = current - slot.previous;
+      previous_bucket = previous_distance <= 2 ? 1 :
+          previous_distance <= 4 ? 2 : previous_distance <= 8 ? 3 :
+          previous_distance <= 16 ? 4 : previous_distance <= 32 ? 5 :
+          previous_distance <= 64 ? 6 : previous_distance <= 128 ? 7 : 8;
+    }
+    std::uint8_t relation = 0;
+    if (state.last_chord_end != UINT32_MAX) {
+      if (state.last_chord_end <= slot.last) {
+        relation = 1;
+      } else if (state.last_chord_start < slot.last &&
+          slot.last < state.last_chord_end) {
+        relation = 2;
+      } else if (slot.last < state.last_chord_start &&
+          state.last_chord_end < current) {
+        relation = 3;
+      }
+    }
+    state.distance_history = (state.distance_history << 8) |
+        (static_cast<std::uint32_t>(previous_bucket) << 4) |
+        distance_bucket;
+    state.relation_history = static_cast<std::uint16_t>(
+        (state.relation_history << 2) | relation);
+    state.last_chord_start = slot.last;
+    state.last_chord_end = current;
+    if (state.repeat_count != UINT32_MAX) ++state.repeat_count;
+    slot.previous = slot.last;
+    slot.last = current;
+  } else {
+    slot.key = key;
+    slot.previous = UINT32_MAX;
+    slot.last = current;
+    state.distance_history <<= 8;
+    state.relation_history =
+        static_cast<std::uint16_t>(state.relation_history << 2);
+  }
+
+  state.canonical_keys[state.canonical_pos] = key;
+  state.canonical_pos =
+      static_cast<std::uint8_t>((state.canonical_pos + 1u) & 15u);
+  if (state.event_count != UINT32_MAX) ++state.event_count;
+  const unsigned int count =
+      std::min<std::uint32_t>(state.event_count, 16u);
+  const unsigned int start =
+      (state.canonical_pos + 16u - count) & 15u;
+  std::array<std::uint8_t, 16> labels{};
+  std::uint8_t next_label = 0;
+  std::uint64_t canonical = 0x6a09e667f3bcc909ULL;
+  for (unsigned int i = 0; i < count; ++i) {
+    const std::uint32_t candidate =
+        state.canonical_keys[(start + i) & 15u];
+    std::uint8_t label = next_label;
+    for (unsigned int j = 0; j < i; ++j) {
+      if (state.canonical_keys[(start + j) & 15u] == candidate) {
+        label = labels[j];
+        break;
+      }
+    }
+    if (label == next_label) ++next_label;
+    labels[i] = label;
+    canonical = (canonical ^ (static_cast<std::uint64_t>(label) + 1u)) *
+        0x100000001b3ULL;
+  }
+  state.canonical_hash = canonical;
+  state.last_token_class = token_class;
+  state.bytes_since_event = 0;
+}
+
+void PostR1Experts::UpdateTopologyByte(std::uint8_t byte) {
+  EnsureTopology();
+  TopologyState& state = *topology_;
+  if (state.copy_context_key != 0) {
+    TopologyCopySlot& copy = state.copy[
+        state.copy_context_key & (kTopologyCopySlots - 1u)];
+    if (copy.key != state.copy_context_key) {
+      copy.key = state.copy_context_key;
+      copy.prediction = byte;
+      copy.confidence = 1;
+    } else if (copy.prediction == byte) {
+      if (copy.confidence != 31) ++copy.confidence;
+    } else if (copy.confidence != 0) {
+      --copy.confidence;
+    } else {
+      copy.prediction = byte;
+      copy.confidence = 1;
+    }
+  }
+
+  const std::uint32_t event_before = state.event_count;
+  const bool letter =
+      (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+      byte == '_';
+  const bool digit = byte >= '0' && byte <= '9';
+  const bool wrt_code = byte >= 0x80;
+  const bool token_byte = letter || digit || wrt_code;
+  if (token_byte) {
+    if (!state.in_token) {
+      state.in_token = true;
+      state.token_hash = 0xcbf29ce484222325ULL;
+      state.token_length = 0;
+      state.token_class_flags = 0;
+    }
+    state.token_class_flags |=
+        letter ? 1u : digit ? 2u : 4u;
+    state.token_hash =
+        (state.token_hash ^ (static_cast<std::uint64_t>(byte) + 1u)) *
+        0x100000001b3ULL;
+    if (state.token_length != 0xffffu) ++state.token_length;
+    if (state.bytes_since_event != 0xffffu) ++state.bytes_since_event;
+    return;
+  }
+
+  if (state.in_token) {
+    const std::uint8_t token_class =
+        state.token_class_flags == 1 ? 0 :
+        state.token_class_flags == 2 ? 1 :
+        state.token_class_flags == 4 ? 2 : 3;
+    FinishTopologyToken(
+        state.token_hash, state.token_length, token_class);
+    state.in_token = false;
+    state.token_hash = 0;
+    state.token_length = 0;
+    state.token_class_flags = 0;
+  }
+  const bool structural =
+      byte == '<' || byte == '>' || byte == '{' || byte == '}' ||
+      byte == '[' || byte == ']' || byte == '|' || byte == '=' ||
+      byte == ':' || byte == '/' || byte == '?' || byte == '&' ||
+      byte == '#' || byte == '*' || byte == '!' || byte == ';' ||
+      byte == ',';
+  if (structural) {
+    FinishTopologyToken(
+        0x4f1bbcdc6765a9d3ULL ^ static_cast<std::uint64_t>(byte),
+        1, 3);
+  }
+  if (state.event_count == event_before &&
+      state.bytes_since_event != 0xffffu) {
+    ++state.bytes_since_event;
+  }
+}
+
+#endif
+#if FX4_CAUSAL_CNN
+void PostR1Experts::EnsureCausalCnn() {
+  if (!causal_cnn_) causal_cnn_ = std::make_unique<CausalCnnState>();
+}
+
+float PostR1Experts::CausalCnnPrediction(unsigned int bit_position) {
+  EnsureCausalCnn();
+  CausalCnnState& state = *causal_cnn_;
+  std::int64_t dot = 0;
+  for (unsigned int feature = 0; feature < kCnnFeatures; ++feature) {
+    dot += static_cast<std::int64_t>(
+        state.head_weight[bit_position][feature]) * state.features[feature];
+  }
+  std::int32_t delta_q = static_cast<std::int32_t>(
+      state.head_bias[bit_position] + (dot >> 8));
+  delta_q = std::max(-512, std::min(512, delta_q));
+  if (delta_q == 0) {
+    state.last_probability = baseline_probability_;
+    return baseline_probability_;
+  }
+  state.last_probability = Logistic(
+      Logit(baseline_probability_) + static_cast<float>(delta_q) / 1024.0f);
+  return state.last_probability;
+}
+
+void PostR1Experts::TrainCausalCnn(int bit) {
+  EnsureCausalCnn();
+  CausalCnnState& state = *causal_cnn_;
+  const unsigned int bit_position = last_bit_position_;
+  const std::int32_t error_q = static_cast<std::int32_t>(std::lrint(
+      (static_cast<float>(bit) - state.last_probability) * 4096.0f));
+  state.bias_gradient[bit_position] += error_q;
+  for (unsigned int feature = 0; feature < kCnnFeatures; ++feature) {
+    state.gradient[bit_position][feature] += static_cast<std::int32_t>(
+        (static_cast<std::int64_t>(error_q) * state.features[feature]) >> 8);
+  }
+
+  state.error_sum += static_cast<std::int32_t>(std::lrint(
+      (static_cast<float>(bit) - baseline_probability_) * 4096.0f));
+  state.disagreement_sum += static_cast<std::uint32_t>(std::lrint(
+      std::min(1.0f, std::fabs(fxcm_probability_ - lstm_probability_)) *
+      512.0f));
+  state.entropy_sum += static_cast<std::uint32_t>(std::lrint(
+      std::min(baseline_probability_, 1.0f - baseline_probability_) *
+      512.0f));
+  state.residual_byte = static_cast<std::uint8_t>(
+      (state.residual_byte << 1) | (bit ^ last_hard_prediction_));
+}
+
+void PostR1Experts::UpdateCausalCnnByte(std::uint8_t byte) {
+  EnsureCausalCnn();
+  CausalCnnState& state = *causal_cnn_;
+  auto clip = [](std::int32_t value, std::int32_t limit) {
+    return std::max(-limit, std::min(limit, value));
+  };
+
+  if (--state.bytes_until_update == 0) {
+    for (unsigned int head = 0; head < 8; ++head) {
+      const std::int32_t bias_step = clip(
+          state.bias_gradient[head] >> 14, 16);
+      state.head_bias[head] = static_cast<std::int16_t>(clip(
+          static_cast<std::int32_t>(state.head_bias[head]) + bias_step,
+          4096));
+      state.bias_gradient[head] = 0;
+      for (unsigned int feature = 0; feature < kCnnFeatures; ++feature) {
+        const std::int32_t weight_step = clip(
+            state.gradient[head][feature] >> 15, 8);
+        state.head_weight[head][feature] = static_cast<std::int16_t>(clip(
+            static_cast<std::int32_t>(state.head_weight[head][feature]) +
+                weight_step,
+            2048));
+        state.gradient[head][feature] = 0;
+      }
+    }
+    state.bytes_until_update = kCnnUpdateBytes;
+  }
+
+  std::array<std::int16_t, kCnnChannels> input{};
+  input[0] = static_cast<std::int16_t>(
+      (static_cast<std::int32_t>(byte) - 128) * 2);
+  input[1] = static_cast<std::int16_t>(
+      (static_cast<std::int32_t>(state.residual_byte) - 128) * 2);
+  input[2] = static_cast<std::int16_t>(clip(state.error_sum >> 6, 256));
+  input[3] = static_cast<std::int16_t>(clip(
+      static_cast<std::int32_t>(state.disagreement_sum >> 4) - 128, 256));
+  input[4] = static_cast<std::int16_t>(clip(
+      static_cast<std::int32_t>(state.entropy_sum >> 3) - 128, 256));
+  input[5] = static_cast<std::int16_t>(clip(
+      (static_cast<std::int32_t>(std::min(ppmd_order_, 31u)) - 15) * 16 +
+          static_cast<std::int32_t>(std::min(escape_depth_, 15u)) * 4,
+      256));
+  input[6] = static_cast<std::int16_t>(clip(
+      static_cast<std::int32_t>(std::min(match_length_, 64u)) * 8 - 128,
+      256));
+  input[7] = static_cast<std::int16_t>(clip(
+      (static_cast<std::int32_t>(stream_class_) - 5) * 40, 256));
+
+  const std::uint32_t position = state.write & (kCnnHistory - 1u);
+  for (unsigned int channel = 0; channel < kCnnChannels; ++channel) {
+    state.activation[0][channel][position] = input[channel];
+  }
+  for (unsigned int layer = 0; layer < kCnnLayers; ++layer) {
+    const std::uint32_t dilation = 1u << layer;
+    const std::uint32_t previous1 =
+        (state.write - dilation) & (kCnnHistory - 1u);
+    const std::uint32_t previous2 =
+        (state.write - 2u * dilation) & (kCnnHistory - 1u);
+    for (unsigned int channel = 0; channel < kCnnChannels; ++channel) {
+      const std::int32_t current =
+          state.activation[layer][channel][position];
+      const std::int32_t delayed1 =
+          state.activation[layer][channel][previous1];
+      const std::int32_t delayed2 =
+          state.activation[layer][channel][previous2];
+      const std::int32_t neighbour = state.activation[layer][
+          (channel + layer + 1u) & (kCnnChannels - 1u)][previous1];
+      const std::int32_t signed1 = ((channel + layer) & 1u)
+          ? -delayed1 : delayed1;
+      const std::int32_t signed2 = ((channel + 2u * layer) & 2u)
+          ? -delayed2 : delayed2;
+      state.activation[layer + 1][channel][position] =
+          static_cast<std::int16_t>(clip(
+              (3 * current + signed1 + signed2 + neighbour) / 6, 256));
+    }
+  }
+
+  for (unsigned int channel = 0; channel < kCnnChannels; ++channel) {
+    state.features[channel] =
+        state.activation[kCnnLayers][channel][position];
+  }
+  state.features[8] = input[2];
+  state.features[9] = input[3];
+  state.features[10] = input[4];
+  state.features[11] = input[0];
+  ++state.write;
+  state.error_sum = 0;
+  state.disagreement_sum = 0;
+  state.entropy_sum = 0;
+  state.residual_byte = 0;
+}
+#endif
+
 std::uint32_t PostR1Experts::ExpertMask(unsigned int expert) {
   static constexpr std::uint32_t kMasks[kExpertCount] = {
       kStructural, kPpmdEscapeOrder, kSparseVirtualPpm, kWordXmlPpm,
       kResidualLstm, kMicroDiffusion, kRareResidual, kCtsSkipCts,
-      kDmc, kTokenMatch, kDonorProfile, kMiniCmix, kUrlStructure};
+      kDmc, kTokenMatch, kDonorProfile, kMiniCmix, kUrlStructure,
+      kShadowLstm200, kTopologyRecurrence
+#if FX4_CAUSAL_CNN
+      , kCausalCnn
+#endif
+  };
   return expert < kExpertCount ? kMasks[expert] : 0u;
 }
 
@@ -660,10 +1127,11 @@ bool PostR1Experts::ExpertOutputEnabled(unsigned int expert) const {
 }
 
 void PostR1Experts::UpdateExpertGains(int bit) {
+  if (!adaptive_state_) return;
   const float base = bit ? baseline_probability_ : 1.0f - baseline_probability_;
   const float base_loss = -std::log2(ClampProbability(base));
-  auto& totals = expert_gain_total_[mixer_context_];
-  auto& squares = expert_gain_square_[mixer_context_];
+  auto& totals = adaptive_state_->expert_gain_total[mixer_context_];
+  auto& squares = adaptive_state_->expert_gain_square[mixer_context_];
   for (unsigned int i = 0; i < kExpertCount; ++i) {
     if (!expert_enabled_[i]) continue;
     const float candidate = Logistic(
@@ -676,8 +1144,8 @@ void PostR1Experts::UpdateExpertGains(int bit) {
     squares[i] += static_cast<std::uint64_t>(
         static_cast<std::int64_t>(scaled) * scaled);
   }
-  if (expert_observations_[mixer_context_] != 0xffffffffu) {
-    ++expert_observations_[mixer_context_];
+  if (adaptive_state_->expert_observations[mixer_context_] != 0xffffffffu) {
+    ++adaptive_state_->expert_observations[mixer_context_];
   }
 }
 
@@ -711,9 +1179,28 @@ float PostR1Experts::Predict(float baseline_probability,
         ppmd_order_ <= 3 ? 0 : ppmd_order_ <= 8 ? 1 :
         ppmd_order_ <= 16 ? 2 : 3;
     const float decay = 1.0f / (1.0f + escape_depth_ + 2.0f * escape_rate_);
-    expert_probability_[1] = ClampProbability(
+    const float order_probability = ClampProbability(
         decay * ppmd_order_bands_[band] + (1.0f - decay) *
         (0.65f * ppmd_probability_ + 0.35f * ppmd_order_bands_[0]));
+    const unsigned int probability_bucket = std::min(
+        31u, static_cast<unsigned int>(ppmd_probability_ * 32.0f));
+    const unsigned int escape_band = std::min(3u, escape_depth_);
+    const unsigned int disagreement =
+        std::fabs(Logit(ppmd_probability_) - Logit(fxcm_probability_)) > 1.0f;
+    const std::uint32_t packed = probability_bucket |
+        (bit_position << 5) | (band << 8) | (escape_band << 10) |
+        (static_cast<unsigned int>(stream_class_) << 12) |
+        (disagreement << 16);
+    ppmd_calibration_context_ =
+        MixHash(packed) & (kPpmdCalibrationSize - 1u);
+    const Counts& calibration =
+        (*ppmd_calibration_counts_)[ppmd_calibration_context_];
+    const unsigned int zero = calibration.zero - 1u;
+    const unsigned int one = calibration.one - 1u;
+    constexpr float kPriorStrength = 24.0f;
+    expert_probability_[1] = ClampProbability(
+        (static_cast<float>(one) + kPriorStrength * order_probability) /
+        (static_cast<float>(zero + one) + kPriorStrength));
   }
   if (evaluation_mask_ & kSparseVirtualPpm) {
     expert_probability_[2] = SparsePrediction(bit_position);
@@ -735,7 +1222,7 @@ float PostR1Experts::Predict(float baseline_probability,
       (kMicroTableSize - 1u);
   if (evaluation_mask_ & kMicroDiffusion) {
     const float residual_probability =
-        CountProbability(micro_counts_.data(), micro_context);
+        CountProbability(micro_counts_->data(), micro_context);
     expert_probability_[5] =
         ResidualToBit(residual_probability, baseline_probability_);
   }
@@ -744,7 +1231,7 @@ float PostR1Experts::Predict(float baseline_probability,
        std::min(7u, error_run_)) & 4095u;
   if (evaluation_mask_ & kRareResidual) {
     expert_probability_[6] = ResidualToBit(
-        CountProbability(residual_counts_.data(), residual_context),
+        CountProbability(residual_counts_->data(), residual_context),
         baseline_probability_);
   }
   if (evaluation_mask_ & kCtsSkipCts) {
@@ -758,18 +1245,44 @@ float PostR1Experts::Predict(float baseline_probability,
     expert_probability_[10] = DonorProfilePrediction(bit_position);
   }
   if (evaluation_mask_ & kMiniCmix) {
-    expert_probability_[11] = mini_cmix_probability_;
+    if (mini_model_mask_ == 0x07ffu) {
+      expert_probability_[11] = mini_cmix_probability_;
+    } else {
+      float logit_sum = 0.0f;
+      unsigned int count = 0;
+      for (unsigned int model = 0; model < 11; ++model) {
+        if ((mini_model_mask_ & (1u << model)) == 0) continue;
+        logit_sum += Logit(mini_model_probabilities_[model]);
+        ++count;
+      }
+      expert_probability_[11] = count
+          ? Logistic(logit_sum / static_cast<float>(count)) : 0.5f;
+    }
   }
   if (evaluation_mask_ & kUrlStructure) {
     expert_probability_[12] = UrlPrediction(bit_position);
   }
+  if (evaluation_mask_ & kShadowLstm200) {
+    expert_probability_[13] = shadow_lstm200_probability_;
+  }
+#if FX4_TOPOLOGY_RECURRENCE
+  if (evaluation_mask_ & kTopologyRecurrence) {
+    expert_probability_[14] = TopologyPrediction(bit_position);
+  }
+#endif
+#if FX4_CAUSAL_CNN
+  if (evaluation_mask_ & kCausalCnn) {
+    expert_probability_[15] = CausalCnnPrediction(bit_position);
+  }
+#endif
 
   const float base_logit = Logit(baseline_probability_);
   mixer_input_.fill(0.0f);
   expert_delta_.fill(0.0f);
   expert_enabled_.fill(false);
   mixer_context_ = MixerContext(bit_position);
-  const std::uint32_t observations = expert_observations_[mixer_context_];
+  const std::uint32_t observations = adaptive_state_
+      ? adaptive_state_->expert_observations[mixer_context_] : 0u;
   for (unsigned int i = 0; i < kExpertCount; ++i) {
     if (!ExpertEnabled(i)) continue;
     expert_enabled_[i] = true;
@@ -805,11 +1318,20 @@ float PostR1Experts::Predict(float baseline_probability,
       gate = 1.0f;
     } else if (i == 12) {
       gate = url_phase_ == UrlPhase::kOutside ? 0.0f : 1.0f;
+    } else if (i == 13) {
+      gate = 1.0f;
+#if FX4_TOPOLOGY_RECURRENCE
+    } else if (i == 14) {
+      const float disagreement = std::min(
+          1.0f, 2.0f * std::fabs(
+              expert_probability_[14] - fxcm_probability_));
+      gate = TopologyConfidence() * (0.5f + 0.5f * disagreement);
+#endif
     } else if (observations >= 64) {
       const double total =
-          static_cast<double>(expert_gain_total_[mixer_context_][i]);
+          static_cast<double>(adaptive_state_->expert_gain_total[mixer_context_][i]);
       const double square =
-          static_cast<double>(expert_gain_square_[mixer_context_][i]);
+          static_cast<double>(adaptive_state_->expert_gain_square[mixer_context_][i]);
       const double variance_sum = std::max(0.0,
           square - total * total / static_cast<double>(observations));
       const double safe_gain = total - 2.0 * std::sqrt(variance_sum + 1.0);
@@ -835,7 +1357,7 @@ float PostR1Experts::Predict(float baseline_probability,
 float PostR1Experts::CorrectionFor(std::uint32_t mask) const {
   float correction = 0.0f;
   if (mask & kContextMixer) {
-    const auto& weights = mixer_weight_[mixer_context_];
+    const auto& weights = adaptive_state_->mixer_weight[mixer_context_];
     std::int64_t dot = 0;
     for (unsigned int i = 0; i < kMixerFeatures; ++i) {
       if (i < kExpertCount && (mask & ExpertMask(i)) == 0) continue;
@@ -861,6 +1383,20 @@ float PostR1Experts::CorrectionFor(std::uint32_t mask) const {
         correction += mini_gain * mixer_input_[i];
       } else if (i == 12) {
         correction += 0.125f * mixer_input_[i];
+      } else if (i == 13) {
+        const float shadow_gain =
+            0.25f * (1.0f + static_cast<float>((profile_id_ >> 6) & 3u));
+        correction += shadow_gain * mixer_input_[i];
+      } else if (i == 14) {
+        const float topology_gain =
+            0.0625f * (1.0f + static_cast<float>((profile_id_ >> 6) & 3u));
+        correction += topology_gain * mixer_input_[i];
+#if FX4_CAUSAL_CNN
+      } else if (i == 15) {
+        const float cnn_gain =
+            0.0625f * (1.0f + static_cast<float>((profile_id_ >> 6) & 3u));
+        correction += cnn_gain * mixer_input_[i];
+#endif
       } else {
         generic_sum += mixer_input_[i];
         ++generic_count;
@@ -916,6 +1452,9 @@ void PostR1Experts::Perceive(int bit) {
     if (hits != 0xffffu) ++hits;
   }
   UpdateExpertGains(bit);
+#if FX4_CAUSAL_CNN
+  if (evaluation_mask_ & kCausalCnn) TrainCausalCnn(bit);
+#endif
   const std::uint8_t previous = recent_bytes_[(recent_pos_ - 1) & 63u];
   const std::uint8_t previous2 = recent_bytes_[(recent_pos_ - 2) & 63u];
   const unsigned int byte_class =
@@ -931,7 +1470,11 @@ void PostR1Experts::Perceive(int bit) {
     const std::uint32_t context =
         ((static_cast<unsigned int>(stream_class_) * 8u + bit_position) * 8u +
          byte_class) * 4u + ((previous2 >> 5) & 3u);
-    UpdateCount(structural_counts_.data(), context & 4095u, bit);
+    UpdateCount(structural_counts_->data(), context & 4095u, bit);
+  }
+  if (evaluation_mask_ & kPpmdEscapeOrder) {
+    UpdateCount(ppmd_calibration_counts_->data(),
+        ppmd_calibration_context_, bit);
   }
   if (evaluation_mask_ & kSparseVirtualPpm) {
     const std::uint64_t hashes[3] = {hash16_, hash32_, hash64_};
@@ -939,7 +1482,7 @@ void PostR1Experts::Perceive(int bit) {
       const std::uint32_t context = MixHash(hashes[i] ^
           (static_cast<std::uint64_t>(current_prefix_) << 32) ^ bit_position) &
           (kCountTableSize - 1u);
-      UpdateCount(sparse_counts_[i].data(), context, bit);
+      UpdateCount((*sparse_counts_)[i].data(), context, bit);
     }
   }
   if (evaluation_mask_ & kWordXmlPpm) {
@@ -947,7 +1490,7 @@ void PostR1Experts::Perceive(int bit) {
         (static_cast<std::uint64_t>(stream_class_) << 48) ^
         (static_cast<std::uint64_t>(current_prefix_) << 16) ^ bit_position) &
         (kCountTableSize - 1u);
-    UpdateCount(word_xml_counts_.data(), context, bit);
+    UpdateCount(word_xml_counts_->data(), context, bit);
   }
   const unsigned int probability_bucket =
       std::min(31u, static_cast<unsigned int>(baseline_probability_ * 32.0f));
@@ -957,13 +1500,13 @@ void PostR1Experts::Perceive(int bit) {
         ((residual_history_ & 255u) << 8) |
         (static_cast<unsigned int>(stream_class_) << 16)) &
         (kMicroTableSize - 1u);
-    UpdateCount(micro_counts_.data(), context, residual);
+    UpdateCount(micro_counts_->data(), context, residual);
   }
   if (evaluation_mask_ & kRareResidual) {
     const std::uint32_t context =
         ((probability_bucket * 8u + bit_position) * 8u +
          std::min(7u, error_run_)) & 4095u;
-    UpdateCount(residual_counts_.data(), context, residual);
+    UpdateCount(residual_counts_->data(), context, residual);
   }
   if (evaluation_mask_ & kCtsSkipCts) {
     const unsigned int depths[4] = {6, 8, 10, 12};
@@ -976,9 +1519,18 @@ void PostR1Experts::Perceive(int bit) {
           (residual_history_ & mask) ^ Rotl32(same_bit_skip, 13) ^
           (static_cast<std::uint32_t>(profile_id_) << 24) ^ bit_position) &
           (kCountTableSize - 1u);
-      UpdateCount(cts_counts_[i].data(), context, residual);
+      UpdateCount((*cts_counts_)[i].data(), context, residual);
     }
   }
+#if FX4_TOPOLOGY_RECURRENCE
+  if (evaluation_mask_ & kTopologyRecurrence) {
+    EnsureTopology();
+    for (unsigned int i = 0; i < kTopologyContexts; ++i) {
+      UpdateCount(topology_->counts[i].data(),
+          topology_->bit_context[i], bit);
+    }
+  }
+#endif
   if ((evaluation_mask_ & kUrlStructure) != 0 &&
       url_phase_ != UrlPhase::kOutside) {
     std::uint32_t phase_context = 0;
@@ -986,22 +1538,22 @@ void PostR1Experts::Perceive(int bit) {
     std::uint32_t continuation_context = 0;
     UrlContexts(bit_position, &phase_context, &shape_context,
         &continuation_context);
-    UpdateCount(url_phase_counts_.data(), phase_context, bit);
-    UpdateCount(url_shape_counts_.data(), shape_context, bit);
+    UpdateCount(url_phase_counts_->data(), phase_context, bit);
+    UpdateCount(url_shape_counts_->data(), shape_context, bit);
     if (url_segment_length_ >= 2) {
-      UpdateCount(url_continuation_counts_.data(),
+      UpdateCount(url_continuation_counts_->data(),
           continuation_context, bit);
     }
   }
   if (evaluation_mask_ & kDmc) {
-    DmcNode& node = dmc_[dmc_state_ & (kDmcNodes - 1u)];
+    DmcNode& node = (*dmc_)[dmc_state_ & (kDmcNodes - 1u)];
     if (node.count[residual] != 0xffff) ++node.count[residual];
     std::uint16_t next = node.next[residual];
     if (next == 0) {
       if (dmc_next_free_ < kDmcNodes) {
         next = static_cast<std::uint16_t>(dmc_next_free_++);
         node.next[residual] = next;
-        dmc_[next] = DmcNode{};
+        (*dmc_)[next] = DmcNode{};
       } else {
         next = dmc_state_;
       }
@@ -1009,7 +1561,7 @@ void PostR1Experts::Perceive(int bit) {
         dmc_next_free_ < kDmcNodes) {
       const std::uint16_t clone =
           static_cast<std::uint16_t>(dmc_next_free_++);
-      dmc_[clone] = dmc_[next];
+      (*dmc_)[clone] = (*dmc_)[next];
       node.next[residual] = clone;
       next = clone;
     }
@@ -1019,11 +1571,11 @@ void PostR1Experts::Perceive(int bit) {
   if (evaluation_mask_ & kContextMixer) {
     const float error = final_probability_ - static_cast<float>(bit);
     const float absolute_error = std::fabs(error);
-    std::uint16_t& recent = mixer_error_[mixer_context_];
+    std::uint16_t& recent = adaptive_state_->mixer_error[mixer_context_];
     recent = static_cast<std::uint16_t>(
         (recent * 255u + static_cast<unsigned int>(absolute_error * 65535.0f)) >> 8);
     if (absolute_error > 0.015625f) {
-      auto& weights = mixer_weight_[mixer_context_];
+      auto& weights = adaptive_state_->mixer_weight[mixer_context_];
       const int rate = 1 + (recent >> 13);
       for (unsigned int i = 0; i < kMixerFeatures; ++i) {
         const int gradient = static_cast<int>(
@@ -1205,7 +1757,7 @@ void PostR1Experts::ByteUpdate(std::uint8_t byte) {
   }
   UpdateStreamClass(byte);
   const std::uint32_t lightweight = kDonorProfile | kContextMixer |
-      kUrlStructure | kOracle | kMiniCmix;
+      kUrlStructure | kOracle | kMiniCmix | kShadowLstm200 | kCausalCnn;
   if ((evaluation_mask_ & ~lightweight) == 0) {
     recent_bytes_[recent_pos_++ & 63u] = byte;
     ++bytes_seen_;
@@ -1214,10 +1766,21 @@ void PostR1Experts::ByteUpdate(std::uint8_t byte) {
       ++donor_bytes_seen_;
       UpdateDonorProfilePrediction();
     }
+#if FX4_CAUSAL_CNN
+    if (evaluation_mask_ & kCausalCnn) UpdateCausalCnnByte(byte);
+#endif
     if (track_url) UpdateUrlState(byte);
     return;
   }
   UpdateHashes(byte);
+#if FX4_TOPOLOGY_RECURRENCE
+  if (evaluation_mask_ & kTopologyRecurrence) {
+    UpdateTopologyByte(byte);
+  }
+#endif
+#if FX4_CAUSAL_CNN
+  if (evaluation_mask_ & kCausalCnn) UpdateCausalCnnByte(byte);
+#endif
   if (evaluation_mask_ & kTokenMatch) {
     EnsureEpisodic();
     const std::uint32_t current = phrase_write_;
@@ -1336,7 +1899,11 @@ bool PostR1Experts::WriteOracle(const char* path) const {
       "baseline", "structural", "ppmd_escape_order", "sparse_virtual_ppm",
       "word_xml_ppm", "residual_lstm", "micro_diffusion", "rare_residual",
       "cts_skipcts", "dmc", "token_match", "donor_profile", "mini_cmix",
-      "url_structure", "selected_mixer"};
+      "url_structure", "shadow_lstm200", "topology_recurrence",
+#if FX4_CAUSAL_CNN
+      "causal_cnn",
+#endif
+      "selected_mixer"};
   output << "model,bits,loss_bits,equivalent_bytes,bpb\n";
   for (unsigned int i = 0; i < kExpertCount + 2; ++i) {
     const OracleStat& stat = oracle_[i];
@@ -1348,7 +1915,11 @@ bool PostR1Experts::WriteOracle(const char* path) const {
 }
 bool PostR1Experts::WriteSpanOracle(const char* path) const {
   if (!path || !*path) return false;
-  std::ofstream output(path, std::ios::out | std::ios::trunc);
+  if (span_oracle_.empty()) return true;
+  std::ifstream existing(path, std::ios::in | std::ios::binary | std::ios::ate);
+  const bool write_header = !existing.is_open() || existing.tellg() == 0;
+  existing.close();
+  std::ofstream output(path, std::ios::out | std::ios::app);
   if (!output.is_open()) return false;
   output.precision(12);
   static const char* combination_modes[8] = {
@@ -1358,29 +1929,36 @@ bool PostR1Experts::WriteSpanOracle(const char* path) const {
       "structural", "ppmd_escape_order", "sparse_virtual_ppm",
       "word_xml_ppm", "residual_lstm", "micro_diffusion",
       "rare_residual", "cts_skipcts", "dmc", "token_match",
-      "donor_profile", "mini_cmix", "url_structure"};
+      "donor_profile", "mini_cmix", "url_structure", "shadow_lstm200",
+      "topology_recurrence"
+#if FX4_CAUSAL_CNN
+      , "causal_cnn"
+#endif
+  };
   static const char* sweep_modes[6] = {
       "mini", "donor", "url_mini", "url_donor", "mini_donor",
       "url_mini_donor"};
   static const char* gain_names[4] = {"025", "050", "075", "100"};
 
-  output << "offset,length,bits,mask,stream_class,profile_id,"
+  if (write_header) output << "offset,length,bits,mask,stream_class,profile_id,"
             "baseline_bytes,mini_bytes,donor_bytes,mini_donor_bytes,"
             "url_bytes,url_mini_bytes,url_donor_bytes,"
             "url_mini_donor_bytes,selected_bytes,mini_gain_bytes,"
             "donor_gain_bytes,mini_donor_gain_bytes,url_gain_bytes,"
             "url_mini_gain_bytes,url_donor_gain_bytes,"
             "url_mini_donor_gain_bytes";
-  for (unsigned int i = 0; i < kExpertCount; ++i) {
-    output << ',' << expert_modes[i] << "_single_gain_bytes";
-  }
-  for (unsigned int mode = 0; mode < 6; ++mode) {
-    for (unsigned int gain = 0; gain < 4; ++gain) {
-      output << ',' << sweep_modes[mode] << "_g" << gain_names[gain]
-             << "_gain_bytes";
+  if (write_header) {
+    for (unsigned int i = 0; i < kExpertCount; ++i) {
+      output << ',' << expert_modes[i] << "_single_gain_bytes";
     }
+    for (unsigned int mode = 0; mode < 6; ++mode) {
+      for (unsigned int gain = 0; gain < 4; ++gain) {
+        output << ',' << sweep_modes[mode] << "_g" << gain_names[gain]
+               << "_gain_bytes";
+      }
+    }
+    output << ",best_mode,best_gain_bytes" << std::endl;
   }
-  output << ",best_mode,best_gain_bytes" << std::endl;
 
   for (const SpanOracleStat& span : span_oracle_) {
     if (span.bits == 0) continue;

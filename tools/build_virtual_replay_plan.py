@@ -385,6 +385,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixed-plan-bytes", type=int, default=0)
     parser.add_argument("--group-report", type=Path)
     parser.add_argument(
+        "--event-report",
+        type=Path,
+        help="optional CSV containing every retained virtual-replay event",
+    )
+    parser.add_argument(
+        "--candidate-report",
+        type=Path,
+        help="optional CSV containing every gross-qualified phrase occurrence",
+    )
+    parser.add_argument(
         "--prefix-hex",
         default="",
         help="bytes prepended by the compressor before prediction, as hex",
@@ -427,6 +437,24 @@ def main() -> int:
         candidates = [
             item for item in candidates if item.region in allowed_groups
         ]
+    if args.candidate_report:
+        args.candidate_report.parent.mkdir(parents=True, exist_ok=True)
+        with args.candidate_report.open(
+                "w", newline="", encoding="utf-8") as output:
+            writer = csv.writer(output)
+            writer.writerow([
+                "start", "end", "length", "pattern", "gross_bytes",
+                "region",
+            ])
+            for item in candidates:
+                writer.writerow([
+                    item.start,
+                    item.end,
+                    item.end - item.start,
+                    item.pattern + 1,
+                    f"{item.gross_bytes:.9f}",
+                    item.region,
+                ])
     if regions:
         selected, marginals = prune_selective_groups(
             candidates,
@@ -457,6 +485,8 @@ def main() -> int:
         "selected_groups": len({item.region for item in selected}) if regions else 0,
         "minimum_group_net_bytes": args.minimum_group_net if regions else None,
     }
+    if args.candidate_report:
+        result["candidate_report"] = str(args.candidate_report)
     if regions:
         group_report = args.group_report or args.output_plan.with_suffix(
             args.output_plan.suffix + ".groups.csv"
@@ -494,6 +524,24 @@ def main() -> int:
                     "selected" if selected_count else "baseline",
                 ])
         result["group_report"] = str(group_report)
+    if args.event_report:
+        args.event_report.parent.mkdir(parents=True, exist_ok=True)
+        with args.event_report.open("w", newline="", encoding="utf-8") as output:
+            writer = csv.writer(output)
+            writer.writerow([
+                "start", "end", "length", "pattern", "gross_bytes",
+                "region",
+            ])
+            for item in selected:
+                writer.writerow([
+                    item.start,
+                    item.end,
+                    item.end - item.start,
+                    item.pattern + 1,
+                    f"{item.gross_bytes:.9f}",
+                    item.region,
+                ])
+        result["event_report"] = str(args.event_report)
     report_path = args.report or args.output_plan.with_suffix(
         args.output_plan.suffix + ".json"
     )

@@ -48,6 +48,7 @@ typedef unsigned long long qword;
 // recommended for normal usage.
 bool mmap_to_disk = FX4_PPMD_MMAP_TO_DISK != 0;
 qword mmap_size;
+bool mmap_private_fork_mode = false;
 static constexpr char mmap_path[] = "ppm.temp";
 
 // Disk-backed PPM keeps the 14GB heap outside anonymous RAM, but pages still
@@ -55,6 +56,19 @@ static constexpr char mmap_path[] = "ppm.temp";
 // residency without changing the file-backed model state.
 static constexpr unsigned long long kMmapRemapIntervalBytes =
     FX4_PPMD_REMAP_INTERVAL;
+
+static bool UsePrivateForkMapping() {
+#if FX4_DONOR_FORK_DISCOVERY
+  // Legacy discovery forks predictors and needs copy-on-write. Winner-first
+  // discovery evaluates count-only branches in one process, so retain the
+  // normal cmix-lex shared mapping and residency eviction for that path.
+  const char* winner_mode = std::getenv("FX4_DONOR_WINNER_SEARCH");
+  return !(winner_mode && *winner_mode &&
+      std::strcmp(winner_mode, "0") != 0);
+#else
+  return false;
+#endif
+}
 
 const int ORealMAX=256;
 
@@ -164,6 +178,7 @@ int StartSubAllocator( qword SASize ) {
 
   if (mmap_to_disk) {
     mmap_size = t;
+    mmap_private_fork_mode = UsePrivateForkMapping();
     int fd = open(mmap_path, O_RDWR | O_CREAT | O_TRUNC | O_NOATIME,
         (mode_t)0664);
     if(fd < 0){
@@ -176,11 +191,8 @@ int StartSubAllocator( qword SASize ) {
     // Exact donor discovery forks two predictors from the same byte boundary.
     // MAP_PRIVATE gives each branch copy-on-write PPM state. The accepted
     // compressor remains MAP_SHARED and retains the cmix-lex RSS behavior.
-#if FX4_DONOR_FORK_DISCOVERY
-    const int map_flags = MAP_PRIVATE | MAP_NORESERVE;
-#else
-    const int map_flags = MAP_SHARED;
-#endif
+    const int map_flags = mmap_private_fork_mode
+        ? MAP_PRIVATE | MAP_NORESERVE : MAP_SHARED;
     HeapStart = (byte*) mmap(
         NULL, t, PROT_READ|PROT_WRITE, map_flags, fd, 0);
     if(HeapStart == MAP_FAILED){
@@ -1481,7 +1493,6 @@ void ppmd_UpdateByte( uint c ) {
 unsigned long long counter_ = 0;
 unsigned long long last_mmap_remap_counter_ = 0;
 
-#if !FX4_DONOR_FORK_DISCOVERY
 static void DropPpmHeapResidency(ppmd_Model* ppmd_model) {
   // Keep the file mapping at a stable address because the model stores raw
   // pointers into it. MADV_DONTNEED evicts resident shared pages without
@@ -1490,7 +1501,6 @@ static void DropPpmHeapResidency(ppmd_Model* ppmd_model) {
     exit(EXIT_FAILURE);
   }
 }
-#endif
 
 PPMD::PPMD(int order, int memory, const unsigned int& bit_context,
     const std::vector<bool>& vocab) : ByteModel(vocab), byte_(bit_context) {
@@ -1544,6 +1554,10 @@ const std::array<float, 4>& PPMD::PredictOrderBands() {
         static_cast<float>(total - zero) / static_cast<float>(total);
   }
   return band_outputs_;
+}
+
+float PPMD::ByteProbability(unsigned int byte) const {
+  return byte < 256u ? probs_[byte] : 0.0f;
 }
 
 void PPMD::SetOrderBandsNeeded(bool needed) {
@@ -1633,13 +1647,10 @@ void PPMD::ByteUpdate() {
   ByteModel::ByteUpdate();
   probs_ /= probs_.sum();
   tree_context_ = 1;
-  if (mmap_to_disk) {
-#if !FX4_DONOR_FORK_DISCOVERY
-    if (counter_ - last_mmap_remap_counter_ >= kMmapRemapIntervalBytes) {
-      DropPpmHeapResidency(ppmd_model_.get());
-      last_mmap_remap_counter_ = counter_;
-    }
-#endif
+  if (mmap_to_disk && !mmap_private_fork_mode &&
+      counter_ - last_mmap_remap_counter_ >= kMmapRemapIntervalBytes) {
+    DropPpmHeapResidency(ppmd_model_.get());
+    last_mmap_remap_counter_ = counter_;
   }
 }
 

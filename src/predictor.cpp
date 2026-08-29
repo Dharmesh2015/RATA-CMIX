@@ -33,6 +33,17 @@ Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled)
   mini_shared_map_.assign(256u * 100000u, 0);
   AddMiniCmix();
 #endif
+#if FX4_SHADOW_LSTM200
+  unsigned int shadow_vocab_size = 0;
+  for (bool present : vocab_) {
+    if (present) ++shadow_vocab_size;
+  }
+  shadow_lstm200_.emplace(1, manager_.bit_context_, vocab_,
+      shadow_vocab_size,
+      new Lstm(shadow_vocab_size, shadow_vocab_size,
+          FX4_SHADOW_LSTM_CELLS, FX4_LSTM_LAYERS, FX4_LSTM_HORIZON,
+          FX4_LSTM_LEARNING_RATE, FX4_LSTM_GRADIENT_CLIP));
+#endif
   auxiliary_size_ = 3;
 #if FX4_MINI_CMIX
   mini_cmix_recent_error_.fill(0.25f);
@@ -45,11 +56,12 @@ void Predictor::FreeFxcmMemory() {
 
 void Predictor::EnablePostR1Portfolio(std::uint32_t mask) {
 #if FX4_SELECTIVE_POSTR1
+  postr1_portfolio_mask_ |= mask;
   if (!postr1_experts_) {
     postr1_experts_.reset(new PostR1Experts());
     postr1_residual_one_.fill(0.5f);
   }
-  postr1_experts_->EnablePortfolio(mask);
+  postr1_experts_->EnablePortfolio(postr1_portfolio_mask_);
   byte_model_->SetOrderBandsNeeded(
       (postr1_experts_->training_mask() & PostR1Experts::kPpmdEscapeOrder) != 0);
 #else
@@ -61,7 +73,13 @@ void Predictor::SetPostR1Span(std::uint64_t logical_offset,
     std::uint32_t mask, std::uint8_t stream_class,
     std::uint8_t profile_id, std::uint16_t mini_model_mask) {
 #if FX4_SELECTIVE_POSTR1
-  if (mask != 0 && !postr1_experts_) EnablePostR1Portfolio(mask);
+  if (mask != 0) {
+    EnablePostR1Portfolio(mask);
+    // Each selected action starts from the same neutral specialist state used
+    // by discovery. The accepted PPMd/LSTM/FXCM state remains continuous.
+    postr1_experts_.reset(new PostR1Experts());
+    postr1_experts_->EnablePortfolio(postr1_portfolio_mask_);
+  }
   if (!postr1_experts_) return;
   if (stream_class > static_cast<std::uint8_t>(
           PostR1Experts::StreamClass::kMixed)) {
@@ -108,8 +126,22 @@ bool Predictor::HasPostR1DonorProfile() const {
 void Predictor::SetPostR1BranchSignals(PostR1Experts* target) const {
   std::array<float, 11> mini_model_probabilities{};
   mini_model_probabilities.fill(0.5f);
+#if FX4_MINI_CMIX
+  mini_model_probabilities = mini_cmix_model_probabilities_;
+#endif
   target->SetModelSignals(donor_branch_ppmd_probability_,
-      donor_branch_lstm_probability_, donor_branch_fxcm_probability_, 0.5f,
+      donor_branch_lstm_probability_,
+#if FX4_SHADOW_LSTM200
+      donor_branch_shadow_lstm_probability_,
+#else
+      0.5f,
+#endif
+      donor_branch_fxcm_probability_,
+#if FX4_MINI_CMIX
+      mini_cmix_probability_,
+#else
+      0.5f,
+#endif
       mini_model_probabilities, donor_branch_ppmd_order_bands_,
       donor_branch_ppmd_order_, donor_branch_escape_depth_,
       donor_branch_escape_rate_, donor_branch_residual_probability_,
@@ -149,6 +181,22 @@ void Predictor::UpdatePostR1ResidualDistribution() {
 float Predictor::PostR1ResidualProbability() const {
   const unsigned int node = manager_.bit_context_ & 255u;
   return node == 0 ? 0.5f : postr1_residual_one_[node];
+}
+
+float Predictor::PpmdByteProbability(std::uint8_t byte) const {
+  return byte_model_->ByteProbability(byte);
+}
+
+unsigned int Predictor::PpmdEffectiveOrder() const {
+  return byte_model_->EffectiveOrder();
+}
+
+unsigned int Predictor::PpmdEscapeDepth() const {
+  return byte_model_->LastEscapeDepth();
+}
+
+float Predictor::PpmdEscapeRate() const {
+  return byte_model_->RecentEscapeRate();
 }
 #endif
 
@@ -437,13 +485,19 @@ float Predictor::Predict() {
   std::array<float, 11> mini_model_probabilities{};
   mini_model_probabilities.fill(0.5f);
 #if FX4_MINI_CMIX
-  mini_cmix_tracking_ = postr1_experts_ &&
-      postr1_experts_->MiniCmixTrackingNeeded();
+  mini_cmix_tracking_ =
+#if FX4_DONOR_FORK_DISCOVERY
+      true;
+#else
+      postr1_experts_ && postr1_experts_->MiniCmixTrackingNeeded();
+#endif
   mini_cmix_used_ = postr1_experts_ && postr1_experts_->MiniCmixNeeded();
   mini_cmix_model_mask_ = mini_cmix_used_
       ? postr1_experts_->MiniCmixModelMask() : 0u;
   if (mini_cmix_tracking_) {
-    mini_cmix_probability = PredictMiniCmix(mini_cmix_model_mask_);
+    // Keep one continuously warmed all-model aggregate. Selective subset
+    // trials use the simultaneously captured individual probabilities.
+    mini_cmix_probability = PredictMiniCmix(0x07ffu);
     mini_model_probabilities = mini_cmix_model_probabilities_;
   }
 #endif
@@ -473,6 +527,7 @@ float Predictor::Predict() {
       std::min(1.0f - 1.0e-4f, aggregate_fxcm_probability));
   const float aggregate_fxcm_logit =
       sigmoid_.Logit(bounded_fxcm_probability);
+  const unsigned int fxcm_model_index = input_index - 1;
 
   for (unsigned int i = 0; i < direct_models_.size(); ++i) {
     const std::valarray<float>& outputs = direct_models_[i].Predict();
@@ -525,8 +580,9 @@ float Predictor::Predict() {
   const float lstm_probability =
       Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]);
   const float auxiliary_average =
-      (bounded_fxcm_probability + lstm_probability + ppmd_probability) /
-      3.0f;
+      (Sigmoid::Logistic(layers_[0].Inputs()[fxcm_model_index]) +
+          lstm_probability) /
+      static_cast<float>(auxiliary_size_);
   manager_.auxiliary_context_ = auxiliary_average * 15;
 
   for (unsigned int i = 0; i < mixer_0_.size(); ++i) {
@@ -534,7 +590,8 @@ float Predictor::Predict() {
     layers_[0].SetExtraInput(i, p);
     layers_[1].SetStretchedInput(i, p);
   }
-  layers_[1].SetStretchedInput(mixer_0_.size(), aggregate_fxcm_logit);
+  layers_[1].SetStretchedInput(
+      mixer_0_.size(), layers_[0].Inputs()[fxcm_model_index]);
   layers_[1].SetStretchedInput(mixer_0_.size() + 1, layers_[0].Inputs()[byte_mixer_index]);
   layers_[1].SetStretchedInput(
       mixer_0_.size() + 2, layers_[0].Inputs()[ppmd_model_index]);
@@ -546,13 +603,16 @@ float Predictor::Predict() {
 #if FX4_SPECIALIST_CORRECTOR
   p = PredictSpecialist(p, layers_[0].Inputs()[ppmd_model_index],
       layers_[0].Inputs()[byte_mixer_index],
-      aggregate_fxcm_logit);
+      layers_[0].Inputs()[fxcm_model_index]);
 #endif
 #if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
   donor_branch_ppmd_probability_ =
       Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]);
   donor_branch_lstm_probability_ =
       Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]);
+#if FX4_SHADOW_LSTM200
+  donor_branch_shadow_lstm_probability_ = shadow_lstm200_output_;
+#endif
   donor_branch_fxcm_probability_ = aggregate_fxcm_probability;
   donor_branch_ppmd_order_bands_ = byte_model_->PredictOrderBands();
   donor_branch_ppmd_order_ = byte_model_->EffectiveOrder();
@@ -568,6 +628,11 @@ float Predictor::Predict() {
     postr1_experts_->SetModelSignals(
         Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]),
         Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]),
+#if FX4_SHADOW_LSTM200
+        shadow_lstm200_output_,
+#else
+        0.5f,
+#endif
         aggregate_fxcm_probability, mini_cmix_probability,
         mini_model_probabilities,
         byte_model_->PredictOrderBands(), byte_model_->EffectiveOrder(),
@@ -612,6 +677,9 @@ void Predictor::Perceive(int bit) {
   byte_model_->Perceive(bit);
 
   byte_mixer_->Perceive(bit);
+#if FX4_SHADOW_LSTM200
+  shadow_lstm200_->Perceive(bit);
+#endif
 
   for (auto& mixer: mixer_0_) {
     mixer.Perceive(bit);
@@ -650,9 +718,15 @@ void Predictor::Perceive(int bit) {
     const std::valarray<float>& p = byte_model_->BytePredict();
     for (unsigned int j = 0; j < 256; ++j) {
       byte_mixer_->SetInput(j,p[j]);
+#if FX4_SHADOW_LSTM200
+      shadow_lstm200_->SetInput(j, p[j]);
+#endif
     }
 
     byte_mixer_->ByteUpdate();
+#if FX4_SHADOW_LSTM200
+    shadow_lstm200_->ByteUpdate();
+#endif
 #if FX4_SELECTIVE_POSTR1
     if (postr1_experts_) {
       if (postr1_experts_->training_mask() & PostR1Experts::kResidualLstm) {
@@ -663,6 +737,9 @@ void Predictor::Perceive(int bit) {
 #endif
   }
   byte_mixer_output = byte_mixer_->Predict()[0];
+#if FX4_SHADOW_LSTM200
+  shadow_lstm200_output_ = shadow_lstm200_->Predict()[0];
+#endif
   lstmpr=Discretize(byte_mixer_output);
   lstmex=byte_mixer_->ex;
   fxcm_model_.Perceive(bit);
@@ -702,21 +779,11 @@ float Predictor::PredictSpecialist(float base_probability,
   const unsigned int confidence_bucket =
       (confidence >= 0.5f) + (confidence >= 1.5f) +
       (confidence >= 3.0f);
-  const float order_reliability = std::min(1.0f,
-      static_cast<float>(byte_model_->EffectiveOrder() + 1u) / 16.0f);
-  const float escape_penalty = std::min(1.0f,
-      byte_model_->RecentEscapeRate() +
-      static_cast<float>(byte_model_->LastEscapeDepth()) / 8.0f);
-  const float ppmd_reliability =
-      order_reliability * (1.0f - escape_penalty);
-  const unsigned int ppmd_reliability_bucket = ppmd_reliability >= 0.35f;
   specialist_coarse_context_ =
       SpecialistStreamClass() * 8u + (manager_.bpos & 7u);
-  // Reuse the old permanently-zero donor bit for a decoder-visible PPMd
-  // reliability split. Low-reliability contexts retain their old indexes.
   specialist_context_ =
-      ((specialist_coarse_context_ * 2u + disagreement_bucket) * 2u +
-       ppmd_reliability_bucket) * 4u + confidence_bucket;
+      (specialist_coarse_context_ * 2u + disagreement_bucket) * 8u +
+      confidence_bucket;
 
   auto bounded_delta = [base_logit](float model_logit) {
     return std::max(-4.0f, std::min(4.0f, model_logit - base_logit));
@@ -727,12 +794,6 @@ float Predictor::PredictSpecialist(float base_probability,
   specialist_inputs_[3] = bounded_delta(fxcm_logit);
   specialist_inputs_[4] =
       std::max(-4.0f, std::min(4.0f, lstm_logit - ppmd_logit));
-  const float match_reliability = std::min(1.0f,
-      static_cast<float>(manager_.longest_match_) / 64.0f);
-  specialist_inputs_[5] = specialist_inputs_[1] * ppmd_reliability;
-  specialist_inputs_[6] = specialist_inputs_[2] *
-      (1.0f - ppmd_reliability);
-  specialist_inputs_[7] = specialist_inputs_[3] * match_reliability;
 
   const auto& weights = specialist_weights_[specialist_context_];
   const auto& coarse_weights =
@@ -762,7 +823,9 @@ void Predictor::PerceiveSpecialist(int bit) {
     coarse_weights[i] -= 0.25f * update;
   }
 }
+
 #endif
+
 void Predictor::Pretrain(int bit) {
   bracket_model_->Predict();
   fxcm_model_.Predict();

@@ -446,16 +446,8 @@ Dictionary MinePhrases(const std::vector<std::uint8_t>& input) {
   return dictionary;
 }
 
-std::vector<std::uint8_t> EncodeDictionary(
-    const std::vector<std::uint8_t>& input, const Dictionary& source) {
-  Dictionary dictionary = source;
-  if (dictionary.size() > 254) dictionary.resize(254);
-  std::vector<std::uint8_t> output;
-  PutLittle(&output, static_cast<std::uint16_t>(dictionary.size()));
-  for (const auto& pattern : dictionary) {
-    output.push_back(static_cast<std::uint8_t>(pattern.size()));
-    output.insert(output.end(), pattern.begin(), pattern.end());
-  }
+void AppendDictionaryPayload(const std::vector<std::uint8_t>& input,
+    const Dictionary& dictionary, std::vector<std::uint8_t>* output) {
   for (std::size_t position = 0; position < input.size();) {
     unsigned int best = 0;
     std::size_t best_length = 0;
@@ -468,16 +460,59 @@ std::vector<std::uint8_t> EncodeDictionary(
       }
     }
     if (best != 0) {
-      output.push_back(kDictionaryMarker);
-      output.push_back(static_cast<std::uint8_t>(best));
+      output->push_back(kDictionaryMarker);
+      output->push_back(static_cast<std::uint8_t>(best));
       position += best_length;
     } else {
       const std::uint8_t byte = input[position++];
-      output.push_back(byte);
-      if (byte == kDictionaryMarker) output.push_back(0);
+      output->push_back(byte);
+      if (byte == kDictionaryMarker) output->push_back(0);
     }
   }
+}
+
+std::vector<std::uint8_t> EncodeDictionary(
+    const std::vector<std::uint8_t>& input, const Dictionary& source) {
+  Dictionary dictionary = source;
+  if (dictionary.size() > 254) dictionary.resize(254);
+  std::vector<std::uint8_t> output;
+  PutLittle(&output, static_cast<std::uint16_t>(dictionary.size()));
+  for (const auto& pattern : dictionary) {
+    output.push_back(static_cast<std::uint8_t>(pattern.size()));
+    output.insert(output.end(), pattern.begin(), pattern.end());
+  }
+  AppendDictionaryPayload(input, dictionary, &output);
   return output;
+}
+
+std::vector<std::uint8_t> EncodeFixedDictionary(
+    const std::vector<std::uint8_t>& input, const Dictionary& source) {
+  Dictionary dictionary = source;
+  if (dictionary.size() > 254) dictionary.resize(254);
+  std::vector<std::uint8_t> output;
+  AppendDictionaryPayload(input, dictionary, &output);
+  return output;
+}
+
+bool DecodeDictionaryPayload(const std::vector<std::uint8_t>& input,
+    std::size_t position, const Dictionary& dictionary,
+    std::vector<std::uint8_t>* output) {
+  output->clear();
+  while (position < input.size()) {
+    const std::uint8_t byte = input[position++];
+    if (byte != kDictionaryMarker) {
+      output->push_back(byte);
+      continue;
+    }
+    if (position >= input.size()) return false;
+    const std::uint8_t code = input[position++];
+    if (code == 0) output->push_back(kDictionaryMarker);
+    else if (code <= dictionary.size()) {
+      output->insert(output->end(), dictionary[code - 1].begin(),
+          dictionary[code - 1].end());
+    } else return false;
+  }
+  return true;
 }
 
 bool DecodeDictionary(const std::vector<std::uint8_t>& input,
@@ -495,22 +530,12 @@ bool DecodeDictionary(const std::vector<std::uint8_t>& input,
         input.begin() + position + length);
     position += length;
   }
-  output->clear();
-  while (position < input.size()) {
-    const std::uint8_t byte = input[position++];
-    if (byte != kDictionaryMarker) {
-      output->push_back(byte);
-      continue;
-    }
-    if (position >= input.size()) return false;
-    const std::uint8_t code = input[position++];
-    if (code == 0) output->push_back(kDictionaryMarker);
-    else if (code <= dictionary.size()) {
-      output->insert(output->end(), dictionary[code - 1].begin(),
-          dictionary[code - 1].end());
-    } else return false;
-  }
-  return true;
+  return DecodeDictionaryPayload(input, position, dictionary, output);
+}
+
+bool DecodeFixedDictionary(const std::vector<std::uint8_t>& input,
+    const Dictionary& dictionary, std::vector<std::uint8_t>* output) {
+  return DecodeDictionaryPayload(input, 0, dictionary, output);
 }
 
 std::vector<std::uint8_t> EncodePairs(const std::vector<std::uint8_t>& input) {
@@ -860,6 +885,9 @@ bool ApplyStages(const BlockSpec& spec,
   if (spec.stage_mask & kScr2Shorthand) {
     *output = EncodeDictionary(*output, Scr2Dictionary());
   }
+  if (spec.stage_mask & kScr2SharedShorthand) {
+    *output = EncodeFixedDictionary(*output, Scr2Dictionary());
+  }
   if (spec.stage_mask & kCxWordSymbols) {
     *output = EncodeDictionary(*output, MineWords(*output));
   }
@@ -895,6 +923,9 @@ bool UndoStages(const BlockSpec& spec,
   if ((spec.stage_mask & kCxWordSymbols) &&
       !DecodeDictionary(*output, &next)) return false;
   if (spec.stage_mask & kCxWordSymbols) output->swap(next);
+  if ((spec.stage_mask & kScr2SharedShorthand) &&
+      !DecodeFixedDictionary(*output, Scr2Dictionary(), &next)) return false;
+  if (spec.stage_mask & kScr2SharedShorthand) output->swap(next);
   if ((spec.stage_mask & kScr2Shorthand) &&
       !DecodeDictionary(*output, &next)) return false;
   if (spec.stage_mask & kScr2Shorthand) output->swap(next);

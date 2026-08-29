@@ -14,9 +14,20 @@ ARTICLE_ORDER="$ROOT_DIR/src/readalike_prepr/data/new_article_order"
 SEED="$(printenv SEED 2>/dev/null || printf 923)"
 UPDATE_LIMIT="$(printenv UPDATE_LIMIT 2>/dev/null || printf 3000)"
 DONOR="$(printenv DONOR 2>/dev/null || printf 0)"
+POSTR1="$(printenv POSTR1 2>/dev/null || printf 0)"
+MINI_CMIX="$(printenv MINI_CMIX 2>/dev/null || printf 0)"
+SHADOW_LSTM200="$(printenv SHADOW_LSTM200 2>/dev/null || printf 0)"
+VIRTUAL_REPLAY="$(printenv VIRTUAL_REPLAY 2>/dev/null || printf 0)"
+TOPOLOGY="$(printenv TOPOLOGY 2>/dev/null || printf 0)"
+CAUSAL_CNN="$(printenv CAUSAL_CNN 2>/dev/null || printf 0)"
 DONOR_DISCOVERY="$(printenv DONOR_DISCOVERY 2>/dev/null || printf 0)"
 if [[ "$DONOR_DISCOVERY" == 1 ]]; then
   DONOR=1
+  POSTR1=1
+  MINI_CMIX=1
+  SHADOW_LSTM200=1
+  TOPOLOGY=1
+  CAUSAL_CNN=1
 fi
 CFLAGS_DEFINES="-DSEED=$SEED -DUPDATE_LIMIT=$UPDATE_LIMIT -DNDEBUG -DFX4_LSTM_MID_BRIDGE=2"
 if [[ "$DONOR" == 1 ]]; then
@@ -25,6 +36,24 @@ if [[ "$DONOR" == 1 ]]; then
 fi
 if [[ "$DONOR_DISCOVERY" == 1 ]]; then
   CFLAGS_DEFINES="$CFLAGS_DEFINES -DFX4_DONOR_FORK_DISCOVERY=1"
+fi
+if [[ "$POSTR1" == 1 ]]; then
+  CFLAGS_DEFINES="$CFLAGS_DEFINES -DFX4_SELECTIVE_POSTR1=1"
+fi
+if [[ "$MINI_CMIX" == 1 ]]; then
+  CFLAGS_DEFINES="$CFLAGS_DEFINES -DFX4_MINI_CMIX=1"
+fi
+if [[ "$SHADOW_LSTM200" == 1 ]]; then
+  CFLAGS_DEFINES="$CFLAGS_DEFINES -DFX4_SHADOW_LSTM200=1"
+fi
+if [[ "$VIRTUAL_REPLAY" == 1 ]]; then
+  CFLAGS_DEFINES="$CFLAGS_DEFINES -DFX4_VIRTUAL_REPLAY=1"
+fi
+if [[ "$TOPOLOGY" == 1 ]]; then
+  CFLAGS_DEFINES="$CFLAGS_DEFINES -DFX4_TOPOLOGY_RECURRENCE=1"
+fi
+if [[ "$CAUSAL_CNN" == 1 ]]; then
+  CFLAGS_DEFINES="$CFLAGS_DEFINES -DFX4_CAUSAL_CNN=1"
 fi
 
 command -v "$CC_BIN" >/dev/null
@@ -36,7 +65,7 @@ test -s "$ARTICLE_ORDER"
 echo "Building accepted ratio release..."
 rm -f ppm.temp
 make clean
-make DONOR="$DONOR" DONOR_DISCOVERY="$DONOR_DISCOVERY" CFLAGS_DEFINES="$CFLAGS_DEFINES" cmix -j3
+make DONOR="$DONOR" POSTR1="$POSTR1" MINI_CMIX="$MINI_CMIX"   SHADOW_LSTM200="$SHADOW_LSTM200" VIRTUAL_REPLAY="$VIRTUAL_REPLAY"   TOPOLOGY="$TOPOLOGY" CAUSAL_CNN="$CAUSAL_CNN" DONOR_DISCOVERY="$DONOR_DISCOVERY"   CFLAGS_DEFINES="$CFLAGS_DEFINES" cmix -j3
 
 test -x cmix
 llvm-strip-17 --strip-all cmix

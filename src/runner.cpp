@@ -26,7 +26,10 @@
 #include "fx4_config.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace {
 const int kMinVocabFileSize = 10000;
@@ -277,6 +280,74 @@ void ClearOutput() {
   fflush(stderr);
 #endif
 }
+
+class CausalScr2RangeCursor {
+ public:
+  CausalScr2RangeCursor(const VirtualReplayPlan* plan,
+      std::uint64_t stream_size)
+      : plan_(plan), stream_size_(stream_size) {}
+
+  bool Active(std::uint64_t position, std::uint64_t* begin,
+      std::uint64_t* end, bool* entered) {
+    *entered = false;
+    if (!plan_ || !plan_->causal_scr2()) return false;
+    if (plan_->causal_all()) {
+      *begin = 0;
+      *end = stream_size_;
+      if (!all_entered_) {
+        all_entered_ = true;
+        *entered = true;
+      }
+      return position < stream_size_;
+    }
+    const auto& ranges = plan_->causal_ranges();
+    while (range_index_ < ranges.size() &&
+        position >= ranges[range_index_].offset +
+            ranges[range_index_].length) {
+      ++range_index_;
+    }
+    if (range_index_ >= ranges.size() ||
+        position < ranges[range_index_].offset) {
+      return false;
+    }
+    *begin = ranges[range_index_].offset;
+    *end = *begin + ranges[range_index_].length;
+    if (entered_range_ != range_index_) {
+      entered_range_ = range_index_;
+      *entered = true;
+    }
+    return position < *end;
+  }
+
+  std::size_t CurrentRange() const {
+    return plan_ && !plan_->causal_all() ? range_index_ : 0;
+  }
+
+ private:
+  const VirtualReplayPlan* plan_;
+  std::uint64_t stream_size_;
+  std::size_t range_index_ = 0;
+  std::size_t entered_range_ = std::numeric_limits<std::size_t>::max();
+  bool all_entered_ = false;
+};
+
+std::array<std::uint8_t, 16> CausalScr2PatternMask(
+    const VirtualReplayPlan* plan) {
+  std::array<std::uint8_t, 16> mask{};
+  mask.fill(0xffu);
+  if (plan && plan->causal_scr2()) mask = plan->causal_pattern_mask();
+  return mask;
+}
+
+struct CausalScr2PatternStats {
+  std::uint64_t triggers = 0;
+  std::uint64_t takes = 0;
+  std::uint64_t replayed_bytes = 0;
+  std::uint16_t prefix_length = 0;
+  std::uint16_t suffix_length = 0;
+  double estimated_gain_bits = 0.0;
+};
+
 bool Compress(unsigned long long input_bytes, std::ifstream* is,
     std::ofstream* os, unsigned long long* output_bytes, Predictor* p,
     DonorPlan* donor_plan, VirtualReplayPlan* replay_plan) {
@@ -302,6 +373,23 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
   std::vector<char> buffer(FX4_IO_BUFFER_BYTES);
   unsigned long long pos = 0;
   std::size_t replay_index = 0;
+  CausalScr2Matcher causal_scr2(
+      replay_plan && replay_plan->causal_scr2()
+          ? replay_plan->causal_prior_code() : 0,
+      CausalScr2PatternMask(replay_plan), input_bytes);
+  CausalScr2RangeCursor causal_ranges(replay_plan, input_bytes);
+  std::uint64_t causal_triggers = 0;
+  std::uint64_t causal_takes = 0;
+  std::uint64_t causal_replayed = 0;
+  const char* causal_stats_path = std::getenv("FX4_CAUSAL_SCR2_STATS");
+  const bool collect_causal_stats =
+      causal_stats_path && *causal_stats_path;
+  const std::size_t causal_range_count =
+      replay_plan && replay_plan->causal_scr2() &&
+          !replay_plan->causal_all()
+      ? replay_plan->causal_ranges().size() : 1;
+  std::vector<std::array<CausalScr2PatternStats, 129>> causal_stats(
+      collect_causal_stats ? causal_range_count : 0);
 #if FX4_DONOR_PLAN
   const char* stats_path = std::getenv("FX4_REGION_STATS");
   std::ofstream stats;
@@ -380,7 +468,79 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
     if (got == 0) break;
     size_t i = 0;
     while (i < got) {
-      if (replay_plan && replay_index < replay_plan->event_count()) {
+      std::uint64_t causal_begin = 0;
+      std::uint64_t causal_end = 0;
+      bool causal_entered = false;
+      const bool causal_active = causal_ranges.Active(
+          pos, &causal_begin, &causal_end, &causal_entered);
+      if (causal_entered) causal_scr2.ResetModel();
+      if (causal_active) {
+        CausalScr2Matcher::Candidate candidate;
+        if (causal_scr2.FindCandidate(&candidate) &&
+            pos >= causal_begin + candidate.prefix_length &&
+            candidate.suffix_length <= causal_end - pos &&
+            candidate.suffix_length <= input_bytes - pos &&
+            pos / FX4_IO_BUFFER_BYTES ==
+                (pos + candidate.suffix_length - 1) /
+                    FX4_IO_BUFFER_BYTES &&
+            candidate.suffix_length <= got - i) {
+          const std::uint8_t* suffix = causal_scr2.PatternData(
+              candidate.pattern) + candidate.prefix_length;
+          const std::uint16_t ppmd_context = causal_scr2.PpmdContext(
+              p->PpmdByteProbability(suffix[0]), p->PpmdEffectiveOrder(),
+              p->PpmdEscapeDepth(), p->PpmdEscapeRate());
+          const bool take = std::memcmp(
+              buffer.data() + i, suffix, candidate.suffix_length) == 0;
+          const unsigned int shortcut_probability =
+              causal_scr2.Probability(candidate.pattern, candidate.context,
+                  candidate.class_context, ppmd_context);
+          e.EncodeRawBit(take, shortcut_probability);
+          causal_scr2.Update(candidate.pattern, candidate.context,
+              candidate.class_context, ppmd_context, take);
+          ++causal_triggers;
+          CausalScr2PatternStats* pattern_stats = nullptr;
+          if (collect_causal_stats) {
+            pattern_stats = &causal_stats[causal_ranges.CurrentRange()]
+                [candidate.pattern];
+            ++pattern_stats->triggers;
+            pattern_stats->prefix_length = candidate.prefix_length;
+            pattern_stats->suffix_length = candidate.suffix_length;
+          }
+          if (collect_causal_stats) {
+            const double mass = take ? shortcut_probability :
+                65536u - shortcut_probability;
+            pattern_stats->estimated_gain_bits -=
+                -std::log2(mass / 65536.0);
+          }
+          if (take) {
+            ++causal_takes;
+            causal_replayed += candidate.suffix_length;
+            if (pattern_stats) {
+              ++pattern_stats->takes;
+              pattern_stats->replayed_bytes += candidate.suffix_length;
+            }
+            for (std::uint16_t k = 0; k < candidate.suffix_length; ++k) {
+              const std::uint8_t value = suffix[k];
+              if (!before_byte(pos)) return false;
+              if (collect_causal_stats) {
+                pattern_stats->estimated_gain_bits +=
+                    e.ObserveKnownByteCost(value);
+              } else {
+                e.ObserveKnownByte(value);
+              }
+              causal_scr2.ObserveByte(value);
+              after_byte(pos, value);
+              report_progress(pos);
+              ++pos;
+              ++i;
+            }
+            continue;
+          }
+        }
+      }
+
+      if (replay_plan && !replay_plan->causal_scr2() &&
+          replay_index < replay_plan->event_count()) {
         const VirtualReplayPlan::Event& event =
             replay_plan->event(replay_index);
         if (event.offset < pos) return false;
@@ -413,14 +573,50 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
       e.BeginTraceByte(pos, value, 0);
       for (int bit = 7; bit >= 0; --bit) e.Encode((value >> bit) & 1);
       e.EndTraceByte();
+      if (replay_plan && replay_plan->causal_scr2()) {
+        causal_scr2.ObserveByte(value);
+      }
       after_byte(pos, value);
       report_progress(pos);
       ++pos;
       ++i;
     }
   }
-  if (replay_plan && replay_index != replay_plan->event_count()) return false;
+  if (replay_plan && !replay_plan->causal_scr2() &&
+      replay_index != replay_plan->event_count()) return false;
   e.Flush();
+  if (replay_plan && replay_plan->causal_scr2()) {
+    fprintf(stderr,
+        "causal SCR2: triggers=%llu takes=%llu replayed=%llu bytes\n",
+        static_cast<unsigned long long>(causal_triggers),
+        static_cast<unsigned long long>(causal_takes),
+        static_cast<unsigned long long>(causal_replayed));
+    if (collect_causal_stats) {
+      std::ofstream stats(causal_stats_path,
+          std::ios::out | std::ios::trunc);
+      if (!stats.is_open()) return false;
+      stats << "range,offset,length,pattern,prefix_length,suffix_length,"
+               "triggers,takes,"
+               "replayed_bytes,estimated_gain_bits,estimated_gain_bytes\n";
+      for (std::size_t range = 0; range < causal_stats.size(); ++range) {
+        const std::uint64_t range_offset = replay_plan->causal_all()
+            ? 0 : replay_plan->causal_ranges()[range].offset;
+        const std::uint64_t range_length = replay_plan->causal_all()
+            ? input_bytes : replay_plan->causal_ranges()[range].length;
+        for (std::uint16_t pattern = 1; pattern <= 128; ++pattern) {
+          const CausalScr2PatternStats& row = causal_stats[range][pattern];
+          if (row.triggers == 0) continue;
+          stats << range << ',' << range_offset << ',' << range_length << ','
+                << pattern << ',' << row.prefix_length << ','
+                << row.suffix_length << ',' << row.triggers << ','
+                << row.takes << ',' << row.replayed_bytes << ','
+                << row.estimated_gain_bits << ','
+                << (row.estimated_gain_bits / 8.0) << '\n';
+        }
+      }
+      if (!stats.good()) return false;
+    }
+  }
 #if FX4_DONOR_PLAN
   if (stats.is_open()) {
     const size_t region_end = e.OutputSize();
@@ -452,6 +648,11 @@ bool Decompress(unsigned long long output_length, std::ifstream* is,
   std::vector<char> output;
   output.reserve(FX4_IO_BUFFER_BYTES);
   std::size_t replay_index = 0;
+  CausalScr2Matcher causal_scr2(
+      replay_plan && replay_plan->causal_scr2()
+          ? replay_plan->causal_prior_code() : 0,
+      CausalScr2PatternMask(replay_plan), output_length);
+  CausalScr2RangeCursor causal_ranges(replay_plan, output_length);
   ClearOutput();
 
   auto before_byte = [&](unsigned long long logical_pos) -> bool {
@@ -495,7 +696,49 @@ bool Decompress(unsigned long long output_length, std::ifstream* is,
 
   unsigned long long pos = 0;
   while (pos < output_length) {
-    if (replay_plan && replay_index < replay_plan->event_count()) {
+    std::uint64_t causal_begin = 0;
+    std::uint64_t causal_end = 0;
+    bool causal_entered = false;
+    const bool causal_active = causal_ranges.Active(
+        pos, &causal_begin, &causal_end, &causal_entered);
+    if (causal_entered) causal_scr2.ResetModel();
+    if (causal_active) {
+      CausalScr2Matcher::Candidate candidate;
+      if (causal_scr2.FindCandidate(&candidate) &&
+          pos >= causal_begin + candidate.prefix_length &&
+          candidate.suffix_length <= causal_end - pos &&
+          candidate.suffix_length <= output_length - pos &&
+          pos / FX4_IO_BUFFER_BYTES ==
+              (pos + candidate.suffix_length - 1) /
+                  FX4_IO_BUFFER_BYTES) {
+        const std::uint8_t* suffix = causal_scr2.PatternData(
+            candidate.pattern) + candidate.prefix_length;
+        const std::uint16_t ppmd_context = causal_scr2.PpmdContext(
+            p->PpmdByteProbability(suffix[0]), p->PpmdEffectiveOrder(),
+            p->PpmdEscapeDepth(), p->PpmdEscapeRate());
+        const bool take = d.DecodeRawBit(
+            causal_scr2.Probability(candidate.pattern, candidate.context,
+                candidate.class_context, ppmd_context)) != 0;
+        causal_scr2.Update(candidate.pattern, candidate.context,
+            candidate.class_context, ppmd_context, take);
+        if (take) {
+          for (std::uint16_t k = 0; k < candidate.suffix_length; ++k) {
+            const std::uint8_t value = suffix[k];
+            if (!before_byte(pos)) return false;
+            d.ObserveKnownByte(value);
+            causal_scr2.ObserveByte(value);
+            emit_byte(value);
+            after_byte(pos, value);
+            report_progress(pos);
+            ++pos;
+          }
+          continue;
+        }
+      }
+    }
+
+    if (replay_plan && !replay_plan->causal_scr2() &&
+        replay_index < replay_plan->event_count()) {
       const VirtualReplayPlan::Event& event = replay_plan->event(replay_index);
       if (event.offset < pos) return false;
       if (event.offset == pos) {
@@ -517,12 +760,16 @@ bool Decompress(unsigned long long output_length, std::ifstream* is,
     int byte = 1;
     while (byte < 256) byte += byte + d.Decode();
     const std::uint8_t value = static_cast<std::uint8_t>(byte);
+    if (replay_plan && replay_plan->causal_scr2()) {
+      causal_scr2.ObserveByte(value);
+    }
     emit_byte(value);
     after_byte(pos, value);
     report_progress(pos);
     ++pos;
   }
-  if (replay_plan && replay_index != replay_plan->event_count()) return false;
+  if (replay_plan && !replay_plan->causal_scr2() &&
+      replay_index != replay_plan->event_count()) return false;
   if (!output.empty()) {
     os->write(output.data(), static_cast<std::streamsize>(output.size()));
   }
@@ -743,12 +990,43 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
 #if FX4_VIRTUAL_REPLAY
   VirtualReplayPlan replay_plan;
   const char* replay_plan_path = std::getenv("FX4_VR_PLAN");
+  const char* causal_scr2_spec = std::getenv("FX4_CAUSAL_SCR2");
+  if (replay_plan_path && *replay_plan_path &&
+      causal_scr2_spec && *causal_scr2_spec) {
+    fprintf(stderr, "FX4_VR_PLAN and FX4_CAUSAL_SCR2 are exclusive\n");
+    return false;
+  }
   if (replay_plan_path && *replay_plan_path) {
     if (!replay_plan.LoadExternal(replay_plan_path, temp_bytes)) {
       fprintf(stderr, "invalid FX4_VR_PLAN: %s\n", replay_plan_path);
       return false;
     }
     if (!replay_plan.empty()) active_replay_plan = &replay_plan;
+  } else if (causal_scr2_spec && *causal_scr2_spec) {
+    if (scr2_used || postr1_transform_used) {
+      fprintf(stderr,
+          "FX4_CAUSAL_SCR2 requires the unmodified post-R1 stream\n");
+      return false;
+    }
+    unsigned int prior_code = 0;
+    const char* prior = std::getenv("FX4_CAUSAL_SCR2_PRIOR");
+    if (prior && std::strcmp(prior, "75") == 0) prior_code = 1;
+    else if (prior && (std::strcmp(prior, "88") == 0 ||
+                      std::strcmp(prior, "87") == 0)) prior_code = 2;
+    else if (prior && *prior && std::strcmp(prior, "50") != 0) {
+      fprintf(stderr, "FX4_CAUSAL_SCR2_PRIOR must be 50, 75, or 88\n");
+      return false;
+    }
+    const char* patterns = std::getenv("FX4_CAUSAL_SCR2_PATTERNS");
+    if (!replay_plan.ConfigureCausalScr2(causal_scr2_spec, temp_bytes,
+        prior_code, patterns ? patterns : "all")) {
+      fprintf(stderr, "invalid FX4_CAUSAL_SCR2: %s\n", causal_scr2_spec);
+      return false;
+    }
+    active_replay_plan = &replay_plan;
+    fprintf(stderr, "causal SCR2 enabled: %s, prior=%s\n",
+        causal_scr2_spec, prior_code == 0 ? "50" :
+        (prior_code == 1 ? "75" : "88"));
   }
 #endif
 

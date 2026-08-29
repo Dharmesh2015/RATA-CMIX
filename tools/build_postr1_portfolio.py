@@ -51,6 +51,7 @@ STAGES = {
     "wiki": 1 << 9,
     "phrase": 1 << 10,
     "macros": 1 << 10,
+    "scr2_shared": 1 << 11,
 }
 
 EXPERTS = {
@@ -66,6 +67,7 @@ EXPERTS = {
     "token_match": 1 << 9,
     # Both names select the one causal top-3 continuation specialist.
     "episodic_cache": 1 << 9,
+    "causal_cnn": 1 << 11,
     "context_mixer": 1 << 12,
     "oracle": 1 << 14,
     "donor_profile": 1 << 15,
@@ -73,6 +75,8 @@ EXPERTS = {
     "legacy_donor_replay": 1 << 17,
     "url_structure": 1 << 18,
     "shadow_only": 1 << 19,
+    "shadow_lstm200": 1 << 20,
+    "topology_recurrence": 1 << 21,
 }
 
 STREAM_CLASSES = {
