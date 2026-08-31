@@ -77,6 +77,13 @@ Encoder::Encoder(std::ofstream* os, Predictor* p, bool load_terminal_head)
     if (!bitlstm_->ok()) bitlstm_.reset();
   }
 #endif
+#ifdef KH_BITLSTM32_REQUIRED
+  if (!bitlstm_) {
+    std::fprintf(stderr,
+        "FX4 target build requires the packaged BitLSTM32 model\n");
+    std::exit(2);
+  }
+#endif
 #else
   (void)load_terminal_head;
 #endif

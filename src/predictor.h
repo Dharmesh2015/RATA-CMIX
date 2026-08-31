@@ -17,6 +17,12 @@
 #include "models/ppmd.h"
 #include "models/bracket.h"
 #include "models/fxcmv1.h"
+#if FX4_TOKEN_NGRAM_BIAS
+#include "models/token-ngram-bias.h"
+#endif
+#if FX4_TRANSFORMER6M
+#include "third_party/fx2_transformer/opt/model_opt.h"
+#endif
 #ifdef KH_OBIAS
 #include "models/obias-prior.h"
 #endif
@@ -94,6 +100,10 @@ class Predictor {
   void AddWord();
   void AddMatch();
   void AddDoubleIndirect();
+#if FX4_TRANSFORMER6M
+  void InitializeTransformer6m();
+  void Transformer6mByteUpdate();
+#endif
 #if FX4_MINI_CMIX
   void AddMiniCmix();
   float PredictMiniCmix(std::uint16_t model_mask);
@@ -153,6 +163,18 @@ class Predictor {
   float fxcm_neutral_input_ = 0.0f;
   std::optional<PPMD::PPMD> byte_model_;
   std::optional<ByteMixer> byte_mixer_;
+#if FX4_TOKEN_NGRAM_BIAS
+  std::optional<TokenNgramBias> token_ngram_bias_;
+#endif
+#if FX4_TRANSFORMER6M
+  std::unique_ptr<fx2::opt::TransformerOpt> transformer6m_;
+  std::array<int, 256> transformer6m_byte_to_index_{};
+  std::vector<unsigned char> transformer6m_vocab_bytes_;
+  std::vector<std::uint16_t> transformer6m_half_scratch_;
+  std::vector<float> transformer6m_probabilities_;
+  std::array<unsigned char, 15> transformer6m_separator_window_{};
+  unsigned long long transformer6m_article_tokens_ = 0;
+#endif
 #ifdef KH_OBIAS
   std::unique_ptr<KhObiasPrior> obias_;
   bool obias_active_ = false;

@@ -8,6 +8,115 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#if FX4_TRANSFORMER6M && defined(__F16C__)
+#include <immintrin.h>
+#endif
+
+#if FX4_TRANSFORMER6M
+namespace {
+
+std::uint16_t TransformerFloatToHalf(float value) {
+  std::uint32_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  const std::uint32_t sign = (bits >> 16) & 0x8000u;
+  const std::int32_t exponent =
+      static_cast<std::int32_t>((bits >> 23) & 0xffu) - 112;
+  std::uint32_t mantissa = bits & 0x7fffffu;
+  if (exponent >= 31) return static_cast<std::uint16_t>(sign | 0x7c00u);
+  if (exponent <= 0) {
+    if (exponent < -10) return static_cast<std::uint16_t>(sign);
+    mantissa |= 0x800000u;
+    const int shift = 14 - exponent;
+    std::uint16_t half = static_cast<std::uint16_t>(mantissa >> shift);
+    const std::uint32_t remainder = mantissa & ((1u << shift) - 1u);
+    const std::uint32_t midpoint = 1u << (shift - 1);
+    if (remainder > midpoint ||
+        (remainder == midpoint && (half & 1u))) {
+      ++half;
+    }
+    return static_cast<std::uint16_t>(sign | half);
+  }
+  std::uint16_t half = static_cast<std::uint16_t>(
+      sign | (static_cast<std::uint32_t>(exponent) << 10) |
+      (mantissa >> 13));
+  const std::uint32_t remainder = mantissa & 0x1fffu;
+  if (remainder > 0x1000u ||
+      (remainder == 0x1000u && (half & 1u))) {
+    ++half;
+  }
+  return half;
+}
+
+float TransformerHalfToFloat(std::uint16_t half) {
+  const std::uint32_t sign = static_cast<std::uint32_t>(half & 0x8000u) << 16;
+  std::uint32_t exponent = (half >> 10) & 0x1fu;
+  std::uint32_t mantissa = half & 0x3ffu;
+  std::uint32_t bits;
+  if (exponent == 0) {
+    if (mantissa == 0) {
+      bits = sign;
+    } else {
+      int shift = 0;
+      while ((mantissa & 0x400u) == 0) {
+        mantissa <<= 1;
+        ++shift;
+      }
+      mantissa &= 0x3ffu;
+      // Preserve the reference transformer's scalar-tail conversion quirk.
+      bits = sign | (static_cast<std::uint32_t>(112 - shift) << 23) |
+          (mantissa << 13);
+    }
+  } else if (exponent == 31) {
+    bits = sign | 0x7f800000u | (mantissa << 13);
+  } else {
+    bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+  }
+  float value;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+void TransformerFloatsToHalves(const float* source, std::uint16_t* target,
+    std::size_t size) {
+  std::size_t i = 0;
+#if defined(__F16C__)
+  for (; i + 8 <= size; i += 8) {
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(target + i),
+        _mm256_cvtps_ph(_mm256_loadu_ps(source + i),
+            _MM_FROUND_TO_NEAREST_INT));
+  }
+#endif
+  for (; i < size; ++i) target[i] = TransformerFloatToHalf(source[i]);
+}
+
+void TransformerHalvesToFloats(const std::uint16_t* source, float* target,
+    std::size_t size) {
+  std::size_t i = 0;
+#if defined(__F16C__)
+  for (; i + 8 <= size; i += 8) {
+    _mm256_storeu_ps(target + i, _mm256_cvtph_ps(
+        _mm_loadu_si128(reinterpret_cast<const __m128i*>(source + i))));
+  }
+#endif
+  for (; i < size; ++i) target[i] = TransformerHalfToFloat(source[i]);
+}
+
+constexpr unsigned char kTransformerArticleSeparator[15] = {
+    0x08, 0x08, 0x25, 0xac, 0x65, 0x27, 0x05,
+    0x08, 0x08, 0x08, 0x08, 0x25, 0xac, 0x68, 0x27};
+constexpr unsigned long long kTransformerMaxArticleTokens = 1ull << 17;
+
+bool ReadableTransformerFile(const char* path) {
+  if (!path || !path[0]) return false;
+  FILE* file = std::fopen(path, "rb");
+  if (!file) return false;
+  std::fclose(file);
+  return true;
+}
+
+}  // namespace
+#endif
+
 Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled)
     : manager_(), sigmoid_(100001), vocab_(vocab) {
   (void)scr2_enabled;
@@ -27,9 +136,15 @@ Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled)
   AddWord();
   AddMatch();
   AddDoubleIndirect();
+#if FX4_TRANSFORMER6M
+  InitializeTransformer6m();
+#endif
   // Construct the accepted mixer/LSTM before auxiliary models consume rand().
   // This preserves the baseline LSTM initialization exactly.
   AddMixers();
+#if FX4_TOKEN_NGRAM_BIAS
+  token_ngram_bias_.emplace();
+#endif
 #if FX4_MINI_CMIX
   mini_shared_map_.assign(256u * 100000u, 0);
   AddMiniCmix();
@@ -200,6 +315,105 @@ unsigned int Predictor::PpmdEscapeDepth() const {
 float Predictor::PpmdEscapeRate() const {
   return byte_model_->RecentEscapeRate();
 }
+
+#if FX4_TRANSFORMER6M
+void Predictor::InitializeTransformer6m() {
+  transformer6m_byte_to_index_.fill(-1);
+  for (unsigned int byte = 0; byte < vocab_.size(); ++byte) {
+    if (vocab_[byte]) {
+      transformer6m_byte_to_index_[byte] =
+          static_cast<int>(transformer6m_vocab_bytes_.size());
+      transformer6m_vocab_bytes_.push_back(static_cast<unsigned char>(byte));
+    }
+  }
+  if (transformer6m_vocab_bytes_.size() != 205u) {
+    // Small S1 helper streams retain the online LSTM.
+    return;
+  }
+
+  const char* selected = nullptr;
+  const char* configured = std::getenv("FX4_TRANSFORMER_WEIGHTS");
+  if (ReadableTransformerFile(configured)) selected = configured;
+  const char* candidates[] = {
+      ".tfweights",
+      ".transformer6m_weights",
+      "models/transformer6m/6m-q4-fp32.tfwc2"};
+  if (!selected) {
+    for (const char* candidate : candidates) {
+      if (ReadableTransformerFile(candidate)) {
+        selected = candidate;
+        break;
+      }
+    }
+  }
+  if (!selected) {
+#if FX4_TRANSFORMER6M_REQUIRED
+    std::fprintf(stderr,
+        "FX4 transformer6m weights are required; set "
+        "FX4_TRANSFORMER_WEIGHTS or package .tfweights\n");
+    std::exit(2);
+#else
+    return;
+#endif
+  }
+
+  transformer6m_.reset(new fx2::opt::TransformerOpt(
+      selected, fx2::opt::AttnKind::KVI8));
+  transformer6m_half_scratch_.resize(205u);
+  transformer6m_probabilities_.assign(205u, 1.0f);
+  transformer6m_separator_window_.fill(0xffu);
+}
+
+void Predictor::Transformer6mByteUpdate() {
+  const std::valarray<float>& ppmd = byte_model_->BytePredict();
+  for (unsigned int i = 0; i < transformer6m_vocab_bytes_.size(); ++i) {
+    transformer6m_probabilities_[i] = ppmd[transformer6m_vocab_bytes_[i]];
+  }
+  TransformerFloatsToHalves(transformer6m_probabilities_.data(),
+      transformer6m_half_scratch_.data(), transformer6m_half_scratch_.size());
+
+  const int token = transformer6m_byte_to_index_[manager_.bit_context_];
+  if (token < 0) {
+    std::fprintf(stderr,
+        "FX4 transformer6m byte 0x%02x is absent from the vocabulary\n",
+        manager_.bit_context_);
+    std::exit(2);
+  }
+  std::memmove(transformer6m_separator_window_.data(),
+      transformer6m_separator_window_.data() + 1,
+      transformer6m_separator_window_.size() - 1);
+  transformer6m_separator_window_.back() =
+      static_cast<unsigned char>(token);
+  ++transformer6m_article_tokens_;
+
+  const bool last_of_piece =
+      std::memcmp(transformer6m_separator_window_.data(),
+          kTransformerArticleSeparator,
+          sizeof(kTransformerArticleSeparator)) == 0 ||
+      transformer6m_article_tokens_ >= kTransformerMaxArticleTokens;
+  if (last_of_piece) {
+    TransformerHalvesToFloats(transformer6m_half_scratch_.data(),
+        transformer6m_probabilities_.data(),
+        transformer6m_half_scratch_.size());
+    transformer6m_article_tokens_ = 0;
+  } else {
+    if (transformer6m_article_tokens_ == 1) transformer6m_->begin_article();
+    transformer6m_->step(static_cast<std::uint8_t>(token),
+        transformer6m_half_scratch_.data(),
+        transformer6m_probabilities_.data());
+    TransformerFloatsToHalves(transformer6m_probabilities_.data(),
+        transformer6m_half_scratch_.data(),
+        transformer6m_half_scratch_.size());
+    TransformerHalvesToFloats(transformer6m_half_scratch_.data(),
+        transformer6m_probabilities_.data(),
+        transformer6m_half_scratch_.size());
+  }
+  for (float& probability : transformer6m_probabilities_) {
+    if (!(probability >= 1.0e-6f)) probability = 1.0e-6f;
+  }
+  byte_mixer_->SetProbs(transformer6m_probabilities_.data());
+}
+#endif
 
 unsigned long long Predictor::GetNumModels() {
   unsigned long long num = 0;
@@ -426,8 +640,11 @@ void Predictor::AddMixers() {
   for (unsigned int i = 0; i < vocab_.size(); ++i) {
     if (vocab_[i]) ++vocab_size;
   }
-  byte_mixer_.emplace(1, manager_.bit_context_, vocab_,
-      vocab_size, new Lstm(vocab_size, vocab_size, FX4_LSTM_CELLS,
+  byte_mixer_.emplace(1, manager_.bit_context_, vocab_, vocab_size,
+#if FX4_TRANSFORMER6M
+      transformer6m_ ? nullptr :
+#endif
+      new Lstm(vocab_size, vocab_size, FX4_LSTM_CELLS,
           FX4_LSTM_LAYERS, FX4_LSTM_HORIZON, FX4_LSTM_LEARNING_RATE,
           FX4_LSTM_GRADIENT_CLIP));
 
@@ -676,6 +893,10 @@ float Predictor::Predict() {
       layers_[0].Inputs()[byte_mixer_index],
       aggregate_fxcm_logit);
 #endif
+#if FX4_TOKEN_NGRAM_BIAS
+  p = token_ngram_bias_->Predict(p, sigmoid_.Logit(std::max(1.0e-5f,
+      std::min(1.0f - 1.0e-5f, p))));
+#endif
 #if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
   donor_branch_ppmd_probability_ =
       Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]);
@@ -720,6 +941,9 @@ float Predictor::Predict() {
 }
 
 void Predictor::Perceive(int bit) {
+#if FX4_TOKEN_NGRAM_BIAS
+  token_ngram_bias_->Perceive(bit);
+#endif
 #if FX4_SELECTIVE_POSTR1
   if (postr1_experts_ && postr1_prediction_used_)
     postr1_experts_->Perceive(bit);
@@ -787,6 +1011,16 @@ void Predictor::Perceive(int bit) {
     byte_model_->ByteUpdate();
 
     const std::valarray<float>& p = byte_model_->BytePredict();
+#if FX4_SHADOW_LSTM200
+    for (unsigned int j = 0; j < 256; ++j) {
+      shadow_lstm200_->SetInput(j, p[j]);
+    }
+#endif
+#if FX4_TRANSFORMER6M
+    if (transformer6m_) {
+      Transformer6mByteUpdate();
+    } else {
+#endif
 #ifdef KH_OBIAS
     if (obias_active_) {
       float probabilities[256];
@@ -805,13 +1039,11 @@ void Predictor::Perceive(int bit) {
       byte_mixer_->SetInput(j, p[j]);
     }
 #endif
-#if FX4_SHADOW_LSTM200
-    for (unsigned int j = 0; j < 256; ++j) {
-      shadow_lstm200_->SetInput(j, p[j]);
-    }
-#endif
 
     byte_mixer_->ByteUpdate();
+#if FX4_TRANSFORMER6M
+    }
+#endif
 #if FX4_SHADOW_LSTM200
     shadow_lstm200_->ByteUpdate();
 #endif

@@ -156,7 +156,7 @@ int Help() {
   printf("cmix-lex\n");
   printf("Compress:\n");
   printf("    to compress enwik9: cmix -e enwik9 [output]\n");
-  printf("    to create a header for hutter prize: cmix -h comp_dict_size comp_new_order_size decomp_input_size\n");
+  printf("    to create a header for hutter prize: cmix -h comp_dict_size comp_new_order_size decomp_input_size [transformer_size] [bitlstm32_size]\n");
   printf("    with dictionary:    cmix -c [dictionary] [input] [output]\n");
     printf("    without dictionary: cmix -c [input] [output]\n");
     printf("    no preprocessing:   cmix -n [input] [output]\n");
@@ -1568,6 +1568,14 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
     HeaderInfo header;
     read("test.dat", header);
     header.decomp_input_size = output_size;
+#ifdef KH_TRANSFORMER6M_ARCHIVE
+    if (header.transformer6m_weights_size <= 0 ||
+        static_cast<size_t>(header.transformer6m_weights_size) !=
+            getFileSize(".tfweights")) {
+      fprintf(stderr, "invalid or missing packaged transformer6m weights\n");
+      return Help();
+    }
+#endif
 #ifdef KH_BITLSTM32_ARCHIVE
     {
       const char* head_path = getenv("KH_BITLSTM32");
@@ -1583,6 +1591,8 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
       head_out.close();
       header.head_blob_size =
           static_cast<int>(getFileSize(".head_blob4archive"));
+      // This field describes S1 only; the copy in archive9 is head_blob_size.
+      header.s1_head_blob_size = 0;
     }
 #endif
 #ifdef KH_RESIDUAL_LSTM96_ARCHIVE
@@ -1603,7 +1613,12 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
 #endif
     write("header4archive.dat", header);
 
+#ifdef KH_TRANSFORMER6M_ARCHIVE
+    cat("dec1", ".tfweights", "dec1t");
+    cat("dec1t", output_path.c_str(), "dec2");
+#else
     cat("dec1", output_path.c_str(), "dec2");
+#endif
 #ifdef KH_BITLSTM32_ARCHIVE
     cat("dec2", ".head_blob4archive", "dec2c");
 #ifdef KH_RESIDUAL_LSTM96_ARCHIVE
@@ -1635,9 +1650,17 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
     header.decomp_input_size = atoi(argv[4]);
 #ifdef KH_BITLSTM32_ARCHIVE
     header.head_blob_size = 0;
+    if (argc < 7) return Help();
+    header.s1_head_blob_size = atoi(argv[6]);
+    if (header.s1_head_blob_size <= 0) return Help();
 #endif
 #ifdef KH_RESIDUAL_LSTM96_ARCHIVE
     header.residual_lstm96_blob_size = 0;
+#endif
+#ifdef KH_TRANSFORMER6M_ARCHIVE
+    if (argc < 6) return Help();
+    header.transformer6m_weights_size = atoi(argv[5]);
+    if (header.transformer6m_weights_size <= 0) return Help();
 #endif
     write("header.dat", header);
     goto exit;

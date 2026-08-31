@@ -50,6 +50,12 @@
 #define FX4_TRANSFORMER6M 0
 #endif
 
+// Target93/S1 builds must fail rather than silently falling back to the
+// online LSTM when the separately packaged transformer weights are missing.
+#ifndef FX4_TRANSFORMER6M_REQUIRED
+#define FX4_TRANSFORMER6M_REQUIRED 0
+#endif
+
 // Lightweight Nacrith-inspired causal side expert. It uses bounded byte/WRT
 // n-gram counts plus an online log-space bias; no LLM/GPU code is included.
 #ifndef FX4_TOKEN_NGRAM_BIAS

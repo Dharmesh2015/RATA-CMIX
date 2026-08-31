@@ -31,3 +31,19 @@ source files from:
 
 Those files are distributed under the MIT License. The original license is
 preserved as src/third_party/altxs/LICENSE.
+
+fx2-cmix CPU transformer
+========================
+
+This tree includes the CPU-only 6M transformer inference implementation and
+the published quantized model asset supplied with the fx2-cmix transformer
+research bundle:
+
+  src/third_party/fx2_transformer/
+  models/transformer6m/6m-q4-fp32.tfwc2
+
+The transformer replaces the online byte LSTM only when TRANSFORMER=1;
+PPMd, FXCM, the final mixers, and the BitLSTM32 terminal head remain active.
+The imported source is distributed under the GNU General Public License,
+version 3. Its original license is preserved as
+src/third_party/fx2_transformer/LICENSE.

@@ -24,6 +24,9 @@ struct HeaderInfo {
   // the Decoder uses that file as its default weight source when the env
   // var is unset (bare judge decode).
   int head_blob_size;
+  // The compressor also needs the same head. Keep this separate from
+  // head_blob_size, which describes the copy stored in archive9 for decode.
+  int s1_head_blob_size;
 #endif
 #ifdef KH_OBIAS_ARCHIVE
   // Size (bytes) of the raw obias upstream weight blob carried in archive9
@@ -39,6 +42,11 @@ struct HeaderInfo {
   // the dictionary helper decode, because that decode uses the same terminal
   // probability path as the main payload.
   int residual_lstm96_blob_size;
+#endif
+#ifdef KH_TRANSFORMER6M_ARCHIVE
+  // Losslessly compressed FX2TFWC2 transformer model. It is appended as-is
+  // to S1 and archive9, then loaded directly by the CPU inference path.
+  int transformer6m_weights_size;
 #endif
 };
 
@@ -85,7 +93,19 @@ int selfextract_comp() {
   //Remove dictionary if present
   remove(".dict");
   
-  size_t decmpressor_binary_size = fsize - header.dict_size - header.new_article_order_size - sizeof(HeaderInfo);
+  size_t transformer6m_weights_size = 0;
+#ifdef KH_TRANSFORMER6M_ARCHIVE
+  transformer6m_weights_size =
+      static_cast<size_t>(header.transformer6m_weights_size);
+#endif
+  size_t s1_head_blob_size = 0;
+#ifdef KH_BITLSTM32_ARCHIVE
+  s1_head_blob_size = static_cast<size_t>(header.s1_head_blob_size);
+#endif
+  size_t decmpressor_binary_size = fsize - header.dict_size -
+      header.new_article_order_size - transformer6m_weights_size -
+      s1_head_blob_size -
+      sizeof(HeaderInfo);
 
 // produce actual decompressor binary
   fo = fopen(".decomp_bin", "wb");
@@ -113,6 +133,28 @@ int selfextract_comp() {
   fo = fopen(".new_article_order.comp", "wb");
   fwrite(p1 + decmpressor_binary_size + header.dict_size, header.new_article_order_size, 1, fo);
   fclose(fo);
+
+#ifdef KH_TRANSFORMER6M_ARCHIVE
+  fo = fopen(".tfweights", "wb");
+  fwrite(p1 + decmpressor_binary_size + header.dict_size +
+             header.new_article_order_size,
+      transformer6m_weights_size, 1, fo);
+  fclose(fo);
+#endif
+
+#ifdef KH_BITLSTM32_ARCHIVE
+  if (s1_head_blob_size == 0) {
+    fprintf(stderr, "S1 is missing the BitLSTM32 model\n");
+    return 1;
+  }
+  fo = fopen(".head_blob_s1", "wb");
+  fwrite(p1 + decmpressor_binary_size + header.dict_size +
+             header.new_article_order_size + transformer6m_weights_size,
+      s1_head_blob_size, 1, fo);
+  fclose(fo);
+  // Helper-stream decoders and the main encoder inherit this exact model.
+  setenv("KH_BITLSTM32", ".head_blob_s1", 1);
+#endif
 //  std::cout << "Decompressing the file with the new article order..." << std::endl;
   int status = system("./cmix -d .new_article_order.comp .new_article_order");
   if (status != 0) {
@@ -176,7 +218,31 @@ int selfextract_decomp() {
 #ifdef KH_RESIDUAL_LSTM96_ARCHIVE
   residual_lstm96_blob_size = (size_t)header.residual_lstm96_blob_size;
 #endif
-  size_t decmpressor_binary_size = fsize - header.dict_size - header.decomp_input_size - isbn_side_size - head_blob_size - obias_blob_size - residual_lstm96_blob_size - sizeof(HeaderInfo);
+  size_t transformer6m_weights_size = 0;
+#ifdef KH_TRANSFORMER6M_ARCHIVE
+  transformer6m_weights_size =
+      static_cast<size_t>(header.transformer6m_weights_size);
+#endif
+  size_t decmpressor_binary_size = fsize - header.dict_size -
+      transformer6m_weights_size - header.decomp_input_size -
+      isbn_side_size - head_blob_size - obias_blob_size -
+      residual_lstm96_blob_size - sizeof(HeaderInfo);
+  const size_t transformer_offset =
+      decmpressor_binary_size + header.dict_size;
+  const size_t payload_offset =
+      transformer_offset + transformer6m_weights_size;
+  const size_t isbn_offset = payload_offset + header.decomp_input_size;
+  const size_t head_offset = isbn_offset + isbn_side_size;
+  const size_t obias_offset = head_offset + head_blob_size;
+  const size_t residual_lstm96_offset = obias_offset + obias_blob_size;
+
+#ifdef KH_TRANSFORMER6M_ARCHIVE
+  // Extract before the helper dictionary decode: that subprocess uses the
+  // same Predictor and must load the exact model from its first byte.
+  fo = fopen(".tfweights", "wb");
+  fwrite(p1 + transformer_offset, transformer6m_weights_size, 1, fo);
+  fclose(fo);
+#endif
 
 #ifdef KH_BITLSTM32_ARCHIVE
   // Head weight blob rides after the isbn side-stream, before the header.
@@ -184,18 +250,13 @@ int selfextract_decomp() {
   // subprocess whose Decoder already needs the default weight source when
   // the env var is unset (bare judge decode).
   fo = fopen(".head_blob_decomp", "wb");
-  fwrite(p1 + decmpressor_binary_size + header.dict_size +
-             header.decomp_input_size + isbn_side_size,
-         head_blob_size, 1, fo);
+  fwrite(p1 + head_offset, head_blob_size, 1, fo);
   fclose(fo);
 #endif
 
 #ifdef KH_RESIDUAL_LSTM96_ARCHIVE
   fo = fopen(".residual_lstm96_blob_decomp", "wb");
-  fwrite(p1 + decmpressor_binary_size + header.dict_size +
-             header.decomp_input_size + isbn_side_size + head_blob_size +
-             obias_blob_size,
-         residual_lstm96_blob_size, 1, fo);
+  fwrite(p1 + residual_lstm96_offset, residual_lstm96_blob_size, 1, fo);
   fclose(fo);
 #endif
 
@@ -205,9 +266,7 @@ int selfextract_decomp() {
   // subprocess whose Predictor needs the default weight source when the env
   // var is unset (bare judge decode).
   fo = fopen(".obias_blob_decomp", "wb");
-  fwrite(p1 + decmpressor_binary_size + header.dict_size +
-             header.decomp_input_size + isbn_side_size + head_blob_size,
-         obias_blob_size, 1, fo);
+  fwrite(p1 + obias_offset, obias_blob_size, 1, fo);
   fclose(fo);
 #endif
 
@@ -223,14 +282,13 @@ int selfextract_decomp() {
   }
 
   fo = fopen(".ready4cmix_decomp", "wb");
-  fwrite(p1 + decmpressor_binary_size + header.dict_size, header.decomp_input_size, 1, fo);
+  fwrite(p1 + payload_offset, header.decomp_input_size, 1, fo);
   fclose(fo);
 
 #ifdef KH_ISBN_FOLD
   // ISBN fold side-stream rides between the cmix payload and the header.
   fo = fopen(".isbn_side_decomp", "wb");
-  fwrite(p1 + decmpressor_binary_size + header.dict_size + header.decomp_input_size,
-         isbn_side_size, 1, fo);
+  fwrite(p1 + isbn_offset, isbn_side_size, 1, fo);
   fclose(fo);
 #endif
 

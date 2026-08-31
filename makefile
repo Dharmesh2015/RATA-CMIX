@@ -24,6 +24,8 @@ POSTR1_TRANSFORM ?= 0
 ORACLE_TRACE ?= 0
 RESIDUAL_LSTM96 ?= 0
 ALTXS ?= 0
+TRANSFORMER ?= 0
+TOKEN_NGRAM ?= 0
 
 DONOR_SOURCE :=
 DONOR_HEADER :=
@@ -38,6 +40,10 @@ ALTXS_CPP_SOURCE :=
 ALTXS_CPP_OBJECT :=
 ALTXS_C_OBJECTS :=
 ALTXS_TARGET :=
+TRANSFORMER_OBJECTS :=
+TRANSFORMER_TARGET :=
+TOKEN_NGRAM_SOURCE :=
+TOKEN_NGRAM_OBJECT :=
 
 ifeq ($(DONOR_DISCOVERY),1)
 DONOR := 1
@@ -79,6 +85,20 @@ ALTXS_CPP_OBJECT := altxs_transform.o
 ALTXS_C_OBJECTS := m3_densify.o m5_payload_sim.o product_seal.o
 ALTXS_TARGET := altxs_objects
 endif
+ifeq ($(TRANSFORMER),1)
+override CFLAGS_DEFINES += -DFX4_TRANSFORMER6M=1 \
+	-DFX4_TRANSFORMER6M_REQUIRED=1 -DKH_TRANSFORMER6M_ARCHIVE \
+	-DKH_BITLSTM32_REQUIRED=1
+TRANSFORMER_OBJECTS := tf_weights_io.o tf_weights_io_compressed.o \
+	tf_qmat_dense.o tf_qmat_sparse.o tf_attn.o tf_kda.o tf_glue.o \
+	tf_arena_build.o tf_model_opt.o
+TRANSFORMER_TARGET := transformer_objects
+endif
+ifeq ($(TOKEN_NGRAM),1)
+override CFLAGS_DEFINES += -DFX4_TOKEN_NGRAM_BIAS=1
+TOKEN_NGRAM_SOURCE := src/models/token-ngram-bias.cpp
+TOKEN_NGRAM_OBJECT := token-ngram-bias.o
+endif
 ifeq ($(DONOR),1)
 override CFLAGS_DEFINES += -DFX4_DONOR_PLAN=1
 DONOR_SOURCE := src/donor_plan.cpp
@@ -99,6 +119,9 @@ COLD_FLAGS := $(COMMON) -Oz -ffp-model=fast
 C_FLAGS := $(CFLAGS_DEFINES) -m64 -std=c11 -DNDEBUG -D_GNU_SOURCE -O3 \
 	-march=native -mtune=native -fdata-sections -ffunction-sections
 LFLAGS := -m64 -fuse-ld=lld -Wl,--gc-sections -std=c++17
+TRANSFORMER_FLAGS := -m64 -O3 -std=c++17 -Wall -Wextra \
+	-fno-math-errno -march=native -mtune=native \
+	-fdata-sections -ffunction-sections
 
 prof_gen: FAST_FLAGS += -fprofile-generate=$(ROOT_DIR)/pgo_data
 prof_gen: SLOW_FLAGS += -fprofile-generate=$(ROOT_DIR)/pgo_data
@@ -136,6 +159,34 @@ altxs_objects: src/third_party/altxs/m3_densify.c \
 		src/third_party/altxs/m5_payload_sim.c \
 		src/third_party/altxs/product_seal.c
 
+tf_weights_io.o: src/third_party/fx2_transformer/weights_io.cpp \
+	src/third_party/fx2_transformer/weights_io.h
+	$(CC) $(TRANSFORMER_FLAGS) \
+		-c src/third_party/fx2_transformer/weights_io.cpp -o $@
+
+tf_weights_io_compressed.o: \
+	src/third_party/fx2_transformer/weights_io_compressed.cpp \
+	src/third_party/fx2_transformer/weights_io.h
+	$(CC) $(filter-out -O3,$(TRANSFORMER_FLAGS)) -Os \
+		-c src/third_party/fx2_transformer/weights_io_compressed.cpp -o $@
+
+tf_qmat_dense.o: src/third_party/fx2_transformer/opt/qmat_dense.cpp
+	$(CC) $(TRANSFORMER_FLAGS) -c $< -o $@
+tf_qmat_sparse.o: src/third_party/fx2_transformer/opt/qmat_sparse.cpp
+	$(CC) $(TRANSFORMER_FLAGS) -c $< -o $@
+tf_attn.o: src/third_party/fx2_transformer/opt/attn.cpp
+	$(CC) $(TRANSFORMER_FLAGS) -c $< -o $@
+tf_kda.o: src/third_party/fx2_transformer/opt/kda.cpp
+	$(CC) $(TRANSFORMER_FLAGS) -c $< -o $@
+tf_glue.o: src/third_party/fx2_transformer/opt/glue.cpp
+	$(CC) $(TRANSFORMER_FLAGS) -c $< -o $@
+tf_arena_build.o: src/third_party/fx2_transformer/opt/arena_build.cpp
+	$(CC) $(TRANSFORMER_FLAGS) -c $< -o $@
+tf_model_opt.o: src/third_party/fx2_transformer/opt/model_opt.cpp
+	$(CC) $(TRANSFORMER_FLAGS) -c $< -o $@
+
+transformer_objects: $(TRANSFORMER_OBJECTS)
+
 fast:
 	$(CC) $(FAST_FLAGS) src/coder/decoder.cpp src/coder/encoder.cpp \
 		src/context-manager.cpp src/contexts/bit-context.cpp \
@@ -145,7 +196,8 @@ fast:
 		src/contexts/sparse.cpp src/models/bracket.cpp \
 		src/models/byte-model.cpp src/models/direct-hash.cpp \
 		src/models/direct.cpp src/models/match.cpp src/models/fxcmv1.cpp \
-		$(POSTR1_SOURCE) src/models/ppmd.cpp src/states/nonstationary.cpp \
+		$(POSTR1_SOURCE) $(TOKEN_NGRAM_SOURCE) src/models/ppmd.cpp \
+		src/states/nonstationary.cpp \
 		src/states/run-map.cpp src/mixer/byte-mixer.cpp \
 		src/mixer/mixer-input.cpp src/mixer/mixer.cpp \
 		src/mixer/sigmoid.cpp src/mixer/sse.cpp -c src/predictor.cpp
@@ -163,26 +215,33 @@ residual96: src/models/residual-lstm96-head.cpp \
 	$(CC) $(FAST_FLAGS) -ffp-model=precise \
 		-c src/models/residual-lstm96-head.cpp
 
-cmix: fast slow cold head obias residual96 $(ALTXS_TARGET)
+cmix: fast slow cold head obias residual96 $(ALTXS_TARGET) \
+	$(TRANSFORMER_TARGET)
 	$(CC) $(LFLAGS) bit-context.o bracket-context.o bracket.o byte-mixer.o \
 		byte-model.o combined-context.o context-hash.o context-manager.o \
 		decoder.o dictionary.o direct-hash.o direct.o $(DONOR_OBJECT) \
 		$(DONOR_DISCOVERY_OBJECT) encoder.o indirect-hash.o interval-hash.o \
 		interval.o match.o mixer-input.o mixer.o nonstationary.o fxcmv1.o \
-		$(POSTR1_OBJECT) ppmd.o predictor.o preprocessor.o \
+		$(POSTR1_OBJECT) $(TOKEN_NGRAM_OBJECT) ppmd.o predictor.o preprocessor.o \
 		r1_reorder_transform.o scr2_transform.o virtual_replay_plan.o \
 		postr1_transform.o $(ALTXS_CPP_OBJECT) $(ALTXS_C_OBJECTS) \
 		run-map.o runner.o sigmoid.o sparse.o sse.o \
-		bitlstm32-head.o obias-prior.o residual-lstm96-head.o -s -o $(OUT)
+		bitlstm32-head.o obias-prior.o residual-lstm96-head.o \
+		$(TRANSFORMER_OBJECTS) -s -o $(OUT)
 	rm -f *.o
 
-.PHONY: selective record altxs_record clean
+.PHONY: selective record altxs_record target93 transformer_objects clean
 record: cmix
 
 # Reversible altxs M3+M5 outer transform on top of the cmix-obias predictor.
 # This is an experimental archive family and does not silently replace record.
 altxs_record:
 	$(MAKE) cmix ALTXS=1 OUT=$(OUT)
+
+# Canonical CPU-only 93 MB research path. M3+M5 and the transformer are one
+# archive family; the model is packaged into both S1 and S2 and counted.
+target93:
+	$(MAKE) cmix ALTXS=1 TRANSFORMER=1 TOKEN_NGRAM=$(TOKEN_NGRAM) OUT=$(OUT)
 
 # Compile discovery support without applying any action globally. Donor,
 # mini-cmix, SCR2/virtual-replay and post-R1 experts remain plan-gated.

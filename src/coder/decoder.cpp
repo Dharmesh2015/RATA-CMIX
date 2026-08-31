@@ -39,6 +39,13 @@ Decoder::Decoder(std::ifstream* is, Predictor* p) : is_(is), x1_(0),
 #if defined(KH_BITLSTM32_EMBED) && defined(KH_BITLSTM32_ARCHIVE)
 #error "KH_BITLSTM32_EMBED and KH_BITLSTM32_ARCHIVE are mutually exclusive"
 #endif
+#ifdef KH_BITLSTM32_REQUIRED
+  if (!bitlstm_) {
+    std::fprintf(stderr,
+        "FX4 target build requires the packaged BitLSTM32 model\n");
+    std::exit(2);
+  }
+#endif
 #endif
 #if FX4_RESIDUAL_LSTM96
   if (const char* blob = std::getenv("KH_RESIDUAL_LSTM96")) {
