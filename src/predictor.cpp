@@ -145,6 +145,9 @@ Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled)
 #if FX4_TOKEN_NGRAM_BIAS
   token_ngram_bias_.emplace();
 #endif
+#if FX4_DELTA_MEMORY_BIAS
+  delta_memory_.emplace();
+#endif
 #if FX4_MINI_CMIX
   mini_shared_map_.assign(256u * 100000u, 0);
   AddMiniCmix();
@@ -927,6 +930,12 @@ float Predictor::Predict() {
   p = token_ngram_bias_->Predict(p, sigmoid_.Logit(std::max(1.0e-5f,
       std::min(1.0f - 1.0e-5f, p))));
 #endif
+#if FX4_DELTA_MEMORY_BIAS
+  p = delta_memory_->Predict(p, sigmoid_.Logit(std::max(1.0e-5f,
+      std::min(1.0f - 1.0e-5f, p))),
+      layers_[0].Inputs()[ppmd_model_index],
+      layers_[0].Inputs()[byte_mixer_index], aggregate_fxcm_logit);
+#endif
 #if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
   donor_branch_ppmd_probability_ =
       Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]);
@@ -973,6 +982,9 @@ float Predictor::Predict() {
 void Predictor::Perceive(int bit) {
 #if FX4_TOKEN_NGRAM_BIAS
   token_ngram_bias_->Perceive(bit);
+#endif
+#if FX4_DELTA_MEMORY_BIAS
+  delta_memory_->Perceive(bit);
 #endif
 #if FX4_SELECTIVE_POSTR1
   if (postr1_experts_ && postr1_prediction_used_)

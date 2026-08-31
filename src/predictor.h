@@ -20,6 +20,9 @@
 #if FX4_TOKEN_NGRAM_BIAS
 #include "models/token-ngram-bias.h"
 #endif
+#if FX4_DELTA_MEMORY_BIAS
+#include "models/delta-memory.h"
+#endif
 #if FX4_TRANSFORMER6M
 #include "third_party/fx2_transformer/opt/model_opt.h"
 #endif
@@ -165,6 +168,9 @@ class Predictor {
   std::optional<ByteMixer> byte_mixer_;
 #if FX4_TOKEN_NGRAM_BIAS
   std::optional<TokenNgramBias> token_ngram_bias_;
+#endif
+#if FX4_DELTA_MEMORY_BIAS
+  std::optional<DeltaMemory8> delta_memory_;
 #endif
 #if FX4_TRANSFORMER6M
   std::unique_ptr<fx2::opt::TransformerOpt> transformer6m_;

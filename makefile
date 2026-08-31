@@ -26,6 +26,7 @@ RESIDUAL_LSTM96 ?= 0
 ALTXS ?= 0
 TRANSFORMER ?= 0
 TOKEN_NGRAM ?= 0
+DELTA_MEMORY ?= 0
 
 DONOR_SOURCE :=
 DONOR_HEADER :=
@@ -44,6 +45,8 @@ TRANSFORMER_OBJECTS :=
 TRANSFORMER_TARGET :=
 TOKEN_NGRAM_SOURCE :=
 TOKEN_NGRAM_OBJECT :=
+DELTA_MEMORY_SOURCE :=
+DELTA_MEMORY_OBJECT :=
 
 ifeq ($(DONOR_DISCOVERY),1)
 DONOR := 1
@@ -98,6 +101,11 @@ ifeq ($(TOKEN_NGRAM),1)
 override CFLAGS_DEFINES += -DFX4_TOKEN_NGRAM_BIAS=1
 TOKEN_NGRAM_SOURCE := src/models/token-ngram-bias.cpp
 TOKEN_NGRAM_OBJECT := token-ngram-bias.o
+endif
+ifeq ($(DELTA_MEMORY),1)
+override CFLAGS_DEFINES += -DFX4_DELTA_MEMORY_BIAS=1
+DELTA_MEMORY_SOURCE := src/models/delta-memory.cpp
+DELTA_MEMORY_OBJECT := delta-memory.o
 endif
 ifeq ($(DONOR),1)
 override CFLAGS_DEFINES += -DFX4_DONOR_PLAN=1
@@ -196,7 +204,8 @@ fast:
 		src/contexts/sparse.cpp src/models/bracket.cpp \
 		src/models/byte-model.cpp src/models/direct-hash.cpp \
 		src/models/direct.cpp src/models/match.cpp src/models/fxcmv1.cpp \
-		$(POSTR1_SOURCE) $(TOKEN_NGRAM_SOURCE) src/models/ppmd.cpp \
+		$(POSTR1_SOURCE) $(TOKEN_NGRAM_SOURCE) $(DELTA_MEMORY_SOURCE) \
+		src/models/ppmd.cpp \
 		src/states/nonstationary.cpp \
 		src/states/run-map.cpp src/mixer/byte-mixer.cpp \
 		src/mixer/mixer-input.cpp src/mixer/mixer.cpp \
@@ -222,7 +231,8 @@ cmix: fast slow cold head obias residual96 $(ALTXS_TARGET) \
 		decoder.o dictionary.o direct-hash.o direct.o $(DONOR_OBJECT) \
 		$(DONOR_DISCOVERY_OBJECT) encoder.o indirect-hash.o interval-hash.o \
 		interval.o match.o mixer-input.o mixer.o nonstationary.o fxcmv1.o \
-		$(POSTR1_OBJECT) $(TOKEN_NGRAM_OBJECT) ppmd.o predictor.o preprocessor.o \
+		$(POSTR1_OBJECT) $(TOKEN_NGRAM_OBJECT) $(DELTA_MEMORY_OBJECT) \
+		ppmd.o predictor.o preprocessor.o \
 		r1_reorder_transform.o scr2_transform.o virtual_replay_plan.o \
 		postr1_transform.o $(ALTXS_CPP_OBJECT) $(ALTXS_C_OBJECTS) \
 		run-map.o runner.o sigmoid.o sparse.o sse.o \
