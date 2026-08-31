@@ -1,0 +1,19 @@
+input_offset=441450496
+input_bytes=1048576
+archive_bytes=99178
+bits_per_byte=0.756668091
+archive_gate=PASS
+expected_max_bytes=99180
+input_sha256=617d34c4987f60cad755c87f34d160dd83f5b490f466e00c9a0a01399213afb4
+output_sha256=617d34c4987f60cad755c87f34d160dd83f5b490f466e00c9a0a01399213afb4
+roundtrip=exact
+compress_	User time (seconds): 330.84
+compress_	System time (seconds): 22.60
+compress_	Elapsed (wall clock) time (h:mm:ss or m:ss): 5:53.61
+compress_	Maximum resident set size (kbytes): 8308924
+compress_	Major (requiring I/O) page faults: 4114
+decompress_	User time (seconds): 366.84
+decompress_	System time (seconds): 33.86
+decompress_	Elapsed (wall clock) time (h:mm:ss or m:ss): 6:41.69
+decompress_	Maximum resident set size (kbytes): 8308228
+decompress_	Major (requiring I/O) page faults: 4113

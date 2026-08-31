@@ -1,0 +1,57 @@
+[1/4] Building frozen FX4 Hutter core...
+rm -f decoder.o encoder.o context-manager.o bit-context.o bracket-context.o combined-context.o context-hash.o indirect-hash.o interval-hash.o interval.o sparse.o bracket.o byte-model.o direct-hash.o direct.o match.o fxcmv1.o ppmd.o nonstationary.o run-map.o byte-mixer.o mixer-input.o mixer.o sigmoid.o sse.o predictor.o preprocessor.o dictionary.o r1_reorder_transform.o runner.o cmix cmix_orig cmix
+clang++-17 -DSEED=923 -DUPDATE_LIMIT=3000 -DNDEBUG -DFX4_STDERR_PROGRESS=0 -DFX4_PROGRESS_LOG=0 -DFX4_LSTM_MID_BRIDGE=2 -DFX4_SPECIALIST_CORRECTOR=1 -m64 -Wall -std=c++17 -ffp-model=fast -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-threadsafe-statics -Wno-unknown-escape-sequence -Wno-unused-variable -Wno-unneeded-internal-declaration -Wno-unused-but-set-variable -Wno-format -march=native -mtune=native -fdata-sections -ffunction-sections -O3 src/coder/decoder.cpp src/coder/encoder.cpp src/context-manager.cpp src/contexts/bit-context.cpp src/contexts/bracket-context.cpp src/contexts/combined-context.cpp src/contexts/context-hash.cpp src/contexts/indirect-hash.cpp src/contexts/interval-hash.cpp src/contexts/interval.cpp src/contexts/sparse.cpp src/models/bracket.cpp src/models/byte-model.cpp src/models/direct-hash.cpp src/models/direct.cpp src/models/match.cpp src/models/fxcmv1.cpp src/models/ppmd.cpp src/states/nonstationary.cpp src/states/run-map.cpp src/mixer/byte-mixer.cpp src/mixer/mixer-input.cpp src/mixer/mixer.cpp src/mixer/sigmoid.cpp src/mixer/sse.cpp src/predictor.cpp -c
+clang++-17 -DSEED=923 -DUPDATE_LIMIT=3000 -DNDEBUG -DFX4_STDERR_PROGRESS=0 -DFX4_PROGRESS_LOG=0 -DFX4_LSTM_MID_BRIDGE=2 -DFX4_SPECIALIST_CORRECTOR=1 -m64 -Wall -std=c++17 -ffp-model=fast -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-threadsafe-statics -Wno-unknown-escape-sequence -Wno-unused-variable -Wno-unneeded-internal-declaration -Wno-unused-but-set-variable -Wno-format -march=native -mtune=native -fdata-sections -ffunction-sections -Os src/preprocess/preprocessor.cpp src/preprocess/dictionary.cpp -c
+clang++-17 -DSEED=923 -DUPDATE_LIMIT=3000 -DNDEBUG -DFX4_STDERR_PROGRESS=0 -DFX4_PROGRESS_LOG=0 -DFX4_LSTM_MID_BRIDGE=2 -DFX4_SPECIALIST_CORRECTOR=1 -m64 -Wall -std=c++17 -ffp-model=fast -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-threadsafe-statics -Wno-unknown-escape-sequence -Wno-unused-variable -Wno-unneeded-internal-declaration -Wno-unused-but-set-variable -Wno-format -march=native -mtune=native -fdata-sections -ffunction-sections -Oz src/r1_reorder_transform.cpp src/runner.cpp -c
+clang++-17 -m64 -Wl,--gc-sections -std=c++17 -s decoder.o encoder.o context-manager.o bit-context.o bracket-context.o combined-context.o context-hash.o indirect-hash.o interval-hash.o interval.o sparse.o bracket.o byte-model.o direct-hash.o direct.o match.o fxcmv1.o ppmd.o nonstationary.o run-map.o byte-mixer.o mixer-input.o mixer.o sigmoid.o sse.o predictor.o preprocessor.o dictionary.o r1_reorder_transform.o runner.o -o cmix
+rm -f decoder.o encoder.o context-manager.o bit-context.o bracket-context.o combined-context.o context-hash.o indirect-hash.o interval-hash.o interval.o sparse.o bracket.o byte-model.o direct-hash.o direct.o match.o fxcmv1.o ppmd.o nonstationary.o run-map.o byte-mixer.o mixer-input.o mixer.o sigmoid.o sse.o predictor.o preprocessor.o dictionary.o r1_reorder_transform.o runner.o
+                       Ultimate Packer for eXecutables
+                          Copyright (C) 1996 - 2026
+UPX 5.1.1       Markus Oberhumer, Laszlo Molnar & John Reiser    Mar 5th 2026
+
+        File size         Ratio      Format      Name
+   --------------------   ------   -----------   -----------
+    349576 ->    141204   40.39%   linux/amd64   cmix
+
+Packed 1 file.
+                       Ultimate Packer for eXecutables
+                          Copyright (C) 1996 - 2026
+UPX 5.1.1       Markus Oberhumer, Laszlo Molnar & John Reiser    Mar 5th 2026
+
+testing cmix [OK]
+
+Tested 1 file.
+[2/4] Compressing embedded English dictionary...
+
+411996 bytes -> 100583 bytes in 121.29 s.
+[3/4] Compressing embedded article order...
+
+1094862 bytes -> 199225 bytes in 255.12 s.
+[4/4] Verifying embedded assets and assembling S1...
+100583 bytes -> 411996 bytes in 116.43 s.
+199225 bytes -> 1094862 bytes in 247.11 s.
+
+architecture=fx4-cmix-hutter-s1
+seed=923
+update_limit=3000
+ppmd_order=25
+ppmd_memory_mb=14000
+lstm_cells=170
+lstm_horizon=128
+lstm_mid_bridge=2
+specialist_corrector=1
+donor_plan=0
+scr2=0
+mini_cmix=0
+postr1_portfolio=0
+packed_core_bytes=141204
+embedded_dictionary_bytes=100583
+embedded_article_order_bytes=199225
+s1_bytes=441024
+packed_core_sha256=c96a1dad2af3056e36b43330ad1401203e547828a6d1278232894346ce21f4d1
+s1_sha256=48ee64831af7ee1257715123ebd328c46a01361a05904d3d7a2ea5a3975e7af4
+dictionary_sha256=4c8568cca9343b9a6212477880f56f8efd162f8784224a25edd043097d36215a
+article_order_sha256=eecd462c29319bab185b48229c4d09ab52f16ca9c582e8e32eff9a7c2a7de39e
+compiler=Ubuntu clang version 17.0.6 (23ubuntu7)
+upx=upx 5.1.1
+S1 ready: /root/fx4-s1-build/run/cmix
