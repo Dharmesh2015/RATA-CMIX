@@ -411,7 +411,7 @@ void Predictor::Transformer6mByteUpdate() {
   for (float& probability : transformer6m_probabilities_) {
     if (!(probability >= 1.0e-6f)) probability = 1.0e-6f;
   }
-  byte_mixer_->SetProbs(transformer6m_probabilities_.data());
+  transformer6m_mixer_->SetProbs(transformer6m_probabilities_.data());
 }
 #endif
 
@@ -427,6 +427,9 @@ unsigned long long Predictor::GetNumModels() {
   num += indirect_r_models_.size();
   num += byte_model_->NumOutputs();
   num += byte_mixer_->NumOutputs();
+#if FX4_TRANSFORMER6M
+  if (transformer6m_) num += 1;
+#endif
   return num;
 }
 
@@ -640,13 +643,27 @@ void Predictor::AddMixers() {
   for (unsigned int i = 0; i < vocab_.size(); ++i) {
     if (vocab_[i]) ++vocab_size;
   }
+  // The validated online LSTM always mixes every other model's output here,
+  // whether or not the transformer is active (see FX4_TRANSFORMER6M below):
+  // the record config (LSTM + obias_prior + full PPMd feature injection) is
+  // never removed, only ever added to.
   byte_mixer_.emplace(1, manager_.bit_context_, vocab_, vocab_size,
-#if FX4_TRANSFORMER6M
-      transformer6m_ ? nullptr :
-#endif
       new Lstm(vocab_size, vocab_size, FX4_LSTM_CELLS,
           FX4_LSTM_LAYERS, FX4_LSTM_HORIZON, FX4_LSTM_LEARNING_RATE,
           FX4_LSTM_GRADIENT_CLIP));
+#if FX4_TRANSFORMER6M
+  if (transformer6m_) {
+    // Additional ensemble member, not a replacement: this second ByteMixer
+    // (null Lstm) only reuses ByteModel's byte-to-bit range conversion to
+    // turn the transformer's frozen, possibly stream-mismatched
+    // distribution into one more scalar input for the outer adaptive
+    // mixer (see Predict()/GetNumModels()), which learns its own weight
+    // for it -- a bad prediction gets down-weighted instead of silently
+    // replacing a proven signal.
+    transformer6m_mixer_.emplace(1, manager_.bit_context_, vocab_,
+        vocab_size, nullptr);
+  }
+#endif
 
 #ifdef KH_OBIAS
   const char* obias_path = std::getenv("KH_OBIAS");
@@ -727,6 +744,9 @@ void Predictor::AddMixers() {
 }
 int lstmpr=0, lstmex=0;
 float byte_mixer_output=0.0f;
+#if FX4_TRANSFORMER6M
+float transformer6m_mixer_output=0.0f;
+#endif
 
 float Predictor::Predict() {
   unsigned int input_index = 0;
@@ -814,6 +834,16 @@ float Predictor::Predict() {
   }
   const unsigned int ppmd_model_index = input_index + gathered_n;
   gathered[gathered_n++] = byte_model_->Predict()[0];
+
+#if FX4_TRANSFORMER6M
+  // Inserted before byte_mixer_output below so byte_mixer_index (computed
+  // as input_index - 1 further down) still resolves to byte_mixer_output,
+  // not to this entry -- downstream specialist/tier-2 mixing code depends
+  // on that exact index referring to the validated LSTM's own output.
+  if (transformer6m_) {
+    gathered[gathered_n++] = transformer6m_mixer_output;
+  }
+#endif
 
   float byte_mixer_override = -1;
 
@@ -972,6 +1002,9 @@ void Predictor::Perceive(int bit) {
   byte_model_->Perceive(bit);
 
   byte_mixer_->Perceive(bit);
+#if FX4_TRANSFORMER6M
+  if (transformer6m_) transformer6m_mixer_->Perceive(bit);
+#endif
 #if FX4_SHADOW_LSTM200
   shadow_lstm200_->Perceive(bit);
 #endif
@@ -1018,8 +1051,10 @@ void Predictor::Perceive(int bit) {
 #endif
 #if FX4_TRANSFORMER6M
     if (transformer6m_) {
+      // Additional, not exclusive: the LSTM/obias path below still runs
+      // unconditionally, so this only ever adds a signal, never removes one.
       Transformer6mByteUpdate();
-    } else {
+    }
 #endif
 #ifdef KH_OBIAS
     if (obias_active_) {
@@ -1041,9 +1076,6 @@ void Predictor::Perceive(int bit) {
 #endif
 
     byte_mixer_->ByteUpdate();
-#if FX4_TRANSFORMER6M
-    }
-#endif
 #if FX4_SHADOW_LSTM200
     shadow_lstm200_->ByteUpdate();
 #endif
@@ -1057,6 +1089,11 @@ void Predictor::Perceive(int bit) {
 #endif
   }
   byte_mixer_output = byte_mixer_->Predict()[0];
+#if FX4_TRANSFORMER6M
+  if (transformer6m_) {
+    transformer6m_mixer_output = transformer6m_mixer_->Predict()[0];
+  }
+#endif
 #if FX4_SHADOW_LSTM200
   shadow_lstm200_output_ = shadow_lstm200_->Predict()[0];
 #endif

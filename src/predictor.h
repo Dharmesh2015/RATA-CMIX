@@ -174,6 +174,11 @@ class Predictor {
   std::vector<float> transformer6m_probabilities_;
   std::array<unsigned char, 15> transformer6m_separator_window_{};
   unsigned long long transformer6m_article_tokens_ = 0;
+  // Independent byte-to-bit range conversion for the transformer's
+  // distribution (null Lstm; reuses ByteModel's Predict()/Perceive()). Fed
+  // to the outer adaptive mixer as one more input alongside byte_mixer_,
+  // not as a replacement for it -- see predictor.cpp Perceive()/Predict().
+  std::optional<ByteMixer> transformer6m_mixer_;
 #endif
 #ifdef KH_OBIAS
   std::unique_ptr<KhObiasPrior> obias_;
