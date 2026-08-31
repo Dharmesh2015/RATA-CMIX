@@ -87,6 +87,12 @@ class Predictor {
   float trace_ppmd_probability_ = 0.5f;
   float trace_lstm_probability_ = 0.5f;
   float trace_fxcm_probability_ = 0.5f;
+#if FX4_TRANSFORMER6M
+  // -1 marks "no transformer active for this bit" (small S1 helper streams
+  // keep the online LSTM only, see InitializeTransformer6m()); a real
+  // reading is always in [0, 1].
+  float trace_transformer_probability_ = -1.0f;
+#endif
   std::uint8_t trace_bit_position_ = 0;
   std::uint8_t trace_ppmd_order_ = 0;
   std::uint8_t trace_escape_depth_ = 0;

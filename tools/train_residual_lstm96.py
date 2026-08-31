@@ -33,11 +33,16 @@ except ImportError as error:  # pragma: no cover - environment diagnostic
 
 
 HEADER = struct.Struct("<4sHHQQQ")
-RECORD = np.dtype([
+# v1: 10 bytes, no transformer6m field (record_size == RECORD_V1.itemsize).
+# v2: adds a trailing transformer_logit byte (0xff = no active transformer
+# for that bit -- small S1 helper streams keep the online LSTM only); written
+# whenever the tree that produced the trace was built with FX4_TRANSFORMER6M.
+RECORD_V1 = np.dtype([
     ("base_p", "<u2"), ("final_p", "<u2"),
     ("ppmd", "u1"), ("lstm", "u1"), ("fxcm", "u1"),
     ("flags", "u1"), ("ppm_meta", "u1"), ("match", "u1"),
 ], align=False)
+RECORD_V2 = np.dtype(RECORD_V1.descr + [("transformer", "u1")], align=False)
 LN2 = math.log(2.0)
 
 
@@ -255,15 +260,18 @@ def main() -> int:
         raise SystemExit("truncated FXOT header")
     magic, version, record_size, stream_size, limit_bytes, declared = \
         HEADER.unpack(raw_header)
-    if magic != b"FXOT" or version != 1 or record_size != RECORD.itemsize:
+    if magic != b"FXOT" or version not in (1, 2):
         raise SystemExit("unsupported FXOT trace")
-    record_count = (args.trace.stat().st_size - HEADER.size) // RECORD.itemsize
+    record_dtype = RECORD_V2 if version == 2 else RECORD_V1
+    if record_size != record_dtype.itemsize:
+        raise SystemExit("unsupported FXOT trace")
+    record_count = (args.trace.stat().st_size - HEADER.size) // record_dtype.itemsize
     if declared and declared != record_count:
         raise SystemExit("FXOT declared record count does not match the file")
     byte_count = record_count // 8
     if byte_count < args.reset_bytes * 20:
         raise SystemExit("trace is too short for chronological LSTM-96 training")
-    data = np.memmap(args.trace, mode="r", dtype=RECORD,
+    data = np.memmap(args.trace, mode="r", dtype=record_dtype,
                      offset=HEADER.size, shape=(record_count,))
     train_end = byte_count * 70 // 100
     validation_begin = byte_count * 85 // 100

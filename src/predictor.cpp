@@ -843,7 +843,9 @@ float Predictor::Predict() {
   // as input_index - 1 further down) still resolves to byte_mixer_output,
   // not to this entry -- downstream specialist/tier-2 mixing code depends
   // on that exact index referring to the validated LSTM's own output.
+  unsigned int transformer6m_model_index = 0;
   if (transformer6m_) {
+    transformer6m_model_index = input_index + gathered_n;
     gathered[gathered_n++] = transformer6m_mixer_output;
   }
 #endif
@@ -869,6 +871,10 @@ float Predictor::Predict() {
   trace_ppmd_probability_ = ppmd_probability;
   trace_lstm_probability_ = lstm_probability;
   trace_fxcm_probability_ = bounded_fxcm_probability;
+#if FX4_TRANSFORMER6M
+  trace_transformer_probability_ = transformer6m_ ? Sigmoid::Logistic(
+      layers_[0].Inputs()[transformer6m_model_index]) : -1.0f;
+#endif
   trace_bit_position_ = static_cast<std::uint8_t>(manager_.bpos & 7u);
   trace_ppmd_order_ = static_cast<std::uint8_t>(
       std::min<unsigned int>(byte_model_->EffectiveOrder(), 31u));

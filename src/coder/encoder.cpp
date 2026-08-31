@@ -40,10 +40,25 @@ struct Fx4OracleRecord {
   std::uint8_t flags;
   std::uint8_t ppm_meta;
   std::uint8_t match_length;
+#if FX4_TRANSFORMER6M
+  // v2 field: quantized transformer6m probability, 0xff when this bit's
+  // stream had no active transformer (small S1 helper streams). Only
+  // present when this tree was built with FX4_TRANSFORMER6M -- readers
+  // must check the trace header's version/record_size, never assume 10
+  // vs. 11 bytes from the build flags alone.
+  std::uint8_t transformer_logit;
+#endif
 };
 #pragma pack(pop)
+#if FX4_TRANSFORMER6M
+static_assert(sizeof(Fx4OracleRecord) == 11,
+    "FX4 oracle record (v2, transformer6m build) must remain 11 bytes");
+constexpr std::uint16_t kFx4OracleTraceVersion = 2;
+#else
 static_assert(sizeof(Fx4OracleRecord) == 10,
-    "FX4 oracle record must remain 10 bytes");
+    "FX4 oracle record (v1) must remain 10 bytes");
+constexpr std::uint16_t kFx4OracleTraceVersion = 1;
+#endif
 
 std::uint8_t QuantizeLogit(float p) {
   p = std::max(0.00033535f, std::min(0.99966465f, p));
@@ -298,7 +313,7 @@ bool Encoder::StartOracleTrace(std::uint64_t stream_size) {
   oracle_trace_.open(path, std::ios::binary | std::ios::trunc);
   if (!oracle_trace_) return false;
   oracle_trace_.write("FXOT", 4);
-  WriteU16(&oracle_trace_, 1);
+  WriteU16(&oracle_trace_, kFx4OracleTraceVersion);
   WriteU16(&oracle_trace_, sizeof(Fx4OracleRecord));
   WriteU64(&oracle_trace_, stream_size);
   WriteU64(&oracle_trace_, limit_bytes);
@@ -323,6 +338,11 @@ void Encoder::WriteOracleRecord(int bit, unsigned int base_p,
   record.ppm_meta = static_cast<std::uint8_t>(
       (p_->trace_ppmd_order_ << 3) | (p_->trace_escape_depth_ & 7u));
   record.match_length = p_->trace_match_length_;
+#if FX4_TRANSFORMER6M
+  record.transformer_logit = p_->trace_transformer_probability_ >= 0.0f
+      ? QuantizeLogit(p_->trace_transformer_probability_)
+      : 0xffu;
+#endif
   oracle_trace_.write(reinterpret_cast<const char*>(&record), sizeof(record));
   ++oracle_record_count_;
 }
