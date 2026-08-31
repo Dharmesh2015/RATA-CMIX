@@ -1579,18 +1579,27 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
 #ifdef KH_BITLSTM32_ARCHIVE
     {
       const char* head_path = getenv("KH_BITLSTM32");
+      // KH_BITLSTM32_ARCHIVE means the record config requires this head in
+      // every archive9; an unset/unreadable env var must not silently ship
+      // a 0-byte blob (that decodes as "head disabled" with no diagnostic).
+      if (!head_path || !head_path[0]) {
+        fprintf(stderr, "KH_BITLSTM32 is required to build archive9\n");
+        return Help();
+      }
       std::ofstream head_out(".head_blob4archive",
           std::ios::binary | std::ios::trunc);
       if (!head_out) return Help();
-      if (head_path && head_path[0]) {
-        std::ifstream head_in(head_path, std::ios::binary);
-        if (!head_in) return Help();
-        head_out << head_in.rdbuf();
-        if (!head_out) return Help();
-      }
+      std::ifstream head_in(head_path, std::ios::binary);
+      if (!head_in) return Help();
+      head_out << head_in.rdbuf();
+      if (!head_out) return Help();
       head_out.close();
       header.head_blob_size =
           static_cast<int>(getFileSize(".head_blob4archive"));
+      if (header.head_blob_size <= 0) {
+        fprintf(stderr, "KH_BITLSTM32 blob at '%s' is empty\n", head_path);
+        return Help();
+      }
       // This field describes S1 only; the copy in archive9 is head_blob_size.
       header.s1_head_blob_size = 0;
     }
