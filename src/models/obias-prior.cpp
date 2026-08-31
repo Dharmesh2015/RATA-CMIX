@@ -277,6 +277,36 @@ struct KhObiasPrior::Impl {
 
 __attribute__((noinline)) KhObiasPrior::KhObiasPrior(const char* blob_path) {
   impl_ = new Impl();
+#ifdef KH_OBIAS_SCHED_GATE
+  // Compiled scheduled gate: gate(t) = a + b*exp(-t/tau), t = bytes
+  // completed / kCorpusBytes. Degenerate case of KH_OBIAS_CONST_GATE
+  // (b=0), reusing the exact `sched` runtime path already exercised by
+  // blob-loaded OBIASSC schedules -- no new arithmetic, no archive bytes,
+  // same one-expf()-per-byte cost as the constant gate. Lets the PPMd-log
+  // correction's strength vary over the corpus instead of staying fixed,
+  // which the constant-gate dose-response sweep (g in {0.10..0.888}) never
+  // tested. KH_OBIAS_SCHED_A/_B/_LOG_TAU are compile-time floats; if only
+  // _A is defined this is bit-identical to KH_OBIAS_CONST_GATE=_A.
+  if (blob_path == nullptr) {
+    impl_->sched = true;
+    impl_->sched_a = (float)(KH_OBIAS_SCHED_A);
+#ifdef KH_OBIAS_SCHED_B
+    impl_->sched_b = (float)(KH_OBIAS_SCHED_B);
+#else
+    impl_->sched_b = 0.0f;
+#endif
+#ifdef KH_OBIAS_SCHED_LOG_TAU
+    impl_->sched_tau = expf((float)(KH_OBIAS_SCHED_LOG_TAU));
+#else
+    impl_->sched_tau = 1.0f;
+#endif
+    ok_ = true;
+    std::fprintf(stderr,
+                 "kh-obias: compiled scheduled gate a=%.6f b=%.6f tau=%.8f\n",
+                 impl_->sched_a, impl_->sched_b, impl_->sched_tau);
+    return;
+  }
+#endif
 #ifdef KH_OBIAS_CONST_GATE
   if (blob_path == nullptr) {
     impl_->sched = true;

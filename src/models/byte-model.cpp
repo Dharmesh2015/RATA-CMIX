@@ -1,5 +1,6 @@
 #include "byte-model.h"
 
+#include <iterator>
 #include <numeric>
 
 ByteModel::ByteModel(const std::vector<bool>& vocab) : ex(0),top_(255), mid_(0),
@@ -7,8 +8,17 @@ ByteModel::ByteModel(const std::vector<bool>& vocab) : ex(0),top_(255), mid_(0),
 
  std::valarray<float>& ByteModel::Predict()  {
   auto mid = bot_ + ((top_ - bot_) / 2);
-  float num = std::accumulate(&probs_[mid + 1], &probs_[top_ + 1], 0.0f);
-  float denom = std::accumulate(&probs_[bot_], &probs_[mid + 1], num);
+  // Use std::begin(probs_) + offset rather than &probs_[offset] for the
+  // half-open range endpoints: valarray::operator[] bounds-checks the index
+  // even when only forming a one-past-the-end pointer (top_ can be 255,
+  // making top_ + 1 == probs_.size()), which is undefined behavior for
+  // valarray unlike the common vector idiom -- it asserts under -O0 and
+  // segfaults under -O3. Pointer arithmetic on std::begin() computes the
+  // same address without indexing through operator[].
+  float num = std::accumulate(std::begin(probs_) + (mid + 1),
+                               std::begin(probs_) + (top_ + 1), 0.0f);
+  float denom = std::accumulate(std::begin(probs_) + bot_,
+                                 std::begin(probs_) + (mid + 1), num);
   ex = bot_;
     float max_prob_val = probs_[bot_];
     for (int i = bot_ + 1; i <= top_; i++) {
