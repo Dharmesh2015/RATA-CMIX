@@ -14,6 +14,25 @@ namespace {
 // Same cap as the old GetContextData(): at most this many distinct contexts
 // get their own weight slot; everything past that shares slot 0.
 constexpr uint32_t kContextLimit = 10000;
+
+#ifdef FX4_MIXER_WINIT
+// Ported from fx-deepmix (Halvor Yttredal): stock cmix zero-initializes
+// every fresh context row, so a brand-new context starts at p=0.5 ignoring
+// every input and must relearn the roster average from scratch. Seeding
+// each weight to FX4_MIXER_WINIT (e.g. ~1/inputs_size_) instead starts a
+// fresh context near the roster average. Online-adaptive only: this changes
+// the initial value a never-before-seen context's weights start at, not
+// whether/how they keep adapting; encoder and decoder compute the identical
+// seed since it's a compile-time constant, not a learned/offline value.
+constexpr float kMixerWinit = (float)(FX4_MIXER_WINIT);
+inline void InitSlot(float* slot, uint32_t n) {
+  for (uint32_t i = 0; i < n; ++i) slot[i] = kMixerWinit;
+}
+#else
+inline void InitSlot(float* slot, uint32_t n) {
+  std::memset(slot, 0, n * sizeof(float));
+}
+#endif
 }
 
 Mixer::Mixer(const MixerInput& layer, const unsigned long long& context,
@@ -29,7 +48,7 @@ Mixer::Mixer(const MixerInput& layer, const unsigned long long& context,
   AdviseHugePages(slab_.get(), slab_bytes);
   // Only allocated slots are ever memset/touched, so physical memory use
   // matches the old on-demand valarray allocations.
-  std::memset(slab_.get(), 0, slot_floats_ * sizeof(float));  // shared slot 0
+  InitSlot(slab_.get(), slot_floats_);  // shared slot 0
   slots_used_ = 1;
   weights_ = slab_.get();
   extra_weights_ = slab_.get() + inputs_size_;
@@ -43,7 +62,7 @@ float* Mixer::FindSlot() {
   const uint32_t offset = slots_used_ * slot_floats_;
   ++slots_used_;
   float* slot = slab_.get() + offset;
-  std::memset(slot, 0, slot_floats_ * sizeof(float));  // zero-init weights
+  InitSlot(slot, slot_floats_);  // zero-init (or FX4_MIXER_WINIT-seeded)
   context_map_.insert({static_cast<unsigned int>(context_), offset});
   return slot;
 }
