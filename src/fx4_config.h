@@ -36,6 +36,26 @@
 #define FX4_PPMD_REMAP_INTERVAL 65536ull
 #endif
 
+// altxs M3+M5 outer transform. M3 densifies PHDA9 before WRT and M5 replaces
+// payload_lex/R1 with a reversible structural-key + SimHash block order. The
+// complete inverse side data is sealed into the entropy-coded product.
+#ifndef FX4_ALTXS_M3_M5
+#define FX4_ALTXS_M3_M5 0
+#endif
+
+// Optional fx2-cmix 6M CPU transformer replacement for the online byte LSTM.
+// It is deliberately independent from M3/M5: the supplied public weights are
+// valid only for the stream/vocabulary on which they were trained.
+#ifndef FX4_TRANSFORMER6M
+#define FX4_TRANSFORMER6M 0
+#endif
+
+// Lightweight Nacrith-inspired causal side expert. It uses bounded byte/WRT
+// n-gram counts plus an online log-space bias; no LLM/GPU code is included.
+#ifndef FX4_TOKEN_NGRAM_BIAS
+#define FX4_TOKEN_NGRAM_BIAS 0
+#endif
+
 #ifndef FX4_LSTM_CELLS
 #define FX4_LSTM_CELLS 170
 #endif
@@ -143,6 +163,20 @@
 // for discovery or after measured aggregate savings pay its final S1 cost.
 #ifndef FX4_CAUSAL_CNN
 #define FX4_CAUSAL_CNN 0
+#endif
+
+// Diagnostic-only compact trace for CPU residual-model/oracle research.
+// It never changes a probability or the archive and is excluded from record
+// builds. Runtime output is enabled with FX4_ORACLE_TRACE=<path>.
+#ifndef FX4_RESIDUAL_ORACLE_TRACE
+#define FX4_RESIDUAL_ORACLE_TRACE 0
+#endif
+
+// Decoder-first byte-step residual LSTM-96 terminal correction. The model is
+// compile- and runtime-gated; without a valid blob the accepted probability
+// path remains byte-identical.
+#ifndef FX4_RESIDUAL_LSTM96
+#define FX4_RESIDUAL_LSTM96 0
 #endif
 
 

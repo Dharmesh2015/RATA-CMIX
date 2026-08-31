@@ -1,0 +1,5 @@
+recipient_region,recipient_offset,recipient_length,trial_id,mode,expert_mask,mini_model_mask,profile_id,stream_class,donor_count,donors,vr_min_length,vr_event_count,baseline_payload_bytes,candidate_payload_bytes,gross_gain_bytes,standalone_plan_bytes,net_gain_bytes,status
+0,0,1048219,1,topology_recurrence_g25,2097152,0,0,9,0,-,0,0,104950,105131,-181,17,-198,loss_after_side
+0,0,1048219,2,topology_recurrence_g50,2097152,0,64,9,0,-,0,0,104950,105714,-764,17,-781,loss_after_side
+0,0,1048219,3,topology_recurrence_g75,2097152,0,128,9,0,-,0,0,104950,106755,-1805,17,-1822,loss_after_side
+0,0,1048219,4,topology_recurrence_g100,2097152,0,192,9,0,-,0,0,104950,108328,-3378,17,-3395,loss_after_side

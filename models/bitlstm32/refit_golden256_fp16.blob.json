@@ -1,0 +1,9 @@
+{
+ "checkpoint": "/mnt/fast_data/hutter_pieces/head_blocks/weights/refit_golden256_lstm32_seq64_all_no_xml/epoch_000001_p100.pt",
+ "checkpoint_epoch": 0,
+ "checkpoint_next_visit": 4480,
+ "params": 11489,
+ "blob_bytes": 23002,
+ "blob_sha256": "35cd24fed87c3409994abf5573b5697be19ea03b5ece0928b69b1cdc4f3b6078",
+ "arm": "refit_golden256_lstm32_seq64_all_no_xml"
+}

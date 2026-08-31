@@ -1,32 +1,26 @@
 #include "mixer-input.h"
 
+namespace {
+float* AlignedFloatRow(size_t count, float fill) {
+  size_t bytes = (count * sizeof(float) + 63u) & ~size_t(63);
+  if (bytes == 0) bytes = 64;
+  float* row = static_cast<float*>(std::aligned_alloc(64, bytes));
+  for (size_t i = 0; i < count; ++i) row[i] = fill;
+  return row;
+}
+}  // namespace
+
 MixerInput::MixerInput(const Sigmoid& sigmoid, float eps) :
-    inputs_(0.5, 1), sigmoid_(sigmoid), min_(eps), max_(1 - eps),
+    logit_table_(sigmoid.Table()), logit_size_(sigmoid.TableSize()),
+    min_(eps), max_(1 - eps),
     stretched_min_(sigmoid.Logit(0)), stretched_max_(sigmoid.Logit(1)) {}
 
 void MixerInput::SetNumModels(int num_models) {
-  inputs_.resize(num_models, 0.5);
+  // Same 0.5 fill the old valarray resize used.
+  inputs_.reset(AlignedFloatRow(num_models, 0.5f));
+  num_models_ = num_models;
 }
 
-void MixerInput::SetInput(int index, float p) {
-  if (p < min_) p = min_;
-  else if (p > max_) p = max_;
-  inputs_[index] = sigmoid_.Logit(p);
+void MixerInput::SetExtraInputSize(size_t size) {
+  extra_inputs_.reset(AlignedFloatRow(size, 0.0f));
 }
-
-void MixerInput::SetStretchedInput(int index, float p) {
-  if (p > stretched_max_) p = stretched_max_;
-  else if (p < stretched_min_) p = stretched_min_;
-  inputs_[index] = p;
-}
-void MixerInput::SetZero(int index) {
-  
-  inputs_[index] = 0.0f;
-}
-
-void MixerInput::SetExtraInput(size_t index, float p) {
-  if (p > stretched_max_) p = stretched_max_;
-  else if (p < stretched_min_) p = stretched_min_;
-  extra_inputs_[index] = p;
-}
-

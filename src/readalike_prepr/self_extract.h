@@ -10,6 +10,36 @@ struct HeaderInfo {
   int dict_size;
   int new_article_order_size;
   int decomp_input_size;
+#ifdef KH_ISBN_FOLD
+  // Size (bytes) of the ISBN fold escape side-stream carried in archive9,
+  // between the cmix payload and the trailing HeaderInfo. Set at -e time.
+  int isbn_side_size;
+#endif
+#ifdef KH_BITLSTM32_ARCHIVE
+  // Size (bytes) of the raw bitlstm32 head weight blob carried in archive9
+  // (single-binary shape: the blob rides as an appended asset x1 instead of
+  // being embedded in the binary, which would ship twice -- in the packaged
+  // compressor AND in archive9's .decomp_bin). Set at -e time from the
+  // KH_BITLSTM32 env blob. Extracted to .head_blob_decomp at decode time;
+  // the Decoder uses that file as its default weight source when the env
+  // var is unset (bare judge decode).
+  int head_blob_size;
+#endif
+#ifdef KH_OBIAS_ARCHIVE
+  // Size (bytes) of the raw obias upstream weight blob carried in archive9
+  // (same single-binary shape as head_blob_size; rides immediately after the
+  // head blob, before the trailing HeaderInfo). Set at -e time from the
+  // KH_OBIAS env blob. Extracted to .obias_blob_decomp at decode time; the
+  // Predictor uses that file as its default weight source when the env var
+  // is unset (bare judge decode). 0 = obias-less encode.
+  int obias_blob_size;
+#endif
+#ifdef KH_RESIDUAL_LSTM96_ARCHIVE
+  // Compact row-quantized byte-step LSTM-96 model. It is extracted before
+  // the dictionary helper decode, because that decode uses the same terminal
+  // probability path as the main payload.
+  int residual_lstm96_blob_size;
+#endif
 };
 
 void write(const std::string& file_name, HeaderInfo& data) {
@@ -57,10 +87,21 @@ int selfextract_comp() {
   
   size_t decmpressor_binary_size = fsize - header.dict_size - header.new_article_order_size - sizeof(HeaderInfo);
 
-// produce actual decompressor binary 
+// produce actual decompressor binary
   fo = fopen(".decomp_bin", "wb");
   fwrite(p1, decmpressor_binary_size, 1, fo);
   fclose(fo);
+
+  // KH_DECODE_ONLY wire-up (exp_split_decoder / win4): if a purpose-built
+  // decode-only binary has been staged next to "cmix", embed that instead of
+  // the self-sliced full binary -- archive9 only ever runs its decode/self-
+  // extract path, so it does not need the encoder-only code. This is the only
+  // change that ships inside the full `cmix` (~+104 B, paid x1); the archive9
+  // copy of .decomp_bin shrinks by ~10+ KB (paid x1 there too, net win).
+  if (FILE* alt = fopen("decode_only_bin", "rb")) {
+    fclose(alt);
+    system("cp -f decode_only_bin .decomp_bin");
+  }
 
 // produce dictionary and decompress it
   fo = fopen(".dict.comp", "wb");
@@ -118,8 +159,57 @@ int selfextract_decomp() {
 
   //Remove dictionary if present
   remove(".dict");
-  
-  size_t decmpressor_binary_size = fsize - header.dict_size - header.decomp_input_size - sizeof(HeaderInfo);
+
+  size_t isbn_side_size = 0;
+#ifdef KH_ISBN_FOLD
+  isbn_side_size = (size_t)header.isbn_side_size;
+#endif
+  size_t head_blob_size = 0;
+#ifdef KH_BITLSTM32_ARCHIVE
+  head_blob_size = (size_t)header.head_blob_size;
+#endif
+  size_t obias_blob_size = 0;
+#ifdef KH_OBIAS_ARCHIVE
+  obias_blob_size = (size_t)header.obias_blob_size;
+#endif
+  size_t residual_lstm96_blob_size = 0;
+#ifdef KH_RESIDUAL_LSTM96_ARCHIVE
+  residual_lstm96_blob_size = (size_t)header.residual_lstm96_blob_size;
+#endif
+  size_t decmpressor_binary_size = fsize - header.dict_size - header.decomp_input_size - isbn_side_size - head_blob_size - obias_blob_size - residual_lstm96_blob_size - sizeof(HeaderInfo);
+
+#ifdef KH_BITLSTM32_ARCHIVE
+  // Head weight blob rides after the isbn side-stream, before the header.
+  // Extract it FIRST: the dictionary decode below runs `./archive9 -d` as a
+  // subprocess whose Decoder already needs the default weight source when
+  // the env var is unset (bare judge decode).
+  fo = fopen(".head_blob_decomp", "wb");
+  fwrite(p1 + decmpressor_binary_size + header.dict_size +
+             header.decomp_input_size + isbn_side_size,
+         head_blob_size, 1, fo);
+  fclose(fo);
+#endif
+
+#ifdef KH_RESIDUAL_LSTM96_ARCHIVE
+  fo = fopen(".residual_lstm96_blob_decomp", "wb");
+  fwrite(p1 + decmpressor_binary_size + header.dict_size +
+             header.decomp_input_size + isbn_side_size + head_blob_size +
+             obias_blob_size,
+         residual_lstm96_blob_size, 1, fo);
+  fclose(fo);
+#endif
+
+#ifdef KH_OBIAS_ARCHIVE
+  // Obias upstream blob rides after the head blob, before the header. Same
+  // early-extraction rationale: the dictionary decode below runs as a
+  // subprocess whose Predictor needs the default weight source when the env
+  // var is unset (bare judge decode).
+  fo = fopen(".obias_blob_decomp", "wb");
+  fwrite(p1 + decmpressor_binary_size + header.dict_size +
+             header.decomp_input_size + isbn_side_size + head_blob_size,
+         obias_blob_size, 1, fo);
+  fclose(fo);
+#endif
 
   fo = fopen(".dict.comp_decomp", "wb");
   fwrite(p1 + decmpressor_binary_size, header.dict_size, 1, fo);
@@ -135,6 +225,14 @@ int selfextract_decomp() {
   fo = fopen(".ready4cmix_decomp", "wb");
   fwrite(p1 + decmpressor_binary_size + header.dict_size, header.decomp_input_size, 1, fo);
   fclose(fo);
+
+#ifdef KH_ISBN_FOLD
+  // ISBN fold side-stream rides between the cmix payload and the header.
+  fo = fopen(".isbn_side_decomp", "wb");
+  fwrite(p1 + decmpressor_binary_size + header.dict_size + header.decomp_input_size,
+         isbn_side_size, 1, fo);
+  fclose(fo);
+#endif
 
   free(p1);
   malloc_trim(0);

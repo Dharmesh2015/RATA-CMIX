@@ -19,6 +19,7 @@
 
 #include "ppmd.h"
 #include "../fx4_config.h"
+#include "../utils/hugepage.h"
 #include <cstring>
 #include <sys/mman.h>
 #include <stdlib.h>
@@ -54,6 +55,15 @@ static constexpr char mmap_path[] = "ppm.temp";
 // Disk-backed PPM keeps the 14GB heap outside anonymous RAM, but pages still
 // count in RSS while resident.  Periodic MADV_DONTNEED calls drop that
 // residency without changing the file-backed model state.
+//
+// The interval is a *check* cadence, not a purge cadence: every
+// CMIX_PPMD_REMAP_INTERVAL input bytes we read the process RSS from
+// /proc/self/statm and purge only when it has reached the budget below.
+// Purge frequency has no effect on compression decisions (see
+// DropPpmHeapResidency), only on how much residency the OS may keep.
+#ifndef CMIX_PPMD_REMAP_INTERVAL
+#define CMIX_PPMD_REMAP_INTERVAL 5000ULL
+#endif
 static constexpr unsigned long long kMmapRemapIntervalBytes =
     FX4_PPMD_REMAP_INTERVAL;
 
@@ -69,6 +79,18 @@ static bool UsePrivateForkMapping() {
   return false;
 #endif
 }
+
+// Total-VmRSS budget (MB) that triggers a purge, overridable at runtime via
+// the CMIX_PPM_RSS_MB env var.  The default keeps the Hutter 10 GB path: the
+// full enwik8 run peaks at ~9.0 GB RSS under the old always-purge policy, so
+// a 9216 MB trigger bounds RSS at ~budget + one check-window of PPM touches
+// (~40 MB at enwik8 rates) and degenerates to the old every-interval purge
+// once the non-PPM footprint alone fills the budget.  CMIX_PPM_RSS_MB=0
+// reproduces the old unconditional cadence exactly; a large value (e.g.
+// 120000 on a 128 GB box) disables purging for the whole run.
+#ifndef CMIX_PPMD_RSS_BUDGET_MB
+#define CMIX_PPMD_RSS_BUDGET_MB 9216ULL
+#endif
 
 const int ORealMAX=256;
 
@@ -204,6 +226,10 @@ int StartSubAllocator( qword SASize ) {
     close(fd);
   } else {
     HeapStart = new byte[t];
+    // RAM-backed heap only: hint 2 MB pages before PPM first touches it.
+    // The disk-backed mmap path stays 4 KB (file-backed pages get no anon
+    // THP, and MADV_DONTNEED purging works on 4 KB granularity anyway).
+    AdviseHugePages(HeapStart, t);
   }
 
   if( HeapStart==NULL ) return 0;
@@ -811,7 +837,7 @@ PPM_CONTEXT* UpdateModel( PPM_CONTEXT* MinContext ) {
   byte Flag, FSymbol;
   uint ns1, ns, cf, sf, s0, FFreq;
   uint iSuccessor, iFSuccessor;
-  PPM_CONTEXT* pc;
+  PPM_CONTEXT* pc = 0;  // determinism fix: was uninitialized when MinContext has no suffix; saved_pc=pc then stored garbage read by RestoreModelRare (MaxContext!=pc). Root cause of the enwik7 decode nondeterminism landmine.
   STATE* p = NULL;
 
   FSymbol = FoundState->Symbol;
@@ -1493,6 +1519,41 @@ void ppmd_UpdateByte( uint c ) {
 unsigned long long counter_ = 0;
 unsigned long long last_mmap_remap_counter_ = 0;
 
+static unsigned long long PpmRssBudgetMb() {
+  static unsigned long long budget_mb = ~0ULL;
+  if (budget_mb == ~0ULL) {
+    budget_mb = CMIX_PPMD_RSS_BUDGET_MB;
+    const char* env = getenv("CMIX_PPM_RSS_MB");
+    if (env != NULL && *env != '\0') {
+      char* end = NULL;
+      unsigned long long v = strtoull(env, &end, 10);
+      if (end != env && *end == '\0') budget_mb = v;
+    }
+  }
+  return budget_mb;
+}
+
+static unsigned long long ReadSelfRssMb() {
+#if defined(__linux__)
+  // statm field 2 is VmRSS in pages; one short read per check interval
+  // (~20k reads across enwik8) is noise next to a single MADV_DONTNEED.
+  FILE* f = fopen("/proc/self/statm", "r");
+  if (f == NULL) return ~0ULL;  // unknown RSS -> treat as over budget
+  unsigned long long size_pages = 0, rss_pages = 0;
+  int fields = fscanf(f, "%llu %llu", &size_pages, &rss_pages);
+  fclose(f);
+  if (fields != 2) return ~0ULL;
+  static const unsigned long long page_bytes =
+      (unsigned long long)sysconf(_SC_PAGESIZE);
+  return (rss_pages * page_bytes) >> 20;
+#else
+  // No portable RSS source (e.g. Windows port would use
+  // GetProcessMemoryInfo): fall back to the old purge-every-interval
+  // behavior by always reporting over-budget.
+  return ~0ULL;
+#endif
+}
+
 static void DropPpmHeapResidency(ppmd_Model* ppmd_model) {
   // Keep the file mapping at a stable address because the model stores raw
   // pointers into it. MADV_DONTNEED evicts resident shared pages without
@@ -1647,10 +1708,13 @@ void PPMD::ByteUpdate() {
   ByteModel::ByteUpdate();
   probs_ /= probs_.sum();
   tree_context_ = 1;
-  if (mmap_to_disk && !mmap_private_fork_mode &&
-      counter_ - last_mmap_remap_counter_ >= kMmapRemapIntervalBytes) {
-    DropPpmHeapResidency(ppmd_model_.get());
-    last_mmap_remap_counter_ = counter_;
+  if (mmap_to_disk) {
+    if (counter_ - last_mmap_remap_counter_ >= kMmapRemapIntervalBytes) {
+      last_mmap_remap_counter_ = counter_;
+      if (ReadSelfRssMb() >= PpmRssBudgetMb()) {
+        DropPpmHeapResidency(ppmd_model_.get());
+      }
+    }
   }
 }
 

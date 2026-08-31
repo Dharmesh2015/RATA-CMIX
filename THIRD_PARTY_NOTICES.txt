@@ -1,0 +1,33 @@
+cmix-obias integration
+======================
+
+This tree includes source changes and the BitLSTM32 FP16 model asset from:
+
+  cmix-obias by dfreelan
+  https://huggingface.co/dfreelan/cmix-obias
+
+cmix-obias is derived from cmix-lex and is distributed under the GNU General
+Public License, version 3. The corresponding GPLv3 text is included as LICENSE.
+
+The imported material includes the coded-bit BitLSTM32 terminal correction
+head, output-bias PPMd prior, flat/aligned LSTM and mixer implementation,
+selected CPU/locality improvements, build parameters, documentation, and:
+
+  models/bitlstm32/refit_golden256_fp16.blob
+  SHA-256: 35cd24fed87c3409994abf5573b5697be19ea03b5ece0928b69b1cdc4f3b6078
+
+Existing FXCM v26 and other third-party attributions in their source headers
+remain unchanged.
+
+altxs preprocessing
+===================
+
+This tree includes the unmodified M3 densify, M5 payload_sim, and product-seal
+source files from:
+
+  altxs by the altxs authors
+  https://github.com/altvectra/altxs
+  pinned commit: 35dd741581662f716964f209f786840fe4587094
+
+Those files are distributed under the MIT License. The original license is
+preserved as src/third_party/altxs/LICENSE.

@@ -1,0 +1,106 @@
+{
+  "groups": 1,
+  "global_ranking": [
+    {
+      "expert": "causal_cnn",
+      "aggregate_gain_bytes": 0.0287752015865,
+      "positive_gain_bytes": 0.0287752015865,
+      "winning_groups": 1
+    },
+    {
+      "expert": "micro_diffusion",
+      "aggregate_gain_bytes": 0.0117464738432,
+      "positive_gain_bytes": 0.0117464738432,
+      "winning_groups": 1
+    },
+    {
+      "expert": "token_match",
+      "aggregate_gain_bytes": 0.00349584931973,
+      "positive_gain_bytes": 0.00349584931973,
+      "winning_groups": 1
+    },
+    {
+      "expert": "donor_profile",
+      "aggregate_gain_bytes": 0.0,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    },
+    {
+      "expert": "rare_residual",
+      "aggregate_gain_bytes": -0.000530923192855,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    },
+    {
+      "expert": "cts_skipcts",
+      "aggregate_gain_bytes": -7.11038103036,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    },
+    {
+      "expert": "residual_lstm",
+      "aggregate_gain_bytes": -19.0019842961,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    },
+    {
+      "expert": "url_structure",
+      "aggregate_gain_bytes": -21.5914348536,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    },
+    {
+      "expert": "ppmd_escape_order",
+      "aggregate_gain_bytes": -22.8320569477,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    },
+    {
+      "expert": "structural",
+      "aggregate_gain_bytes": -100.617325734,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    },
+    {
+      "expert": "word_xml_ppm",
+      "aggregate_gain_bytes": -118.892681336,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    },
+    {
+      "expert": "sparse_virtual_ppm",
+      "aggregate_gain_bytes": -120.498474402,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    },
+    {
+      "expert": "dmc",
+      "aggregate_gain_bytes": -134.792057122,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    },
+    {
+      "expert": "mini_cmix",
+      "aggregate_gain_bytes": -206.377841926,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    },
+    {
+      "expert": "topology_recurrence",
+      "aggregate_gain_bytes": -288.563802329,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    },
+    {
+      "expert": "shadow_lstm200",
+      "aggregate_gain_bytes": -498.854452797,
+      "positive_gain_bytes": 0.0,
+      "winning_groups": 0
+    }
+  ],
+  "global_candidate": null,
+  "global_predicted_net_bytes": -81.9712247984135,
+  "selective_spans": 0,
+  "selective_predicted_net_bytes": 0.0,
+  "accounting": "F4CP file bytes are charged before exact testing."
+}

@@ -1,0 +1,2 @@
+region,baseline_payload,candidate_payload,assignment_cost,span_cost,copy_cost,candidate_total,saving_bytes,improvement_percent,status
+0,104950,104950,0,0,0,104950,0,0.0000,REJECTED_SAVED

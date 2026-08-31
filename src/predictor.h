@@ -17,6 +17,9 @@
 #include "models/ppmd.h"
 #include "models/bracket.h"
 #include "models/fxcmv1.h"
+#ifdef KH_OBIAS
+#include "models/obias-prior.h"
+#endif
 #if FX4_SELECTIVE_POSTR1
 #include "models/postr1_experts.h"
 #endif
@@ -60,6 +63,26 @@ class Predictor {
   float PpmdEscapeRate() const;
 #if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
   void SetPostR1BranchSignals(PostR1Experts* target) const;
+#endif
+
+#if defined(KH_TRACE) || defined(KH_BITLSTM32) || \
+    FX4_RESIDUAL_ORACLE_TRACE || FX4_RESIDUAL_LSTM96
+  // Terminal-head features staged by Predict() and consumed immediately by
+  // Encoder::Encode/Decoder::Decode. Raw/known-bit paths never consume them.
+  const float* kh_stage1_in_ = nullptr;
+  int kh_stage1_n_ = 0;
+  float kh_m1raw_ = 0.0f;
+  int kh_override_ = 0;
+#endif
+#if FX4_RESIDUAL_ORACLE_TRACE || FX4_RESIDUAL_LSTM96
+  float trace_ppmd_probability_ = 0.5f;
+  float trace_lstm_probability_ = 0.5f;
+  float trace_fxcm_probability_ = 0.5f;
+  std::uint8_t trace_bit_position_ = 0;
+  std::uint8_t trace_ppmd_order_ = 0;
+  std::uint8_t trace_escape_depth_ = 0;
+  std::uint8_t trace_match_length_ = 0;
+  std::uint8_t trace_stream_class_ = 0;
 #endif
  private:
   unsigned long long GetNumModels();
@@ -130,6 +153,11 @@ class Predictor {
   float fxcm_neutral_input_ = 0.0f;
   std::optional<PPMD::PPMD> byte_model_;
   std::optional<ByteMixer> byte_mixer_;
+#ifdef KH_OBIAS
+  std::unique_ptr<KhObiasPrior> obias_;
+  bool obias_active_ = false;
+  bool obias_keep_aux_ = false;
+#endif
 #if FX4_SHADOW_LSTM200
   std::optional<ByteMixer> shadow_lstm200_;
   float shadow_lstm200_output_ = 0.5f;

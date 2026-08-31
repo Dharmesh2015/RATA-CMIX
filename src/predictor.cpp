@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <iostream>
 #include <cstdlib>
+#include <cstring>
 #include <algorithm>
 #include <cmath>
 Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled)
@@ -182,6 +183,7 @@ float Predictor::PostR1ResidualProbability() const {
   const unsigned int node = manager_.bit_context_ & 255u;
   return node == 0 ? 0.5f : postr1_residual_one_[node];
 }
+#endif
 
 float Predictor::PpmdByteProbability(std::uint8_t byte) const {
   return byte_model_->ByteProbability(byte);
@@ -198,7 +200,6 @@ unsigned int Predictor::PpmdEscapeDepth() const {
 float Predictor::PpmdEscapeRate() const {
   return byte_model_->RecentEscapeRate();
 }
-#endif
 
 unsigned long long Predictor::GetNumModels() {
   unsigned long long num = 0;
@@ -218,13 +219,11 @@ unsigned long long Predictor::GetNumModels() {
 void Predictor::AddMixer(int layer, const unsigned long long& context,
     float learning_rate) {
   if (layer == 0) {
-    mixer_0_.emplace_back(
-        layers_[layer].Inputs(), layers_[layer].ExtraInputs(), context,
-      learning_rate, mixer_0_.size());
+    mixer_0_.emplace_back(layers_[0], context, learning_rate,
+        mixer_0_.size());
   } else {
-    mixer_1_.emplace_back(
-        layers_[layer].Inputs(), layers_[layer].ExtraInputs(), context,
-      learning_rate, mixer_1_.size());
+    mixer_1_.emplace_back(layers_[1], context, learning_rate,
+        mixer_1_.size());
   }
 }
 
@@ -432,6 +431,40 @@ void Predictor::AddMixers() {
           FX4_LSTM_LAYERS, FX4_LSTM_HORIZON, FX4_LSTM_LEARNING_RATE,
           FX4_LSTM_GRADIENT_CLIP));
 
+#ifdef KH_OBIAS
+  const char* obias_path = std::getenv("KH_OBIAS");
+  if (obias_path && obias_path[0]) {
+    obias_.reset(new KhObiasPrior(obias_path));
+    obias_active_ = obias_->ok();
+  }
+  if (const char* keep_aux = std::getenv("KH_OBIAS_KEEP_AUX")) {
+    obias_keep_aux_ = keep_aux[0] && std::strcmp(keep_aux, "0") != 0;
+  }
+#ifdef KH_OBIAS_CONST_GATE
+  // Record configuration: a standalone constant 0.15 PPMd log-prior with
+  // the accepted auxiliary input retained. It needs no additional blob.
+  if (!obias_active_) {
+    obias_.reset(new KhObiasPrior(nullptr));
+    obias_active_ = obias_->ok();
+    obias_keep_aux_ = true;
+  }
+#endif
+#ifdef KH_OBIAS_ARCHIVE
+  if (!obias_active_ && (!obias_path || !obias_path[0])) {
+    FILE* probe = fopen(".obias_blob_decomp", "rb");
+    if (probe) {
+      fseek(probe, 0, SEEK_END);
+      const long size = ftell(probe);
+      fclose(probe);
+      if (size > 0) {
+        obias_.reset(new KhObiasPrior(".obias_blob_decomp"));
+        obias_active_ = obias_->ok();
+      }
+    }
+  }
+#endif
+#endif
+
   for (int i = 0; i < 2; ++i) {
     layers_.emplace_back(sigmoid_,
         1.0e-4);
@@ -529,11 +562,15 @@ float Predictor::Predict() {
       sigmoid_.Logit(bounded_fxcm_probability);
   const unsigned int fxcm_model_index = input_index - 1;
 
+  // Collect the low-count model tail and perform one checked conversion into
+  // the flat MixerInput row. FXCM's large already-stretched prefix remains on
+  // its unchecked path above.
+  float gathered[64];
+  unsigned int gathered_n = 0;
   for (unsigned int i = 0; i < direct_models_.size(); ++i) {
     const std::valarray<float>& outputs = direct_models_[i].Predict();
     for (unsigned int j = 0; j < outputs.size(); ++j) {
-      layers_[0].SetInput(input_index, outputs[j]);
-      ++input_index;
+      gathered[gathered_n++] = outputs[j];
     }
   }
 
@@ -541,33 +578,32 @@ float Predictor::Predict() {
   for (unsigned int i = 0; i < match_models_.size(); ++i) {
     const std::valarray<float>& outputs = match_models_[i].Predict();
     for (unsigned int j = 0; j < outputs.size(); ++j) {
-      layers_[0].SetInput(input_index, outputs[j]);
-      ++input_index;
+      gathered[gathered_n++] = outputs[j];
     }
   }
  
   for (unsigned int i = 0; i < indirect_ns_models_.size(); ++i) {
     const std::valarray<float>& outputs = indirect_ns_models_[i].Predict();
     for (unsigned int j = 0; j < outputs.size(); ++j) {
-      layers_[0].SetInput(input_index, outputs[j]);
-      ++input_index;
+      gathered[gathered_n++] = outputs[j];
     }
   }
  
   for (unsigned int i = 0; i < indirect_r_models_.size(); ++i) {
     const std::valarray<float>& outputs = indirect_r_models_[i].Predict();
     for (unsigned int j = 0; j < outputs.size(); ++j) {
-      layers_[0].SetInput(input_index, outputs[j]);
-      ++input_index;
+      gathered[gathered_n++] = outputs[j];
     }
   }
-  const unsigned int ppmd_model_index = input_index;
-  layers_[0].SetInput(input_index++, byte_model_->Predict()[0]);
+  const unsigned int ppmd_model_index = input_index + gathered_n;
+  gathered[gathered_n++] = byte_model_->Predict()[0];
 
   float byte_mixer_override = -1;
 
   if (byte_mixer_output == 0 || byte_mixer_output == 1) byte_mixer_override = byte_mixer_output;
-  layers_[0].SetInput(input_index++, byte_mixer_output);
+  gathered[gathered_n++] = byte_mixer_output;
+  layers_[0].SetInputsChecked(input_index, gathered, gathered_n);
+  input_index += gathered_n;
   auto byte_mixer_index = input_index - 1;
 
   bool postr1_training = false;
@@ -579,11 +615,33 @@ float Predictor::Predict() {
       Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]);
   const float lstm_probability =
       Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]);
+#if FX4_RESIDUAL_ORACLE_TRACE || FX4_RESIDUAL_LSTM96
+  trace_ppmd_probability_ = ppmd_probability;
+  trace_lstm_probability_ = lstm_probability;
+  trace_fxcm_probability_ = bounded_fxcm_probability;
+  trace_bit_position_ = static_cast<std::uint8_t>(manager_.bpos & 7u);
+  trace_ppmd_order_ = static_cast<std::uint8_t>(
+      std::min<unsigned int>(byte_model_->EffectiveOrder(), 31u));
+  trace_escape_depth_ = static_cast<std::uint8_t>(
+      std::min<unsigned int>(byte_model_->LastEscapeDepth(), 7u));
+  trace_match_length_ = static_cast<std::uint8_t>(
+      std::min<unsigned long long>(manager_.longest_match_, 255u));
+#if FX4_SPECIALIST_CORRECTOR
+  trace_stream_class_ = static_cast<std::uint8_t>(
+      std::min<unsigned int>(SpecialistStreamClass(), 7u));
+#else
+  trace_stream_class_ = 0;
+#endif
+#endif
   const float auxiliary_average =
-      (Sigmoid::Logistic(layers_[0].Inputs()[fxcm_model_index]) +
-          lstm_probability) /
-      static_cast<float>(auxiliary_size_);
+      (bounded_fxcm_probability + lstm_probability + ppmd_probability) /
+      3.0f;
   manager_.auxiliary_context_ = auxiliary_average * 15;
+
+  // Resolve each context once and overlap the independent weight-row reads.
+  for (auto& mixer : mixer_0_) mixer.BeginBit();
+  final_mixer_context_ = 0;
+  mixer_1_[0].BeginBit();
 
   for (unsigned int i = 0; i < mixer_0_.size(); ++i) {
     float p = mixer_0_[i].Mix();
@@ -591,19 +649,32 @@ float Predictor::Predict() {
     layers_[1].SetStretchedInput(i, p);
   }
   layers_[1].SetStretchedInput(
-      mixer_0_.size(), layers_[0].Inputs()[fxcm_model_index]);
+      mixer_0_.size(), aggregate_fxcm_logit);
   layers_[1].SetStretchedInput(mixer_0_.size() + 1, layers_[0].Inputs()[byte_mixer_index]);
   layers_[1].SetStretchedInput(
       mixer_0_.size() + 2, layers_[0].Inputs()[ppmd_model_index]);
 
-  final_mixer_context_ = 0;
+#if defined(KH_TRACE) || defined(KH_BITLSTM32) || \
+    FX4_RESIDUAL_ORACLE_TRACE || FX4_RESIDUAL_LSTM96
+  // The bitlstm32 head consumes the original cmix-obias feature prefix:
+  // 23 mixer outputs, FXCM and LSTM. Discovery's direct-PPMd lane follows
+  // those 25 values and is intentionally ignored by the published head.
+  kh_stage1_in_ = layers_[1].Inputs();
+  kh_stage1_n_ = static_cast<int>(mixer_0_.size() + auxiliary_size_);
+  kh_override_ = byte_mixer_override >= 0 ? 1 : 0;
+#endif
 
-  float p = Sigmoid::Logistic(mixer_1_[0].Mix());
+  const float m1raw = mixer_1_[0].Mix();
+#if defined(KH_TRACE) || defined(KH_BITLSTM32) || \
+    FX4_RESIDUAL_ORACLE_TRACE || FX4_RESIDUAL_LSTM96
+  kh_m1raw_ = m1raw;
+#endif
+  float p = Sigmoid::Logistic(m1raw);
   p = sse_.Predict(p);
 #if FX4_SPECIALIST_CORRECTOR
   p = PredictSpecialist(p, layers_[0].Inputs()[ppmd_model_index],
       layers_[0].Inputs()[byte_mixer_index],
-      layers_[0].Inputs()[fxcm_model_index]);
+      aggregate_fxcm_logit);
 #endif
 #if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
   donor_branch_ppmd_probability_ =
@@ -716,12 +787,29 @@ void Predictor::Perceive(int bit) {
     byte_model_->ByteUpdate();
 
     const std::valarray<float>& p = byte_model_->BytePredict();
-    for (unsigned int j = 0; j < 256; ++j) {
-      byte_mixer_->SetInput(j,p[j]);
-#if FX4_SHADOW_LSTM200
-      shadow_lstm200_->SetInput(j, p[j]);
-#endif
+#ifdef KH_OBIAS
+    if (obias_active_) {
+      float probabilities[256];
+      for (unsigned int j = 0; j < 256; ++j) probabilities[j] = p[j];
+      obias_->Advance(static_cast<unsigned char>(manager_.bit_context_),
+          probabilities);
+      byte_mixer_->SetOutputBias(obias_->Bias());
     }
+    if (!obias_active_ || obias_keep_aux_) {
+      for (unsigned int j = 0; j < 256; ++j) {
+        byte_mixer_->SetInput(j, p[j]);
+      }
+    }
+#else
+    for (unsigned int j = 0; j < 256; ++j) {
+      byte_mixer_->SetInput(j, p[j]);
+    }
+#endif
+#if FX4_SHADOW_LSTM200
+    for (unsigned int j = 0; j < 256; ++j) {
+      shadow_lstm200_->SetInput(j, p[j]);
+    }
+#endif
 
     byte_mixer_->ByteUpdate();
 #if FX4_SHADOW_LSTM200

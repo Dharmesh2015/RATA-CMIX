@@ -16,6 +16,7 @@
 #include "donor_fork_discovery.h"
 #include "virtual_replay_plan.h"
 #include "postr1_transform.h"
+#include "altxs_transform.h"
 
 #include "readalike_prepr/article_reorder.h"
 #include "readalike_prepr/self_extract.h"
@@ -33,6 +34,17 @@
 
 namespace {
 const int kMinVocabFileSize = 10000;
+
+#if FX4_RESIDUAL_ORACLE_TRACE
+bool oracle_trace_stopped = false;
+#endif
+
+#if FX4_ALTXS_M3_M5
+altxs::ProductMeta altxs_decode_meta;
+bool altxs_decode_used = false;
+constexpr const char* kAltxsM3Side = ".altxs_m3_side";
+constexpr const char* kAltxsM3SideDecomp = ".altxs_m3_side_decomp";
+#endif
 
 #if FX4_RESEARCH_DONOR_BOOTSTRAP
 std::vector<std::uint8_t> LoadResearchDonorBootstrap() {
@@ -171,7 +183,7 @@ size_t getFileSize(const std::string& path) {
 
 void WriteHeader(unsigned long long length, const std::vector<bool>& vocab,
     bool dictionary_used, bool donor_plan_used, bool scr2_used,
-    bool postr1_transform_used, bool virtual_replay_used,
+    bool postr1_transform_used, bool virtual_replay_used, bool altxs_used,
     std::ofstream* os) {
   for (int i = 4; i >= 0; --i) {
     char c = length >> (8*i);
@@ -179,7 +191,7 @@ void WriteHeader(unsigned long long length, const std::vector<bool>& vocab,
       c &= 0x0F;
       if (dictionary_used) c |= 0x80;
       if (donor_plan_used) c |= 0x40;
-      if (scr2_used || postr1_transform_used) c |= 0x20;
+      if (scr2_used || postr1_transform_used || altxs_used) c |= 0x20;
       if (virtual_replay_used) c |= 0x10;
     }
     os->put(c);
@@ -188,6 +200,8 @@ void WriteHeader(unsigned long long length, const std::vector<bool>& vocab,
     os->put(static_cast<char>(scr2::kArchiveVersion));
   } else if (postr1_transform_used) {
     os->put(static_cast<char>(postr1::kArchiveVersion));
+  } else if (altxs_used) {
+    os->put(static_cast<char>(altxs::kArchiveVersion));
   }
   if (length < kMinVocabFileSize) return;
   for (int i = 0; i < 32; ++i) {
@@ -209,11 +223,12 @@ void WriteStorageHeader(FILE* out, bool dictionary_used) {
 
 bool ReadHeader(std::ifstream* is, unsigned long long* length,
     bool* dictionary_used, bool* donor_plan_used, bool* scr2_used,
-    bool* postr1_transform_used, bool* virtual_replay_used,
+    bool* postr1_transform_used, bool* virtual_replay_used, bool* altxs_used,
     std::vector<bool>* vocab) {
   *length = 0;
   *scr2_used = false;
   *postr1_transform_used = false;
+  *altxs_used = false;
   bool transform_used = false;
   for (int i = 0; i <= 4; ++i) {
     *length <<= 8;
@@ -238,6 +253,12 @@ bool ReadHeader(std::ifstream* is, unsigned long long* length,
     } else if (version == postr1::kArchiveVersion) {
 #if FX4_POSTR1_TRANSFORM
       *postr1_transform_used = true;
+#else
+      return false;
+#endif
+    } else if (version == altxs::kArchiveVersion) {
+#if FX4_ALTXS_M3_M5
+      *altxs_used = true;
 #else
       return false;
 #endif
@@ -352,6 +373,17 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
     std::ofstream* os, unsigned long long* output_bytes, Predictor* p,
     DonorPlan* donor_plan, VirtualReplayPlan* replay_plan) {
   Encoder e(os, p);
+#if FX4_RESIDUAL_ORACLE_TRACE
+  oracle_trace_stopped = false;
+  if (!e.StartOracleTrace(input_bytes)) {
+    fprintf(stderr, "cannot create FX4 residual oracle trace\n");
+    return false;
+  }
+  const char* stop_value = std::getenv("FX4_STOP_AFTER_ORACLE_TRACE");
+  const bool stop_after_oracle_trace =
+      stop_value && *stop_value && std::strcmp(stop_value, "0") != 0;
+
+#endif
 #if FX4_VIRTUAL_REPLAY
   const char* trace_path = std::getenv("FX4_VR_COST_TRACE");
   if (replay_plan && trace_path && *trace_path) {
@@ -580,7 +612,18 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
       report_progress(pos);
       ++pos;
       ++i;
+#if FX4_RESIDUAL_ORACLE_TRACE
+      if (stop_after_oracle_trace && e.OracleTraceComplete()) {
+        oracle_trace_stopped = true;
+        break;
+      }
+#endif
+
     }
+#if FX4_RESIDUAL_ORACLE_TRACE
+    if (oracle_trace_stopped) break;
+#endif
+
   }
   if (replay_plan && !replay_plan->causal_scr2() &&
       replay_index != replay_plan->event_count()) return false;
@@ -636,6 +679,14 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
   fprintf(stderr, "\rprogress: 100.00%%");
   fflush(stderr);
 #endif
+#if FX4_RESIDUAL_ORACLE_TRACE
+  if (oracle_trace_stopped) {
+    fprintf(stderr, "\noracle trace complete after %llu logical bytes\n",
+        static_cast<unsigned long long>(pos));
+    return os->good();
+  }
+#endif
+
   return pos == input_bytes && os->good();
 }
 bool Decompress(unsigned long long output_length, std::ifstream* is,
@@ -806,7 +857,9 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     const std::string& temp_path, const std::string& output_path,
     FILE* dictionary, unsigned long long* input_bytes,
     unsigned long long* output_bytes,
-    const char* post_wrt_side_path = nullptr) {
+    const char* post_wrt_side_path = nullptr,
+    const altxs::ProductMeta* altxs_meta = nullptr,
+    const char* altxs_m3_side_path = nullptr) {
   const bool raw_entropy_input =
 #if FX4_DONOR_PLAN
       EnvironmentEnabled("FX4_RAW_ENTROPY_INPUT");
@@ -858,6 +911,32 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
   }
 #endif
 
+  bool altxs_used = false;
+#if FX4_ALTXS_M3_M5
+  if (altxs_meta) {
+    if (post_wrt_side_path || !altxs_m3_side_path ||
+        !*altxs_m3_side_path) {
+      fprintf(stderr, "altxs M3+M5 and payload_lex/R1 are exclusive\n");
+      return false;
+    }
+    std::uint64_t before_m5 = 0;
+    std::uint64_t after_m5 = 0;
+    if (!altxs::EncodeWrtProductFile(temp_path, altxs_m3_side_path,
+        *altxs_meta, &before_m5, &after_m5)) {
+      fprintf(stderr, "altxs M5 product transform failed\n");
+      return false;
+    }
+    altxs_used = true;
+    std::remove(altxs_m3_side_path);
+    fprintf(stderr, "altxs M5 product: %llu -> %llu bytes\n",
+        static_cast<unsigned long long>(before_m5),
+        static_cast<unsigned long long>(after_m5));
+    malloc_trim(0);
+  }
+#else
+  if (altxs_meta) return false;
+#endif
+
   if (post_wrt_side_path &&
       !r1_reorder::ReorderEncodedTailFile(temp_path, post_wrt_side_path)) {
     fprintf(stderr, "payload_lex encoded-tail reorder failed\n");
@@ -899,6 +978,11 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
 #if FX4_POSTR1_TRANSFORM
   const char* postr1_plan_path = std::getenv("FX4_POSTR1_TRANSFORM_PLAN");
   if (postr1_plan_path && *postr1_plan_path) {
+    if (altxs_used) {
+      fprintf(stderr,
+          "post-R1 plans require the payload_lex/R1 coordinate space\n");
+      return false;
+    }
     if (!post_wrt_side_path && !raw_entropy_input) {
       fprintf(stderr,
           "FX4_POSTR1_TRANSFORM_PLAN requires -e or "
@@ -924,7 +1008,11 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
 #if FX4_SCR2
   const bool scr2_requested = EnvironmentEnabled("FX4_ENABLE_SCR2") ||
       (FX4_SCR2_DEFAULT != 0 && post_wrt_side_path != nullptr);
-  if (scr2_requested && !postr1_transform_used) {
+  if (scr2_requested && altxs_used) {
+    fprintf(stderr, "SCR2 plans are not valid on the altxs M5 stream\n");
+    return false;
+  }
+  if (scr2_requested && !postr1_transform_used && !altxs_used) {
     std::uint64_t before_scr2 = 0;
     std::uint64_t after_scr2 = 0;
     if (!scr2::EncodeFile(temp_path, &before_scr2, &after_scr2)) {
@@ -1035,6 +1123,11 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
   DonorPlan donor_plan;
   const char* donor_plan_path = std::getenv("FX4_DONOR_PLAN");
   if (donor_plan_path && *donor_plan_path) {
+    if (altxs_used) {
+      fprintf(stderr,
+          "donor plans must be regenerated in the altxs M5 coordinate space\n");
+      return false;
+    }
     if (!donor_plan.LoadExternal(donor_plan_path, temp_bytes)) {
       fprintf(stderr, "invalid FX4_DONOR_PLAN: %s\n", donor_plan_path);
       return false;
@@ -1064,7 +1157,8 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
 
   WriteHeader(temp_bytes, vocab, dictionary != NULL,
       active_donor_plan != nullptr, scr2_used,
-      postr1_transform_used, active_replay_plan != nullptr, &data_out);
+      postr1_transform_used, active_replay_plan != nullptr, altxs_used,
+      &data_out);
 #if FX4_DONOR_PLAN
   if (active_donor_plan && !active_donor_plan->WriteArchive(&data_out)) {
     fprintf(stderr, "cannot write FX4 donor plan\n");
@@ -1101,6 +1195,9 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
   }
   temp_in.close();
   data_out.close();
+#if FX4_RESIDUAL_ORACLE_TRACE
+  if (oracle_trace_stopped) remove(output_path.c_str());
+#endif
   remove(temp_path.c_str());
   return true;
 }
@@ -1122,16 +1219,18 @@ bool RunDecompression(const std::string& input_path,
   bool scr2_used = false;
   bool postr1_transform_used = false;
   bool virtual_replay_used = false;
+  bool altxs_used = false;
   if (!ReadHeader(&data_in, output_bytes, &dictionary_used,
       &donor_plan_used, &scr2_used, &postr1_transform_used,
-      &virtual_replay_used, &vocab)) {
+      &virtual_replay_used, &altxs_used, &vocab)) {
     return false;
   }
   if (!dictionary_used && dictionary != NULL) return false;
   if (dictionary_used && dictionary == NULL) return false;
 
   if (*output_bytes == 0) {  // undo store
-    if (scr2_used || postr1_transform_used || virtual_replay_used) {
+    if (scr2_used || postr1_transform_used || virtual_replay_used ||
+        altxs_used) {
       return false;
     }
     data_in.close();
@@ -1211,6 +1310,23 @@ bool RunDecompression(const std::string& input_path,
   }
   malloc_trim(0);
 
+#if FX4_ALTXS_M3_M5
+  if (altxs_used) {
+    std::uint64_t restored_wrt_bytes = 0;
+    if (!altxs::DecodeWrtProductFile(temp_path, kAltxsM3SideDecomp,
+        &altxs_decode_meta, &restored_wrt_bytes)) {
+      fprintf(stderr, "altxs M5 product restore failed\n");
+      return false;
+    }
+    altxs_decode_used = true;
+    fprintf(stderr, "altxs M5 restore: %llu WRT bytes\n",
+        static_cast<unsigned long long>(restored_wrt_bytes));
+    malloc_trim(0);
+  }
+#else
+  if (altxs_used) return false;
+#endif
+
 #if FX4_POSTR1_TRANSFORM
   if (postr1_transform_used) {
     std::uint64_t restored_size = 0;
@@ -1237,7 +1353,7 @@ bool RunDecompression(const std::string& input_path,
 
 #if FX4_DONOR_PLAN
   if (EnvironmentEnabled("FX4_RAW_ENTROPY_OUTPUT")) {
-    if (post_wrt_side_path || scr2_used || virtual_replay_used ||
+    if (post_wrt_side_path || scr2_used || virtual_replay_used || altxs_used ||
         !CopyResearchStream(temp_path, output_path.c_str())) {
       return false;
     }
@@ -1249,7 +1365,7 @@ bool RunDecompression(const std::string& input_path,
   }
 #endif
 
-  if (post_wrt_side_path) {
+  if (post_wrt_side_path && !altxs_used) {
     if (!r1_reorder::ExtractSideFromFile(temp_path, post_wrt_side_path) ||
         !r1_reorder::RestoreEncodedTailFile(temp_path, post_wrt_side_path)) {
       fprintf(stderr, "payload_lex encoded-tail restore failed\n");
@@ -1328,7 +1444,22 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
     }
     std::cout << "Cmix decompression finished" << std::endl;
 
+#if FX4_ALTXS_M3_M5
+    if (altxs_decode_used) {
+      if (!altxs::SplitDenseReadyFile(output_path, altxs_decode_meta,
+          ".main_decomp_dense", ".intro_decomp", ".coda_decomp") ||
+          !altxs::RestorePhda9File(".main_decomp_dense",
+              kAltxsM3SideDecomp, ".main_decomp")) {
+        fprintf(stderr, "altxs M3 outer restore failed\n");
+        return Help();
+      }
+      std::remove(kAltxsM3SideDecomp);
+    } else {
+      split4Decomp();
+    }
+#else
     split4Decomp();
+#endif
 
     // apply phda9 preprocessor
     phda9_resto();
@@ -1354,6 +1485,9 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
         dictionary, &input_bytes, &output_bytes)) {
       return Help();
     }
+#if FX4_RESIDUAL_ORACLE_TRACE
+    if (oracle_trace_stopped) return 0;
+#endif
   } else if (argv[1][1] == 'e') {
     // Compress enwik9
     input_path = argv[2];
@@ -1369,8 +1503,33 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
     // change the order of articles in the input
     reorder();
 
+#if FX4_ALTXS_M3_M5
+    altxs::ProductMeta altxs_meta;
+    altxs_meta.intro_bytes = getFileSize(".intro");
+    altxs_meta.coda_bytes = getFileSize(".coda");
+    altxs_meta.main_bytes = getFileSize(".main");
+#endif
+
     // apply phda9 preprocessor
     phda9_prepr();
+
+#if FX4_ALTXS_M3_M5
+    {
+      std::uint64_t before_m3 = 0;
+      std::uint64_t after_m3 = 0;
+      std::uint64_t side_m3 = 0;
+      if (!altxs::DensifyPhda9File(".main_phda9prepr", kAltxsM3Side,
+          &before_m3, &after_m3, &side_m3)) {
+        fprintf(stderr, "altxs M3 PHDA9 densify failed\n");
+        return Help();
+      }
+      fprintf(stderr, "altxs M3: %llu -> %llu bytes + %llu side bytes\n",
+          static_cast<unsigned long long>(before_m3),
+          static_cast<unsigned long long>(after_m3),
+          static_cast<unsigned long long>(side_m3));
+      malloc_trim(0);
+    }
+#endif
 
     // merge all input parts after preprocessing
     cat(".main_phda9prepr", ".intro", "un1");
@@ -1379,10 +1538,19 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
     // run compression
     input_path = ".ready4cmix";
     dictionary = fopen(".dict", "rb");
+#if FX4_ALTXS_M3_M5
+    if (!RunCompression(enable_preprocess, input_path, temp_path, output_path,
+        dictionary, &input_bytes, &output_bytes, nullptr, &altxs_meta,
+        kAltxsM3Side)) {
+#else
     if (!RunCompression(enable_preprocess, input_path, temp_path, output_path,
         dictionary, &input_bytes, &output_bytes, ".r1_payload_lex_side")) {
+#endif
       return Help();
     }
+#if FX4_RESIDUAL_ORACLE_TRACE
+    if (oracle_trace_stopped) return 0;
+#endif
 #if FX4_RESEARCH_STREAM_DUMP
     if (EnvironmentEnabled("FX4_STOP_AFTER_POST_R1")) return 0;
 #endif
@@ -1400,10 +1568,58 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
     HeaderInfo header;
     read("test.dat", header);
     header.decomp_input_size = output_size;
+#ifdef KH_BITLSTM32_ARCHIVE
+    {
+      const char* head_path = getenv("KH_BITLSTM32");
+      std::ofstream head_out(".head_blob4archive",
+          std::ios::binary | std::ios::trunc);
+      if (!head_out) return Help();
+      if (head_path && head_path[0]) {
+        std::ifstream head_in(head_path, std::ios::binary);
+        if (!head_in) return Help();
+        head_out << head_in.rdbuf();
+        if (!head_out) return Help();
+      }
+      head_out.close();
+      header.head_blob_size =
+          static_cast<int>(getFileSize(".head_blob4archive"));
+    }
+#endif
+#ifdef KH_RESIDUAL_LSTM96_ARCHIVE
+    {
+      const char* model_path = getenv("KH_RESIDUAL_LSTM96");
+      std::ofstream model_out(".residual_lstm96_blob4archive",
+          std::ios::binary | std::ios::trunc);
+      if (!model_out || !model_path || !model_path[0]) return Help();
+      std::ifstream model_in(model_path, std::ios::binary);
+      if (!model_in) return Help();
+      model_out << model_in.rdbuf();
+      if (!model_out) return Help();
+      model_out.close();
+      header.residual_lstm96_blob_size = static_cast<int>(
+          getFileSize(".residual_lstm96_blob4archive"));
+      if (header.residual_lstm96_blob_size <= 0) return Help();
+    }
+#endif
     write("header4archive.dat", header);
 
     cat("dec1", output_path.c_str(), "dec2");
+#ifdef KH_BITLSTM32_ARCHIVE
+    cat("dec2", ".head_blob4archive", "dec2c");
+#ifdef KH_RESIDUAL_LSTM96_ARCHIVE
+    cat("dec2c", ".residual_lstm96_blob4archive", "dec2r");
+    cat("dec2r", "header4archive.dat", "archive9");
+#else
+    cat("dec2c", "header4archive.dat", "archive9");
+#endif
+#else
+#ifdef KH_RESIDUAL_LSTM96_ARCHIVE
+    cat("dec2", ".residual_lstm96_blob4archive", "dec2r");
+    cat("dec2r", "header4archive.dat", "archive9");
+#else
     cat("dec2", "header4archive.dat", "archive9");
+#endif
+#endif
 
     // make the decompressor binary executable
     char mode[] = "0777";
@@ -1413,10 +1629,16 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
 
   } else if (argv[1][1] == 'h') {
     if (argc < 5) return Help();
-    HeaderInfo header;
+    HeaderInfo header = {};
     header.dict_size = atoi(argv[2]);
     header.new_article_order_size = atoi(argv[3]);
     header.decomp_input_size = atoi(argv[4]);
+#ifdef KH_BITLSTM32_ARCHIVE
+    header.head_blob_size = 0;
+#endif
+#ifdef KH_RESIDUAL_LSTM96_ARCHIVE
+    header.residual_lstm96_blob_size = 0;
+#endif
     write("header.dat", header);
     goto exit;
   }  else if (argv[1][1] == 'x') {

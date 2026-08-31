@@ -1,4 +1,5 @@
 #include "context-manager.h"
+#include "utils/hugepage.h"
 
 extern unsigned long long wrtcxt;
 
@@ -57,9 +58,21 @@ const unsigned char wrt_4b[256]={
 #define CURLYCLOSE    'R' // }
 
 ContextManager::ContextManager() : history_(60000000, 0),
-    shared_map_(256*400000, 0), words_(8, 0), recent_bytes_(8, 0) {
+    words_(8, 0), recent_bytes_(8, 0) {
+    // shared_map_ and the big hashes_ind tables are randomly accessed
+    // 100-256 MB arrays: reserve, flag for transparent huge pages, THEN
+    // fill, so the zero-fill first touch faults in 2 MB pages.
+    shared_map_.reserve(256*400000);
+    AdviseHugePages(shared_map_.data(), (size_t)256*400000);
+    shared_map_.resize(256*400000, 0);
+    hashes_ind1.reserve(0x1000000);
+    AdviseHugePages(hashes_ind1.data(), (size_t)0x1000000*sizeof(unsigned long long));
     hashes_ind1.resize(0x1000000, 0);
+    hashes_ind2.reserve(0x1000000);
+    AdviseHugePages(hashes_ind2.data(), (size_t)0x1000000*sizeof(unsigned long long));
     hashes_ind2.resize(0x1000000, 0);
+    hashes_ind3.reserve(0x2000000);
+    AdviseHugePages(hashes_ind3.data(), (size_t)0x2000000*sizeof(unsigned long long));
     hashes_ind3.resize(0x2000000, 0);
     hashes_ind4.resize(0x100, 0);
     hashes_ind5.resize(0x100, 0);
@@ -93,6 +106,16 @@ void ContextManager::UpdateHistory() {
 
 void ContextManager::UpdateWords() {
   unsigned char c = bit_context_;
+  // The big-table slots read at the bottom of this function are pure
+  // functions of the old indices and c; prefetch them now (rw=1: the same
+  // slot is written on the next byte) so the three random-access misses
+  // overlap the bookkeeping below instead of serializing at the reads.
+  const unsigned long long next_ind1 = (context1_ind  * (1 << 8) + c) & (0x1000000-1);
+  const unsigned long long next_ind2 = (context1_ind2 * (1 << 6) + c) & (0x1000000-1);
+  const unsigned long long next_ind3 = (context1_ind3 * (1 << 5) + c) & (0x2000000-1);
+  __builtin_prefetch(&hashes_ind1[next_ind1], 1, 3);
+  __builtin_prefetch(&hashes_ind2[next_ind2], 1, 3);
+  __builtin_prefetch(&hashes_ind3[next_ind3], 1, 3);
   if (c==CURLYCLOSE || c==CURLYOPENING ||c==SQUARECLOSE)    b3stream= (b3stream&0xfffffff8)+3;
   else if (c==EQUALS)  b3stream=(b3stream&0xfffffff8)+4;
   n2bState=wrt_2b[c];
@@ -153,15 +176,15 @@ void ContextManager::UpdateWords() {
    mx15 = recent_bytes_[0]*256+recent_bytes_[1];
    
    hashes_ind1[context1_ind] = (ind1 * (1 << 8) + c) & (0x100-1);
-   context1_ind = (context1_ind * (1 << 8) + c) & (0x1000000-1);
+   context1_ind = next_ind1;
    ind1 = hashes_ind1[context1_ind];
-  
+
     hashes_ind2[context1_ind2] = (ind2 * (1 << 8) + c) & (0x100000000-1);
-   context1_ind2 = (context1_ind2 * (1 << 6) + c) & (0x1000000-1);
+   context1_ind2 = next_ind2;
    ind2 = hashes_ind2[context1_ind2];
- 
+
   hashes_ind3[context1_ind3] = (ind3 * (1 << 5) + c) & (0x2000000-1);
-  context1_ind3 = (context1_ind3 * (1 << 5) + c) &     (0x2000000-1);
+  context1_ind3 = next_ind3;
   ind3 = hashes_ind3[context1_ind3];
   
   hashes_ind5[context1_ind5] = (ind5 * (1 << 6) + c) & (0x40000000-1);

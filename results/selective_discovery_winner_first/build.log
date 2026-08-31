@@ -1,0 +1,44 @@
+Building accepted ratio release...
+native used
+rm -f *.o
+rm -f cmix
+rm -f remap
+rm -f postr1_page_index
+rm -f emit_r1_map
+rm -f postr1_page_donor_ranker
+native used
+clang++-17 -DSEED=923 -DUPDATE_LIMIT=3000 -DNDEBUG -DFX4_LSTM_MID_BRIDGE=2 -DFX4_DONOR_PLAN=1 -DFX4_SELECTIVE_POSTR1=1 -DFX4_DONOR_FORK_DISCOVERY=1 -DFX4_SELECTIVE_POSTR1=1 -DFX4_MINI_CMIX=1 -DFX4_SHADOW_LSTM200=1 -DFX4_VIRTUAL_REPLAY=1 -DFX4_TOPOLOGY_RECURRENCE=1 -DFX4_CAUSAL_CNN=1 -m64 -Wall -std=c++17 -ffp-model=fast -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-threadsafe-statics -Wno-unknown-escape-sequence -Wno-unused-variable -Wno-unneeded-internal-declaration -Wno-unused-but-set-variable -Wno-format  -march=native -mtune=native -O3 -fdata-sections -ffunction-sections src/coder/decoder.cpp src/coder/encoder.cpp src/context-manager.cpp src/contexts/bit-context.cpp src/contexts/bracket-context.cpp src/contexts/combined-context.cpp src/contexts/context-hash.cpp src/contexts/indirect-hash.cpp src/contexts/interval-hash.cpp src/contexts/interval.cpp src/contexts/sparse.cpp src/models/bracket.cpp src/models/byte-model.cpp src/models/direct-hash.cpp src/models/direct.cpp src/models/match.cpp src/models/fxcmv1.cpp src/models/postr1_experts.cpp src/models/ppmd.cpp src/states/nonstationary.cpp src/states/run-map.cpp src/mixer/byte-mixer.cpp src/mixer/mixer-input.cpp src/mixer/mixer.cpp src/mixer/sigmoid.cpp src/mixer/sse.cpp -c src/predictor.cpp
+clang++-17 -DSEED=923 -DUPDATE_LIMIT=3000 -DNDEBUG -DFX4_LSTM_MID_BRIDGE=2 -DFX4_DONOR_PLAN=1 -DFX4_SELECTIVE_POSTR1=1 -DFX4_DONOR_FORK_DISCOVERY=1 -DFX4_SELECTIVE_POSTR1=1 -DFX4_MINI_CMIX=1 -DFX4_SHADOW_LSTM200=1 -DFX4_VIRTUAL_REPLAY=1 -DFX4_TOPOLOGY_RECURRENCE=1 -DFX4_CAUSAL_CNN=1 -m64 -Wall -std=c++17 -ffp-model=fast -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-threadsafe-statics -Wno-unknown-escape-sequence -Wno-unused-variable -Wno-unneeded-internal-declaration -Wno-unused-but-set-variable -Wno-format  -march=native -mtune=native -Os -fdata-sections -ffunction-sections src/preprocess/preprocessor.cpp src/preprocess/dictionary.cpp -c 
+clang++-17 -DSEED=923 -DUPDATE_LIMIT=3000 -DNDEBUG -DFX4_LSTM_MID_BRIDGE=2 -DFX4_DONOR_PLAN=1 -DFX4_SELECTIVE_POSTR1=1 -DFX4_DONOR_FORK_DISCOVERY=1 -DFX4_SELECTIVE_POSTR1=1 -DFX4_MINI_CMIX=1 -DFX4_SHADOW_LSTM200=1 -DFX4_VIRTUAL_REPLAY=1 -DFX4_TOPOLOGY_RECURRENCE=1 -DFX4_CAUSAL_CNN=1 -m64 -Wall -std=c++17 -ffp-model=fast -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-threadsafe-statics -Wno-unknown-escape-sequence -Wno-unused-variable -Wno-unneeded-internal-declaration -Wno-unused-but-set-variable -Wno-format -Oz -fdata-sections -ffunction-sections -march=native -mtune=native src/donor_plan.cpp src/donor_fork_discovery.cpp src/donor_winner_search.cpp src/r1_reorder_transform.cpp src/scr2_transform.cpp src/virtual_replay_plan.cpp src/postr1_transform.cpp src/runner.cpp -c
+clang++-17 -m64 -Wl,--gc-sections -std=c++17 bit-context.o bracket-context.o bracket.o byte-mixer.o byte-model.o combined-context.o context-hash.o context-manager.o decoder.o dictionary.o direct-hash.o direct.o donor_plan.o donor_fork_discovery.o donor_winner_search.o encoder.o indirect-hash.o interval-hash.o interval.o match.o mixer-input.o mixer.o nonstationary.o fxcmv1.o postr1_experts.o ppmd.o predictor.o preprocessor.o r1_reorder_transform.o scr2_transform.o virtual_replay_plan.o postr1_transform.o run-map.o runner.o sigmoid.o sparse.o sse.o -s -o cmix
+rm -f *.o
+                       Ultimate Packer for eXecutables
+                          Copyright (C) 1996 - 2026
+UPX 5.1.1       Markus Oberhumer, Laszlo Molnar & John Reiser    Mar 5th 2026
+
+        File size         Ratio      Format      Name
+   --------------------   ------   -----------   -----------
+    575272 ->    218288   37.95%   linux/amd64   cmix
+
+Packed 1 file.
+                       Ultimate Packer for eXecutables
+                          Copyright (C) 1996 - 2026
+UPX 5.1.1       Markus Oberhumer, Laszlo Molnar & John Reiser    Mar 5th 2026
+
+testing cmix [OK]
+
+Tested 1 file.
+
+456511 bytes -> 100514 bytes in 137.09 s.
+
+1267139 bytes -> 199145 bytes in 317.35 s.
+100514 bytes -> 456511 bytes in 144.18 s.
+199145 bytes -> 1267139 bytes in 293.18 s.
+
+Build mode:            accepted
+Packed core:           218288 bytes
+Embedded dictionary:   100514 bytes
+Embedded article order:199145 bytes
+Hutter S1:             517959 bytes
+Core SHA-256:          4d8889a3e7614ac95ae0dff6ad5c271d3ed55d94ffffdff7095f1be263675fbc
+S1 SHA-256:            8e2f68fb295aea3519c672444aae989f4150f9b80a39d5e12b291c69705fa52f

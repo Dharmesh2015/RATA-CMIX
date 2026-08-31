@@ -37,6 +37,7 @@
 #include <memory>
 #include <stdint.h>
 #include <assert.h>
+#include "../utils/hugepage.h"
 
 // AVX2
 #include <immintrin.h>
@@ -140,13 +141,15 @@ void ResetPredictions() {
 template <class T> void alloc(T*&ptr, int c) {
   ptr=(T*)calloc(c, sizeof(T));
   if (!ptr) exit(1);
+  AdviseHugePages(ptr, (size_t)c*sizeof(T));
 }
- 
+
 // for aligned data
 template <class T> void alloc1(T*&data, int c,T*&ptr,const int align=16) {
   const size_t extra=(align+sizeof(T)-1)/sizeof(T);
   ptr=(T*)calloc((size_t)c+extra, sizeof(T));
   if (!ptr) exit(1);
+  AdviseHugePages(ptr, ((size_t)c+extra)*sizeof(T));
   data=(T*)(((uintptr_t)ptr+(align-1)) & ~(uintptr_t)(align-1));
 }
 
@@ -728,7 +731,7 @@ for (int i=0; i<n; ++i) {
 */
 
     // Adjust weights to minimize coding cost of last prediction
-    inline void update(int y) {
+    void __attribute__ ((noinline)) update(int y) {
         err=((y<<12)-pr)*uperr/4;
         if (err>32767)
         err=32767;
@@ -744,7 +747,7 @@ for (int i=0; i<n; ++i) {
         int dp=int((int64_t(dot_product(&tx[0], &wx[cxt*N], N))*shift1)>>11);
         return pr=squash(dp);
     }
-    inline int p1() {
+    int __attribute__ ((noinline)) p1() {
         assert(cxt>=0 && cxt<M);
         int dp=int((int64_t(dot_product(&tx[0], &wx[cxt*N], N))*shift1)>>11);
         if (dp<-2047) {
@@ -756,10 +759,27 @@ for (int i=0; i<n; ++i) {
         pr=squash(dp);
         return dp;
     }
+    // Start streaming the 2N-byte weight row for context cx; wx is only
+    // 32B-aligned so a row can straddle one extra line - cover the tail.
+    inline void prefetchRowAt(int cx) const {
+        const char* row=(const char*)&wx[cx*N];
+        const int bytes=N*2;
+        for (int i=0; i<bytes; i+=64) _mm_prefetch(row+i, _MM_HINT_T0);
+        _mm_prefetch(row+bytes-1, _MM_HINT_T0);
+    }
+    // Set the context for the next p1()/update() and prefetch its weight row,
+    // but only when the row actually changed - an unchanged cxt means last
+    // bit's p1()/update() just touched the row, so it is still cached.
+    inline void setCxt(int cx) {
+        if (cx!=cxt) {
+            cxt=cx;
+            prefetchRowAt(cx);
+        }
+    }
     void setTxWx(int n,short* mn) {
         N=n;
         alloc1(wx,(N*M)+32,ptr,32);
-        tx=mn; 
+        tx=mn;
         // Set bias
         for (int j=0; j<M*N; ++j) wx[j]=129;
     }
@@ -1060,41 +1080,28 @@ union  E {  // hash element, 64 bytes
     };
     U8 pad[B] ;
     inline U8* get(U16 ch,int keep) {
-        const int recent0=last&15;
-        const int recent1=last>>4;
-        if (recent0<A && chk[recent0]==ch) return &bh[recent0][0];
-
-#if defined(__AVX2__)
-        if constexpr (A==14) {
-            const YMM wanted=_mm256_set1_epi16(static_cast<short>(ch));
-            const YMM values=_mm256_loadu_si256(
-                reinterpret_cast<const YMM*>(&chk[0]));
-            const YMM equal=_mm256_cmpeq_epi16(values,wanted);
-            const unsigned mask=
-                static_cast<unsigned>(_mm256_movemask_epi8(equal))&0x0fffffffu;
-            if (mask!=0) {
-                const int i=__builtin_ctz(mask)>>1;
-                last=(last<<4)|i;
-                return &bh[i][0];
-            }
-            int b=0xffff,bi=0;
-            for (int i=0;i<A;++i) {
-                if (i!=recent0 && i!=recent1) {
-                    const int pri=bh[i][0];
-                    if (pri<b) b=pri,bi=i;
-                }
-            }
-            last=(last<<4)|bi|keep;
-            chk[bi]=ch;
-            return static_cast<U8*>(memset(&bh[bi][0],0,7));
+        // Hot path: cache decoded recent indexes once per lookup.
+        const int recent0 = last & 15;
+        const int recent1 = last >> 4;
+        if (recent0 < A && chk[recent0]==ch) return &bh[recent0][0];
+        // Branch-free probe: the A checksums are contiguous, so one compare +
+        // movemask finds the first match; the 16B load stays inside the 32B
+        // element (covers chk, last, bh[0..1] prefix) and non-chk lanes are
+        // masked off. tzcnt picks the lowest slot, same as the old scan.
+        // (step011 tried collapsing the fast path / hit fork / victim scan
+        // into branch-free selects: both variants LOST on wall clock - the
+        // recent-slot branch is predictable enough to earn its keep.)
+        const XMM vch=_mm_set1_epi16((short)ch);
+        const XMM row=_mm_loadu_si128((const XMM*)&chk[0]);
+        const U32 m=(U32)_mm_movemask_epi8(_mm_cmpeq_epi16(row, vch)) & ((1u<<(2*A))-1u);
+        if (m) {
+            const int i=(int)(__builtin_ctz(m)>>1);
+            last = (last<<4) | i;
+            return (U8*)&bh[i][0];
         }
-#endif
-        int b=0xffff,bi=0;
-        for (int i=0;i<A;++i) {
-            if (chk[i]==ch) {
-                last=(last<<4)|i;
-                return &bh[i][0];
-            }
+        // Miss path (LRU victim selection) unchanged.
+        int b=0xffff, bi=0;
+        for (int i=0; i<A; ++i) {
             if (i!=recent0 && i!=recent1) {
                 const int pri=bh[i][0];
                 if (pri<b) b=pri,bi=i;
@@ -1121,6 +1128,11 @@ short st2_p0[4096];
 short st2_p1[4096];
 short rcpr[512]; //2-6 0-4
 bool doCMprint=false;
+// step011: sink byte for branch-free dead-context handling in
+// ContextMap3/4::mix(). A dead cp[i] is redirected here so the bit-history
+// read-modify-write and the state load run unconditionally; next() on any
+// byte value has no side effects and the sink is never meaningfully read.
+static U8 cmSink8;
 template <const int A, const int B> // Warning: values 3, 7 for A are the only valid parameters
 union  E1 {  // hash element, 64 bytes
     struct{ // this is bad uc
@@ -1134,41 +1146,27 @@ union  E1 {  // hash element, 64 bytes
     };
     U8 pad[B] ;
     inline U8* get(U16 ch,int keep) {
-        const int recent0=last&15;
-        const int recent1=last>>4;
-        if (recent0<A && chk[recent0]==ch) return &bh[recent0][0];
-
-#if defined(__AVX2__)
-        if constexpr (A==14) {
-            const YMM wanted=_mm256_set1_epi16(static_cast<short>(ch));
-            const YMM values=_mm256_loadu_si256(
-                reinterpret_cast<const YMM*>(&chk[0]));
-            const YMM equal=_mm256_cmpeq_epi16(values,wanted);
-            const unsigned mask=
-                static_cast<unsigned>(_mm256_movemask_epi8(equal))&0x0fffffffu;
-            if (mask!=0) {
-                const int i=__builtin_ctz(mask)>>1;
-                last=(last<<4)|i;
-                return &bh[i][0];
-            }
-            int b=0xffff,bi=0;
-            for (int i=0;i<A;++i) {
-                if (i!=recent0 && i!=recent1) {
-                    const int pri=bh[i][0];
-                    if (pri<b) b=pri,bi=i;
-                }
-            }
-            last=(last<<4)|bi|keep;
-            chk[bi]=ch;
-            return static_cast<U8*>(memset(&bh[bi][0],0,7));
+        // Hot path: cache decoded recent indexes once per lookup.
+        const int recent0 = last & 15;
+        const int recent1 = last >> 4;
+        if (recent0 < A && chk[recent0]==ch) return &bh[recent0][0];
+        // Branch-free probe: chk[0..13] fits one 256-bit lane (the 32B load
+        // also covers 'last' and bh[0][0..2]; those lanes are masked off).
+        // tzcnt picks the lowest matching slot, same as the old scan.
+        // (step011 tried collapsing the fast path / hit fork / victim scan
+        // into branch-free selects: both variants LOST on wall clock - the
+        // recent-slot branch is predictable enough to earn its keep.)
+        const YMM vch=_mm256_set1_epi16((short)ch);
+        const YMM row=_mm256_loadu_si256((const YMM*)&chk[0]);
+        const U32 m=(U32)_mm256_movemask_epi8(_mm256_cmpeq_epi16(row, vch)) & ((1u<<(2*A))-1u);
+        if (m) {
+            const int i=(int)(__builtin_ctz(m)>>1);
+            last = (last<<4) | i;
+            return (U8*)&bh[i][0];
         }
-#endif
-        int b=0xffff,bi=0;
-        for (int i=0;i<A;++i) {
-            if (chk[i]==ch) {
-                last=(last<<4)|i;
-                return &bh[i][0];
-            }
+        // Miss path (LRU victim selection) unchanged.
+        int b=0xffff, bi=0;
+        for (int i=0; i<A; ++i) {
             if (i!=recent0 && i!=recent1) {
                 const int pri=bh[i][0];
                 if (pri<b) b=pri,bi=i;
@@ -1316,8 +1314,13 @@ struct ContextMap3 {
         cx=cx*987654323+i;  // permute (don't hash) cx to spread the distribution
         cx=cx<<16|cx>>16;
         cxt[i]=cx*123456791+i;
-        checksum[i]=static_cast<U16>((cxt[i]>>16)^i);
-        bucket_base[i]=cxt[i]&tmask;
+        // The bit-0 bucket t[(cxt[i]+c0)&tmask] with c0==1 is dereferenced by
+        // mix() well after all byte-boundary set() calls; prefetching both
+        // 64B lines of the 128B bucket here overlaps the ~60 otherwise
+        // latency-serialized DRAM accesses across all maps.
+        const char* bucket=(const char*)&t[(cxt[i]+1)&tmask];
+        _mm_prefetch(bucket, _MM_HINT_T0);
+        _mm_prefetch(bucket+64, _MM_HINT_T0);
         cxtMask=cxtMask*2;
     }
 
@@ -3413,7 +3416,7 @@ struct XMLModel1 {
         memset(&Cache, 0, sizeof(XMLTagCache));
         memset(&StateBH, 0, sizeof(StateBH));  
     }
-    int p() {
+    void __attribute__ ((noinline)) parse() {
         xlU4=0;
         if (x.bpos==0) {
             U8 B=(U8)x.c4;
@@ -3570,6 +3573,10 @@ struct XMLModel1 {
             xlU2=hash((*pTag).Name, State*2+(*pTag).EndTag,hash( (*pTag).Content.Type, (*Tag).Content.Type));
             xlU3=hash(State*2+(*Tag).EndTag, (*Tag).Name,hash( (*Tag).Content.Type, x.c4&0xE0FF));
         }
+    }
+    int p() {
+        xlU4=0;
+        if (x.bpos==0) parse();
         U8 s = ((StateBH[State]>>(28-x.bpos))&0x08) |
         ((StateBH[State]>>(21-x.bpos))&0x04) |
         ((StateBH[State]>>(14-x.bpos))&0x02) |
@@ -3629,8 +3636,8 @@ struct DirectStateMap {
         memset(cxt, 0, count*sizeof(U32));
         index=pu=0;
     }
-    inline void set_one(U32 cx,int y) {
-        assert(cxt[index]<=mask);
+    void __attribute__ ((noinline)) set(U32 cx,int y) {
+        assert(cxt[index]>=0 && cxt[index]<=mask);
         assert(index<count);
         CxtState[cxt[index]]=next(CxtState[cxt[index]],y);
         cxt[index]=cx&mask;
@@ -3652,7 +3659,7 @@ struct DirectStateMap {
                 __builtin_prefetch(CxtState+cxt[i+1], 1, 1);
                 __builtin_prefetch(CxtState+(contexts[i+1]&mask), 0, 1);
             }
-            set_one(contexts[i],y);
+            set(contexts[i],y);
         }
     }
     void mix() {
@@ -4467,7 +4474,7 @@ void __attribute__ ((noinline)) updateSen(int i=0) {
 }
 
 // Parse all contexts
-void parseByte() {
+void __attribute__ ((noinline)) parseByte() {
     U32 j=0;
     const U32 c4=x.c4;
         // Skip mode based on a match lenght
@@ -5126,15 +5133,58 @@ int xmlS=0;
 int mp0=0,mp1=0,mp2=0,mp3=0;
 U8 mstate=0;
 
+// The 19 DirectStateMap context indices for the current bit, in call order
+// (5x dcsm, 3x dcsm2, 2x dcsm1, 6x dcsm0, 3x dcsmN). Every operand is fixed
+// at bit entry, so for bpos!=0 the values are computed in update() right
+// after the bit-state update and the cold CxtState bytes prefetched under
+// the whole mixer-train block; at bpos==0 the byte state is only final
+// after parseByte()/setByteContexts(), so modelPrediction() refills there.
+// The set() calls themselves keep their original order and position.
+U32 dcsmCx[19];
+inline void dcsmPrecomputeCx() {
+    dcsmCx[0]=(word0*191)*256+x.c0;
+    dcsmCx[1]=(word0*191+worcxt.Word(1))*256+x.c0;
+    dcsmCx[2]=(word0*191+worcxt.Word(2))*256+x.c0;
+    dcsmCx[3]=(word0*191+worcxt.Word(3))*256+x.c0;
+    dcsmCx[4]=(word0*191+worcxt.Word(4))*256+x.c0;
+    dcsmCx[5]=(word00*191+indirectBrByte)*256+x.c0;
+    dcsmCx[6]=(word00*191+worcxt0.Word(1)+indirectBrByte)*256+x.c0;
+    dcsmCx[7]=(word00*191+worcxt0.Word(2)+indirectBrByte)*256+x.c0;
+    dcsmCx[8]=(indirectBrByte)*256+x.c0;
+    dcsmCx[9]=(cxtind3)*191+x.c0;
+    dcsmCx[10]=(h+worcxt1.Word(1))*256+x.c0;
+    dcsmCx[11]=(h+worcxt1.Word(2))*256+x.c0;
+    dcsmCx[12]=(h+worcxt1.Word(3))*256+x.c0;
+    dcsmCx[13]=(h+worcxt1.Word(4))*256+x.c0;
+    dcsmCx[14]=(h+worcxt1.Word(5))*256+x.c0;
+    dcsmCx[15]=(h+worcxt1.Word(6))*256+x.c0;
+    dcsmCx[16]=(h+worcxt.Code(1)+fccxt.cxt )*256+x.c0;
+    dcsmCx[17]=(h+worcxt.Code(2)+fccxt.cxt)*256+x.c0;
+    dcsmCx[18]=(h+worcxt.Code(3)+fccxt.cxt)*256+x.c0;
+    _mm_prefetch((const char*)&dcsm.CxtState[dcsmCx[0]&dcsm.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm.CxtState[dcsmCx[1]&dcsm.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm.CxtState[dcsmCx[2]&dcsm.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm.CxtState[dcsmCx[3]&dcsm.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm.CxtState[dcsmCx[4]&dcsm.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm2.CxtState[dcsmCx[5]&dcsm2.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm2.CxtState[dcsmCx[6]&dcsm2.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm2.CxtState[dcsmCx[7]&dcsm2.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm1.CxtState[dcsmCx[8]&dcsm1.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm1.CxtState[dcsmCx[9]&dcsm1.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm0.CxtState[dcsmCx[10]&dcsm0.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm0.CxtState[dcsmCx[11]&dcsm0.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm0.CxtState[dcsmCx[12]&dcsm0.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm0.CxtState[dcsmCx[13]&dcsm0.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm0.CxtState[dcsmCx[14]&dcsm0.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsm0.CxtState[dcsmCx[15]&dcsm0.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsmN.CxtState[dcsmCx[16]&dcsmN.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsmN.CxtState[dcsmCx[17]&dcsmN.mask], _MM_HINT_T0);
+    _mm_prefetch((const char*)&dcsmN.CxtState[dcsmCx[18]&dcsmN.mask], _MM_HINT_T0);
+}
+
 // Set contexts and predict
-int modelPrediction() {
-    int c=0;
-    const int bpos=x.bpos;
+void __attribute__ ((noinline)) setByteContexts() {
     const U32 c4=x.c4;
-    const int c0=x.c0;
-    if (bpos==0) parseByte();
-    xmlS=xml.p();
-    if (bpos==0) {
         // Skip when line starts with spaces and it is space char
         if ((fc==SPACE && c1==SPACE) || (skipM1)) {
             cmC2[0].sets(); cmC2[0].sets(); cmC2[0].sets(); 
@@ -5564,7 +5614,18 @@ int modelPrediction() {
         maps1.set((word0*191));
         maps2.set(deccode>>2);
     }
-    
+
+int modelPrediction() {
+    int c=0;
+    const int bpos=x.bpos;
+    const int c0=x.c0;
+    if (bpos==0) parseByte();
+    xmlS=xml.p();
+    if (bpos==0) {
+        setByteContexts();
+        dcsmPrecomputeCx();
+    }
+
     const int c0b=c0<<(8-bpos);
     const U8 c0b_byte=static_cast<U8>(c0b&255);
     const U8 wrt2_c0b=wrt_2b[c0b_byte];

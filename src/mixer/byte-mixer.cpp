@@ -19,6 +19,18 @@ void ByteMixer::SetInput(int index, float val) {
   if (offset_ == vocab_size_) offset_ = 0;
 }
 
+void ByteMixer::SetProbs(const float* vocab_probs) {
+  unsigned int k = 0;
+  for (int i = 0; i < 256; ++i) {
+    if (vocab_[i]) {
+      probs_[i] = vocab_probs[k++];
+    } else {
+      probs_[i] = 0.0f;
+    }
+  }
+  ByteModel::ByteUpdate();
+}
+
 void ByteMixer::ByteUpdate() {
   inputs_ *= 2 / num_models_;
   lstm_->SetInput(inputs_);
@@ -36,3 +48,21 @@ void ByteMixer::ByteUpdate() {
   offset_ = 0;
   ByteModel::ByteUpdate();
 }
+
+#ifdef KH_OBIAS
+void ByteMixer::SetOutputBias(const float* bias256) {
+  if (!lstm_) return;
+  if (bias256 == nullptr) {
+    lstm_->SetOutputBias(nullptr);
+    return;
+  }
+  if (folded_bias_.size() != vocab_size_) {
+    folded_bias_.resize(vocab_size_, 0.0f);
+  }
+  unsigned int k = 0;
+  for (int i = 0; i < 256; ++i) {
+    if (vocab_[i]) folded_bias_[k++] = bias256[i];
+  }
+  lstm_->SetOutputBias(&folded_bias_[0]);
+}
+#endif

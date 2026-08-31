@@ -1,0 +1,64 @@
+199145 bytes -> 1267139 bytes in 309.29 s.
+100514 bytes -> 456511 bytes in 129.38 s.
+
+r1 encoded tail reorder: stream=586459321->587138826 tail=45332670 side=679489 r0=526364 r1=2001835 r2=614080 prelude=7041 suffix=84410 blocks=243425 order=payload_lex side=d86a_lehmer stage=post_wrt
+199145 bytes -> 1267139 bytes in 290.21 s.
+100514 bytes -> 456511 bytes in 122.37 s.
+
+r1 encoded tail reorder: stream=586459321->587138826 tail=45332670 side=679489 r0=526364 r1=2001835 r2=614080 prelude=7041 suffix=84410 blocks=243425 order=payload_lex side=d86a_lehmer stage=post_wrt
+baseline replay mismatch at region 3: expected 117778, got 117777
+
+Loaded 44515 words
+cmix-lex
+Compress:
+    to compress enwik9: cmix -e enwik9 [output]
+    to create a header for hutter prize: cmix -h comp_dict_size comp_new_order_size decomp_input_size
+    with dictionary:    cmix -c [dictionary] [input] [output]
+    without dictionary: cmix -c [input] [output]
+    no preprocessing:   cmix -n [input] [output]
+    only preprocessing: cmix -s [dictionary] [input] [output]
+                        cmix -s [input] [output]
+Decompress:
+    with dictionary:    cmix -d [dictionary] [input] [output]
+    without dictionary: cmix -d [input] [output]
+199145 bytes -> 1267139 bytes in 320.54 s.
+100514 bytes -> 456511 bytes in 121.00 s.
+
+r1 encoded tail reorder: stream=586459321->587138826 tail=45332670 side=679489 r0=526364 r1=2001835 r2=614080 prelude=7041 suffix=84410 blocks=243425 order=payload_lex side=d86a_lehmer stage=post_wrt
+baseline replay boundary adjustment at region 3: expected 117778, got 117777 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 5: expected 118039, got 118038 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 7: expected 219880, got 219881 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 8: expected 204242, got 204241 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 11: expected 247227, got 247228 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 12: expected 225788, got 225787 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 18: expected 237242, got 237241 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 21: expected 161711, got 161710 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 32: expected 256917, got 256916 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 33: expected 242102, got 242103 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 39: expected 237977, got 237976 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 43: expected 219179, got 219178 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 52: expected 267663, got 267662 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 53: expected 233735, got 233736 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 54: expected 267396, got 267395 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 56: expected 252710, got 252711 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 57: expected 262436, got 262435 (accepted: 1-byte coder attribution)
+baseline replay boundary adjustment at region 59: expected 261519, got 261520 (accepted: 1-byte coder attribution)
+baseline replay mismatch at region 60: expected 243390, got 243388
+
+Loaded 44515 words
+cmix-lex
+Compress:
+    to compress enwik9: cmix -e enwik9 [output]
+    to create a header for hutter prize: cmix -h comp_dict_size comp_new_order_size decomp_input_size
+    with dictionary:    cmix -c [dictionary] [input] [output]
+    without dictionary: cmix -c [input] [output]
+    no preprocessing:   cmix -n [input] [output]
+    only preprocessing: cmix -s [dictionary] [input] [output]
+                        cmix -s [input] [output]
+Decompress:
+    with dictionary:    cmix -d [dictionary] [input] [output]
+    without dictionary: cmix -d [input] [output]
+199145 bytes -> 1267139 bytes in 287.61 s.
+100514 bytes -> 456511 bytes in 124.11 s.
+
+r1 encoded tail reorder: stream=586459321->587138826 tail=45332670 side=679489 r0=526364 r1=2001835 r2=614080 prelude=7041 suffix=84410 blocks=243425 order=payload_lex side=d86a_lehmer stage=post_wrt

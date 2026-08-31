@@ -1,0 +1,6 @@
+199145 bytes -> 1267139 bytes in 410.52 s.
+100514 bytes -> 456511 bytes in 159.24 s.
+
+r1 encoded tail reorder: stream=586459321->587138826 tail=45332670 side=679489 r0=526364 r1=2001835 r2=614080 prelude=7041 suffix=84410 blocks=243425 order=payload_lex side=d86a_lehmer stage=post_wrt
+
+Loaded 44515 words
