@@ -1,0 +1,19 @@
+# Native build products
+*.o
+*.o.tmp
+cmix
+cmix_*
+*.exe
+
+# Runtime scratch files
+ppm.temp
+*.partial
+*.temp
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Metadata copied from macOS archives
+._*
+.DS_Store
