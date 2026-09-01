@@ -375,14 +375,15 @@ bool ContainsDonor(
 WorkerResult RunWorker(const std::string& input_path,
     const std::string& scratch_output_path, uint64_t input_bytes,
     const std::vector<bool>& vocab, FILE* dictionary,
-    bool pretrain_dictionary, DonorPlan* donor_plan,
+    bool pretrain_dictionary, bool enable_transformer6m,
+    DonorPlan* donor_plan,
     const std::string& ledger_path) {
   std::ifstream input(input_path, std::ios::in | std::ios::binary);
   std::ofstream output(
       scratch_output_path, std::ios::out | std::ios::binary);
   if (!input.is_open() || !output.is_open()) return WorkerResult::kFailed;
 
-  Predictor predictor(vocab);
+  Predictor predictor(vocab, false, enable_transformer6m);
   if (pretrain_dictionary) preprocessor::Pretrain(&predictor, dictionary);
   Encoder encoder(&output, &predictor);
 
@@ -554,7 +555,8 @@ WorkerResult RunWorker(const std::string& input_path,
 bool RunDonorForkDiscovery(const std::string& input_path,
     const std::string& scratch_output_path, uint64_t input_bytes,
     const std::vector<bool>& vocab, FILE* dictionary,
-    bool pretrain_dictionary, DonorPlan* donor_plan,
+    bool pretrain_dictionary, bool enable_transformer6m,
+    DonorPlan* donor_plan,
     uint64_t* output_bytes) {
 #if !FX4_DONOR_FORK_DISCOVERY
   (void)input_path;
@@ -563,6 +565,7 @@ bool RunDonorForkDiscovery(const std::string& input_path,
   (void)vocab;
   (void)dictionary;
   (void)pretrain_dictionary;
+  (void)enable_transformer6m;
   (void)donor_plan;
   (void)output_bytes;
   return false;
@@ -576,8 +579,8 @@ bool RunDonorForkDiscovery(const std::string& input_path,
   const char* winner_mode = getenv("FX4_DONOR_WINNER_SEARCH");
   if (winner_mode && *winner_mode && strcmp(winner_mode, "0") != 0) {
     const bool ok = RunDonorWinnerSearch(input_path, scratch_output_path,
-        input_bytes, vocab, dictionary, pretrain_dictionary, donor_plan,
-        ledger_path, output_bytes);
+        input_bytes, vocab, dictionary, pretrain_dictionary,
+        enable_transformer6m, donor_plan, ledger_path, output_bytes);
     discovery_completed = ok;
     return ok;
   }
@@ -586,8 +589,8 @@ bool RunDonorForkDiscovery(const std::string& input_path,
   unlink(PausedPath(ledger_path).c_str());
 
   const WorkerResult result = RunWorker(input_path, scratch_output_path,
-      input_bytes, vocab, dictionary, pretrain_dictionary, donor_plan,
-      ledger_path);
+      input_bytes, vocab, dictionary, pretrain_dictionary,
+      enable_transformer6m, donor_plan, ledger_path);
   if (result == WorkerResult::kFailed) return false;
 
   struct stat info {};

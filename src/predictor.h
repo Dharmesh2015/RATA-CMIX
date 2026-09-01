@@ -26,6 +26,9 @@
 #if FX4_DELTA_MEMORY_BIAS
 #include "models/delta-memory.h"
 #endif
+#if FX4_ESN_NLMS
+#include "models/esn-nlms.h"
+#endif
 #if FX4_TRANSFORMER6M
 #include "third_party/fx2_transformer/opt/model_opt.h"
 #endif
@@ -184,6 +187,9 @@ class Predictor {
 #endif
 #if FX4_DELTA_MEMORY_BIAS
   std::optional<DeltaMemory8> delta_memory_;
+#endif
+#if FX4_ESN_NLMS
+  std::optional<EsnNlmsExpert> esn_nlms_;
 #endif
 #if FX4_TRANSFORMER6M
   std::unique_ptr<fx2::opt::TransformerOpt> transformer6m_;

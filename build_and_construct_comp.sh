@@ -7,47 +7,16 @@ cd "$ROOT_DIR"
 readonly DICTIONARY="$ROOT_DIR/dictionary/english.dic"
 readonly ARTICLE_ORDER="$ROOT_DIR/src/readalike_prepr/data/new_article_order"
 readonly TRANSFORMER="$ROOT_DIR/models/transformer6m/6m-q4-fp32.tfwc2"
-readonly BITLSTM32="$ROOT_DIR/models/bitlstm32/refit_golden256_fp16.blob"
-readonly TOKEN_NGRAM="${TOKEN_NGRAM:-0}"
-readonly DELTA_MEMORY="${DELTA_MEMORY:-0}"
-readonly ORACLE_TRACE="${ORACLE_TRACE:-0}"
-readonly PROFILE="${FX4_PROFILE:-target93}"
-
-need_transformer=0
-need_bitlstm32=0
-case "$PROFILE" in
-  target93|target93_baseline)
-    need_bitlstm32=1
-    ;;
-  target93_transformer)
-    need_transformer=1
-    need_bitlstm32=1
-    ;;
-  fx2_transformer_cpu)
-    need_transformer=1
-    ;;
-  target93_deepmix_lstm|deepmix_cpu)
-    ;;
-  *)
-    echo "Unknown FX4_PROFILE: $PROFILE" >&2
-    exit 2
-    ;;
-esac
 
 test -s "$DICTIONARY"
 test -s "$ARTICLE_ORDER"
-if [[ "$need_bitlstm32" == 1 ]]; then
-  test -s "$BITLSTM32"
-fi
-if [[ "$need_transformer" == 1 ]]; then
-  test -s "$TRANSFORMER"
-fi
+test -s "$TRANSFORMER"
 command -v clang++-17 >/dev/null
 
+# One connected production candidate. It deliberately keeps the canonical
+# cmix-lex post-R1 stream; see docs/TARGET93_CPU_PIPELINE.md.
 make clean
-make "$PROFILE" -j"$(nproc)" OUT=cmix \
-  TOKEN_NGRAM="$TOKEN_NGRAM" DELTA_MEMORY="$DELTA_MEMORY" \
-  ORACLE_TRACE="$ORACLE_TRACE"
+make target93 -j"$(nproc)" OUT=cmix
 
 if command -v llvm-strip-17 >/dev/null 2>&1; then
   llvm-strip-17 --strip-all cmix
@@ -70,21 +39,11 @@ fi
 rm -rf run
 mkdir -p run
 cp cmix run/cmix_orig
-if [[ "$need_bitlstm32" == 1 ]]; then
-  cp "$BITLSTM32" run/bitlstm32.blob
-fi
-if [[ "$need_transformer" == 1 ]]; then
-  cp "$TRANSFORMER" run/transformer6m.weights
-fi
+cp "$TRANSFORMER" run/transformer6m.weights
 chmod 0755 run/cmix_orig
 
 cd run
-if [[ "$need_bitlstm32" == 1 ]]; then
-  export KH_BITLSTM32="$PWD/bitlstm32.blob"
-fi
-if [[ "$need_transformer" == 1 ]]; then
-  export FX4_TRANSFORMER_WEIGHTS="$PWD/transformer6m.weights"
-fi
+export FX4_TRANSFORMER_WEIGHTS="$PWD/transformer6m.weights"
 rm -f comp_dict comp_order header.dat ppm.temp verify_dict verify_order
 
 ./cmix_orig -c "$DICTIONARY" comp_dict
@@ -100,49 +59,20 @@ rm -f ppm.temp verify_order
 
 dict_size="$(stat -c%s comp_dict)"
 order_size="$(stat -c%s comp_order)"
-bitlstm32_size=0
-if [[ "$need_bitlstm32" == 1 ]]; then
-  bitlstm32_size="$(stat -c%s bitlstm32.blob)"
-fi
-transformer_size=0
-if [[ "$need_transformer" == 1 ]]; then
-  transformer_size="$(stat -c%s transformer6m.weights)"
-fi
-if [[ "$need_transformer" == 1 && "$need_bitlstm32" == 1 ]]; then
-  ./cmix_orig -h "$dict_size" "$order_size" 0 \
-    "$transformer_size" "$bitlstm32_size"
-elif [[ "$need_transformer" == 1 ]]; then
-  ./cmix_orig -h "$dict_size" "$order_size" 0 "$transformer_size"
-elif [[ "$need_bitlstm32" == 1 ]]; then
-  ./cmix_orig -h "$dict_size" "$order_size" 0 "$bitlstm32_size"
-else
-  ./cmix_orig -h "$dict_size" "$order_size" 0
-fi
+transformer_size="$(stat -c%s transformer6m.weights)"
+./cmix_orig -h "$dict_size" "$order_size" 0 "$transformer_size"
 
-# S1 is a single self-contained executable. selfextract_comp() restores both
-# model files before it decodes helper streams or constructs the main encoder.
-if [[ "$need_transformer" == 1 && "$need_bitlstm32" == 1 ]]; then
-  cat cmix_orig comp_dict comp_order transformer6m.weights bitlstm32.blob \
-    header.dat > cmix
-elif [[ "$need_transformer" == 1 ]]; then
-  cat cmix_orig comp_dict comp_order transformer6m.weights header.dat > cmix
-elif [[ "$need_bitlstm32" == 1 ]]; then
-  cat cmix_orig comp_dict comp_order bitlstm32.blob header.dat > cmix
-else
-  cat cmix_orig comp_dict comp_order header.dat > cmix
-fi
+# S1 contains the exact frozen model needed by both compression and
+# standalone decompression. No external Python, plan, or model file is used.
+cat cmix_orig comp_dict comp_order transformer6m.weights header.dat > cmix
 chmod 0755 cmix
 cp cmix "$ROOT_DIR/cmix"
 
 core_size="$(stat -c%s cmix_orig)"
 s1_size="$(stat -c%s cmix)"
-printf 'Packed target93 core: %s bytes\n' "$core_size"
-printf 'Profile:             %s\n' "$PROFILE"
+printf 'Packed core:          %s bytes\n' "$core_size"
 printf 'Embedded dictionary: %s bytes\n' "$dict_size"
 printf 'Embedded order:      %s bytes\n' "$order_size"
 printf 'Transformer model:   %s bytes\n' "$transformer_size"
-printf 'BitLSTM32 model:     %s bytes\n' "$bitlstm32_size"
-printf 'Token n-gram:        %s\n' "$TOKEN_NGRAM"
-printf 'Delta memory:        %s\n' "$DELTA_MEMORY"
 printf 'Hutter S1:           %s bytes\n' "$s1_size"
 printf 'S1 SHA-256:          %s\n' "$(sha256sum cmix | awk '{print $1}')"

@@ -87,6 +87,10 @@ struct ContextManager {
       ind4=0,context1_ind4=0,
       ind5=0,context1_ind5=0,
       mx19cxt=0;
+#if FX4_GRAMMAR_MATCH
+  // Idle is zero; active values identify GrammarMatch family/position state.
+  unsigned long long grammar_state_ = 0;
+#endif
   unsigned int line_class_ = 0, line_prefix_hash_ = 0;
   std::vector<unsigned char> history_, shared_map_;
   std::vector<unsigned long long> words_, recent_bytes_;

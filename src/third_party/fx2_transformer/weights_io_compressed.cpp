@@ -444,4 +444,37 @@ WeightsFile WeightsFile::load_compressed(const char* path) {
   return wf;
 }
 
+#if defined(FX2_TRANSFORMER_COMPRESSED_ONLY)
+// The record build never reads the much larger uncompressed training format.
+// Keep the shared tensor accessors here so weights_io.cpp is not linked into
+// the production executable merely to provide these two small methods.
+const WTensor& WeightsFile::get(const std::string& name) const {
+  const auto it = tensors.find(name);
+  if (it == tensors.end()) die("missing tensor %s", name.c_str());
+  return it->second;
+}
+
+const WTensor& WeightsFile::get(const std::string& name, uint8_t dtype,
+                                std::initializer_list<uint32_t> shape) const {
+  const WTensor& tensor = get(name);
+  if (tensor.dtype != dtype) {
+    die("%s: dtype %u, expected %u", name.c_str(), unsigned(tensor.dtype),
+        unsigned(dtype));
+  }
+  if (tensor.shape.size() != shape.size()) {
+    die("%s: ndim %zu, expected %zu", name.c_str(), tensor.shape.size(),
+        shape.size());
+  }
+  size_t index = 0;
+  for (uint32_t dimension : shape) {
+    if (tensor.shape[index] != dimension) {
+      die("%s: shape[%zu] = %u, expected %u", name.c_str(), index,
+          tensor.shape[index], dimension);
+    }
+    ++index;
+  }
+  return tensor;
+}
+#endif
+
 }  // namespace fx2

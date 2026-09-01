@@ -3003,7 +3003,8 @@ SearchResult SearchRegion(uint32_t region, const char* bytes, size_t size,
 bool RunDonorWinnerSearch(const std::string& input_path,
     const std::string& scratch_output_path, uint64_t input_bytes,
     const std::vector<bool>& vocab, FILE* dictionary,
-    bool pretrain_dictionary, DonorPlan* donor_plan,
+    bool pretrain_dictionary, bool enable_transformer6m,
+    DonorPlan* donor_plan,
     const std::string& ledger_path, uint64_t* output_bytes) {
   if (!donor_plan || !donor_plan->discovery_candidates() ||
       !EnsureLedgers(ledger_path)) {
@@ -3020,7 +3021,7 @@ bool RunDonorWinnerSearch(const std::string& input_path,
     return false;
   }
 
-  Predictor predictor(vocab);
+  Predictor predictor(vocab, false, enable_transformer6m);
   if (pretrain_dictionary) preprocessor::Pretrain(&predictor, dictionary);
   Encoder encoder(&output, &predictor);
 

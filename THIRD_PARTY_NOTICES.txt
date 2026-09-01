@@ -42,10 +42,9 @@ research bundle:
   src/third_party/fx2_transformer/
   models/transformer6m/6m-q4-fp32.tfwc2
 
-The `fx2_transformer_cpu` profile uses the published architecture: the
-transformer replaces the online byte LSTM while PPMd, FXCM and the final
-mixers remain active. The `target93_transformer` profile is a separate,
-unvalidated additive ablation for FX4's M3/M5 stream.
+The `target93` build uses the published architecture: the transformer
+replaces the online byte LSTM while PPMd, FXCM and the final mixers remain
+active on the canonical 205-symbol stream.
 The imported source is distributed under the GNU General Public License,
 version 3. Its original license is preserved as
 src/third_party/fx2_transformer/LICENSE.

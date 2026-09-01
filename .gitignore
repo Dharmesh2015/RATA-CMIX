@@ -4,11 +4,17 @@
 cmix
 cmix_*
 *.exe
+byte_vocab
+fxot_analyze
 
 # Runtime scratch files
 ppm.temp
 *.partial
 *.temp
+*.fxot
+/run/
+/results/
+/research/
 
 # Python caches
 __pycache__/

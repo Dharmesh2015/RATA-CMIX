@@ -15,6 +15,7 @@ bool RunDonorForkDiscovery(
     const std::vector<bool>& vocab,
     FILE* dictionary,
     bool pretrain_dictionary,
+    bool enable_transformer6m,
     DonorPlan* donor_plan,
     uint64_t* output_bytes);
 

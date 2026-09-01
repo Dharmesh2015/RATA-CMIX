@@ -1,10 +1,12 @@
 CC := clang++-17
 CC_C := clang-17
 OUT ?= cmix
+.DEFAULT_GOAL := target93
 
-# cmix-obias configuration of record, adapted to the FX4 configuration names.
-# Set CMIX_OBIAS_RECORD=0 only for a control build.
-CMIX_OBIAS_RECORD ?= 1
+# Historical research switch. The connected production target deliberately
+# excludes cmix-obias because its head was trained around the online LSTM,
+# while target93 replaces that LSTM with the frozen FX2 transformer.
+CMIX_OBIAS_RECORD ?= 0
 CFLAGS_DEFINES ?= -DSEED=923 -DUPDATE_LIMIT=3000 -DNDEBUG \
 	-DFX4_STDERR_PROGRESS=0 -DFX4_PROGRESS_LOG=0 \
 	-DFX4_LSTM_MID_BRIDGE=2
@@ -17,6 +19,7 @@ endif
 DONOR ?= 0
 POSTR1 ?= 0
 MINI_CMIX ?= 0
+SCR2 ?= 0
 VIRTUAL_REPLAY ?= 0
 DONOR_DISCOVERY ?= 0
 RESEARCH_DONOR_BOOTSTRAP ?= 0
@@ -26,10 +29,9 @@ RESIDUAL_LSTM96 ?= 0
 ALTXS ?= 0
 TRANSFORMER ?= 0
 TRANSFORMER_REPLACE ?= 0
-TOKEN_NGRAM ?= 0
-DELTA_MEMORY ?= 0
 DEEPMIX_CONTEXTS ?= 0
-DEEPMIX_LSTM ?= 0
+ESN_NLMS ?= 0
+TARGET93_CANONICAL ?= 0
 
 DONOR_SOURCE :=
 DONOR_HEADER :=
@@ -40,6 +42,12 @@ DONOR_DISCOVERY_OBJECT :=
 POSTR1_SOURCE :=
 POSTR1_HEADER :=
 POSTR1_OBJECT :=
+SCR2_SOURCE :=
+SCR2_OBJECT :=
+VIRTUAL_REPLAY_SOURCE :=
+VIRTUAL_REPLAY_OBJECT :=
+POSTR1_TRANSFORM_SOURCE :=
+POSTR1_TRANSFORM_OBJECT :=
 ALTXS_CPP_SOURCE :=
 ALTXS_CPP_OBJECT :=
 ALTXS_C_OBJECTS :=
@@ -48,10 +56,14 @@ TRANSFORMER_OBJECTS :=
 TRANSFORMER_TARGET :=
 GRAMMAR_SOURCE :=
 GRAMMAR_OBJECT :=
-TOKEN_NGRAM_SOURCE :=
-TOKEN_NGRAM_OBJECT :=
-DELTA_MEMORY_SOURCE :=
-DELTA_MEMORY_OBJECT :=
+ESN_NLMS_SOURCE :=
+ESN_NLMS_OBJECT :=
+NEURAL_AUX_TARGETS :=
+NEURAL_AUX_OBJECTS :=
+
+ifeq ($(TARGET93_CANONICAL),1)
+override CFLAGS_DEFINES += -DFX4_TARGET93_CANONICAL=1
+endif
 
 ifeq ($(DONOR_DISCOVERY),1)
 DONOR := 1
@@ -72,12 +84,21 @@ override CFLAGS_DEFINES += -DFX4_MINI_CMIX=1
 endif
 ifeq ($(VIRTUAL_REPLAY),1)
 override CFLAGS_DEFINES += -DFX4_VIRTUAL_REPLAY=1
+VIRTUAL_REPLAY_SOURCE := src/virtual_replay_plan.cpp
+VIRTUAL_REPLAY_OBJECT := virtual_replay_plan.o
+endif
+ifeq ($(SCR2),1)
+override CFLAGS_DEFINES += -DFX4_SCR2=1
+SCR2_SOURCE := src/scr2_transform.cpp
+SCR2_OBJECT := scr2_transform.o
 endif
 ifeq ($(RESEARCH_DONOR_BOOTSTRAP),1)
 override CFLAGS_DEFINES += -DFX4_RESEARCH_DONOR_BOOTSTRAP=1
 endif
 ifeq ($(POSTR1_TRANSFORM),1)
 override CFLAGS_DEFINES += -DFX4_POSTR1_TRANSFORM=1
+POSTR1_TRANSFORM_SOURCE := src/postr1_transform.cpp
+POSTR1_TRANSFORM_OBJECT := postr1_transform.o
 endif
 ifeq ($(ORACLE_TRACE),1)
 override CFLAGS_DEFINES += -DFX4_RESIDUAL_ORACLE_TRACE=1
@@ -85,6 +106,12 @@ endif
 ifeq ($(RESIDUAL_LSTM96),1)
 override CFLAGS_DEFINES += -DFX4_RESIDUAL_LSTM96=1 \
 	-DKH_RESIDUAL_LSTM96_ARCHIVE
+NEURAL_AUX_TARGETS += residual96
+NEURAL_AUX_OBJECTS += residual-lstm96-head.o
+endif
+ifeq ($(CMIX_OBIAS_RECORD),1)
+NEURAL_AUX_TARGETS += head obias
+NEURAL_AUX_OBJECTS += bitlstm32-head.o obias-prior.o
 endif
 ifeq ($(ALTXS),1)
 override CFLAGS_DEFINES += -DFX4_ALTXS_M3_M5=1
@@ -97,34 +124,27 @@ ifeq ($(TRANSFORMER),1)
 override CFLAGS_DEFINES += -DFX4_TRANSFORMER6M=1 \
 	-DFX4_TRANSFORMER6M_REQUIRED=1 -DKH_TRANSFORMER6M_ARCHIVE
 ifeq ($(TRANSFORMER_REPLACE),1)
-override CFLAGS_DEFINES += -DFX4_TRANSFORMER_REPLACES_LSTM=1
+override CFLAGS_DEFINES += -DFX4_TRANSFORMER_REPLACES_LSTM=1 \
+	-DFX4_LSTM_CELLS=200 -DFX4_LSTM_LAYERS=1 \
+	-DFX4_LSTM_HORIZON=128 -DFX4_LSTM_LEARNING_RATE=0.03f
 else
 override CFLAGS_DEFINES += -DKH_BITLSTM32_REQUIRED=1
 endif
-TRANSFORMER_OBJECTS := tf_weights_io.o tf_weights_io_compressed.o \
+TRANSFORMER_OBJECTS := tf_weights_io_compressed.o \
 	tf_qmat_dense.o tf_qmat_sparse.o tf_attn.o tf_kda.o tf_glue.o \
 	tf_arena_build.o tf_model_opt.o
 TRANSFORMER_TARGET := transformer_objects
 endif
 ifeq ($(DEEPMIX_CONTEXTS),1)
 override CFLAGS_DEFINES += -DFX4_DEEPMIX_CONTEXTS=1 \
-	-DFX4_GRAMMAR_MATCH=1 -DGM_REVTS=1 -DIDHOIST
+	-DFX4_GRAMMAR_MATCH=1 -DGM_REVTS=1
 GRAMMAR_SOURCE := src/models/grammar-match.cpp
 GRAMMAR_OBJECT := grammar-match.o
 endif
-ifeq ($(DEEPMIX_LSTM),1)
-override CFLAGS_DEFINES += -DFX4_LSTM_CELLS=200 \
-	-DFX4_LSTM_LAYERS=2 -DFX4_LSTM_LEARNING_RATE=0.06f
-endif
-ifeq ($(TOKEN_NGRAM),1)
-override CFLAGS_DEFINES += -DFX4_TOKEN_NGRAM_BIAS=1
-TOKEN_NGRAM_SOURCE := src/models/token-ngram-bias.cpp
-TOKEN_NGRAM_OBJECT := token-ngram-bias.o
-endif
-ifeq ($(DELTA_MEMORY),1)
-override CFLAGS_DEFINES += -DFX4_DELTA_MEMORY_BIAS=1
-DELTA_MEMORY_SOURCE := src/models/delta-memory.cpp
-DELTA_MEMORY_OBJECT := delta-memory.o
+ifeq ($(ESN_NLMS),1)
+override CFLAGS_DEFINES += -DFX4_ESN_NLMS=1
+ESN_NLMS_SOURCE := src/models/esn-nlms.cpp
+ESN_NLMS_OBJECT := esn-nlms.o
 endif
 ifeq ($(DONOR),1)
 override CFLAGS_DEFINES += -DFX4_DONOR_PLAN=1
@@ -133,7 +153,6 @@ DONOR_HEADER := src/donor_plan.h
 DONOR_OBJECT := donor_plan.o
 endif
 
-ROOT_DIR := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 COMMON := $(CFLAGS_DEFINES) -m64 -Wall -std=c++17 -fno-exceptions \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-fno-threadsafe-statics -Wno-unknown-escape-sequence \
@@ -150,18 +169,6 @@ TRANSFORMER_FLAGS := -m64 -O3 -std=c++17 -Wall -Wextra \
 	-fno-math-errno -march=native -mtune=native \
 	-fdata-sections -ffunction-sections
 
-prof_gen: FAST_FLAGS += -fprofile-generate=$(ROOT_DIR)/pgo_data
-prof_gen: SLOW_FLAGS += -fprofile-generate=$(ROOT_DIR)/pgo_data
-prof_gen: COLD_FLAGS += -fprofile-generate=$(ROOT_DIR)/pgo_data
-prof_gen: LFLAGS += -fprofile-generate=$(ROOT_DIR)/pgo_data
-prof_gen: clean cmix
-
-prof_use: FAST_FLAGS += -fprofile-use=$(ROOT_DIR)/pgo_data -flto
-prof_use: SLOW_FLAGS += -fprofile-use=$(ROOT_DIR)/pgo_data
-prof_use: COLD_FLAGS += -fprofile-use=$(ROOT_DIR)/pgo_data
-prof_use: LFLAGS += -fprofile-use=$(ROOT_DIR)/pgo_data -flto
-prof_use: clean cmix
-
 slow: src/preprocess/preprocessor.cpp src/preprocess/preprocessor.h \
 	src/preprocess/dictionary.cpp src/preprocess/dictionary.h
 	$(CC) $(SLOW_FLAGS) src/preprocess/preprocessor.cpp \
@@ -169,13 +176,13 @@ slow: src/preprocess/preprocessor.cpp src/preprocess/preprocessor.h \
 
 cold: $(DONOR_SOURCE) $(DONOR_HEADER) $(DONOR_DISCOVERY_SOURCE) \
 	$(DONOR_DISCOVERY_HEADER) src/r1_reorder_transform.cpp \
-	src/r1_reorder_transform.h src/scr2_transform.cpp src/scr2_transform.h \
-	src/virtual_replay_plan.cpp src/virtual_replay_plan.h \
-	src/postr1_transform.cpp src/postr1_transform.h $(ALTXS_CPP_SOURCE) \
+	src/r1_reorder_transform.h $(SCR2_SOURCE) src/scr2_transform.h \
+	$(VIRTUAL_REPLAY_SOURCE) src/virtual_replay_plan.h \
+	$(POSTR1_TRANSFORM_SOURCE) src/postr1_transform.h $(ALTXS_CPP_SOURCE) \
 	src/runner.cpp
 	$(CC) $(COLD_FLAGS) $(DONOR_SOURCE) $(DONOR_DISCOVERY_SOURCE) \
-		src/r1_reorder_transform.cpp src/scr2_transform.cpp \
-		src/virtual_replay_plan.cpp src/postr1_transform.cpp \
+		src/r1_reorder_transform.cpp $(SCR2_SOURCE) \
+		$(VIRTUAL_REPLAY_SOURCE) $(POSTR1_TRANSFORM_SOURCE) \
 		$(ALTXS_CPP_SOURCE) src/runner.cpp -c
 
 altxs_objects: src/third_party/altxs/m3_densify.c \
@@ -195,6 +202,7 @@ tf_weights_io_compressed.o: \
 	src/third_party/fx2_transformer/weights_io_compressed.cpp \
 	src/third_party/fx2_transformer/weights_io.h
 	$(CC) $(filter-out -O3,$(TRANSFORMER_FLAGS)) -Os \
+		-DFX2_TRANSFORMER_COMPRESSED_ONLY=1 \
 		-c src/third_party/fx2_transformer/weights_io_compressed.cpp -o $@
 
 tf_qmat_dense.o: src/third_party/fx2_transformer/opt/qmat_dense.cpp
@@ -208,7 +216,8 @@ tf_kda.o: src/third_party/fx2_transformer/opt/kda.cpp
 tf_glue.o: src/third_party/fx2_transformer/opt/glue.cpp
 	$(CC) $(TRANSFORMER_FLAGS) -c $< -o $@
 tf_arena_build.o: src/third_party/fx2_transformer/opt/arena_build.cpp
-	$(CC) $(TRANSFORMER_FLAGS) -c $< -o $@
+	$(CC) $(TRANSFORMER_FLAGS) -DFX2_TRANSFORMER_COMPRESSED_ONLY=1 \
+		-c $< -o $@
 tf_model_opt.o: src/third_party/fx2_transformer/opt/model_opt.cpp
 	$(CC) $(TRANSFORMER_FLAGS) -c $< -o $@
 
@@ -223,8 +232,7 @@ fast:
 		src/contexts/sparse.cpp src/models/bracket.cpp \
 		src/models/byte-model.cpp src/models/direct-hash.cpp \
 		src/models/direct.cpp src/models/match.cpp src/models/fxcmv1.cpp \
-		$(GRAMMAR_SOURCE) $(POSTR1_SOURCE) $(TOKEN_NGRAM_SOURCE) \
-		$(DELTA_MEMORY_SOURCE) \
+		$(GRAMMAR_SOURCE) $(POSTR1_SOURCE) $(ESN_NLMS_SOURCE) \
 		src/models/ppmd.cpp \
 		src/states/nonstationary.cpp \
 		src/states/run-map.cpp src/mixer/byte-mixer.cpp \
@@ -244,83 +252,63 @@ residual96: src/models/residual-lstm96-head.cpp \
 	$(CC) $(FAST_FLAGS) -ffp-model=precise \
 		-c src/models/residual-lstm96-head.cpp
 
-cmix: fast slow cold head obias residual96 $(ALTXS_TARGET) \
+cmix: fast slow cold $(NEURAL_AUX_TARGETS) $(ALTXS_TARGET) \
 	$(TRANSFORMER_TARGET)
 	$(CC) $(LFLAGS) bit-context.o bracket-context.o bracket.o byte-mixer.o \
 		byte-model.o combined-context.o context-hash.o context-manager.o \
 		decoder.o dictionary.o direct-hash.o direct.o $(DONOR_OBJECT) \
 		$(DONOR_DISCOVERY_OBJECT) encoder.o indirect-hash.o interval-hash.o \
 		interval.o match.o mixer-input.o mixer.o nonstationary.o fxcmv1.o \
-		$(GRAMMAR_OBJECT) $(POSTR1_OBJECT) $(TOKEN_NGRAM_OBJECT) \
-		$(DELTA_MEMORY_OBJECT) \
+		$(GRAMMAR_OBJECT) $(POSTR1_OBJECT) $(ESN_NLMS_OBJECT) \
 		ppmd.o predictor.o preprocessor.o \
-		r1_reorder_transform.o scr2_transform.o virtual_replay_plan.o \
-		postr1_transform.o $(ALTXS_CPP_OBJECT) $(ALTXS_C_OBJECTS) \
+		r1_reorder_transform.o $(SCR2_OBJECT) $(VIRTUAL_REPLAY_OBJECT) \
+		$(POSTR1_TRANSFORM_OBJECT) $(ALTXS_CPP_OBJECT) $(ALTXS_C_OBJECTS) \
 		run-map.o runner.o sigmoid.o sparse.o sse.o \
-		bitlstm32-head.o obias-prior.o residual-lstm96-head.o \
+		$(NEURAL_AUX_OBJECTS) \
 		$(TRANSFORMER_OBJECTS) -s -o $(OUT)
 	rm -f *.o
 
-.PHONY: selective record altxs_record target93 target93_baseline \
-	target93_deepmix_lstm target93_transformer fx2_transformer_cpu \
-	deepmix_cpu transformer_objects byte_vocab fxot_analyze clean
-record: cmix
+.PHONY: target93 selective20 target93-scr2 target93-donor \
+	target93-selective selective-plan-builder transformer_objects clean
 
-# Reversible altxs M3+M5 outer transform on top of the cmix-obias predictor.
-# This is an experimental archive family and does not silently replace record.
-altxs_record:
-	$(MAKE) cmix ALTXS=1 OUT=$(OUT)
+selective-plan-builder: tools/build_selective_plan.cpp \
+	src/models/scr2_tokens.h
+	$(CC) -O2 -DNDEBUG -std=c++17 -Wall -Wextra \
+		-fdata-sections -ffunction-sections \
+		-Wl,--gc-sections tools/build_selective_plan.cpp \
+		-o build_selective_plan
 
-# Canonical CPU-only 93 MB research baseline. The public transformer is not
-# included here: its 205-symbol model was inactive on the real M3+M5 stream,
-# so paying for it in both S1 and S2 cannot be an accepted baseline.
-target93_baseline:
-	$(MAKE) cmix ALTXS=1 TOKEN_NGRAM=$(TOKEN_NGRAM) \
-		DELTA_MEMORY=$(DELTA_MEMORY) OUT=$(OUT)
-
-# Main CPU-only research candidate: keep the established M3/M5 + obias path,
-# then add only DeepMix's complementary grammar/FXCM context changes.
+# One connected CPU-only candidate. Keep cmix-lex's canonical 205-symbol
+# post-R1 stream so the supplied transformer weights and existing group map
+# remain valid. The transformer replaces the online LSTM, as in fx2; DeepMix
+# contributes only causal predictor contexts, and ESN/NLMS has no side asset.
 target93:
-	$(MAKE) cmix ALTXS=1 DEEPMIX_CONTEXTS=1 \
-		TOKEN_NGRAM=$(TOKEN_NGRAM) DELTA_MEMORY=$(DELTA_MEMORY) OUT=$(OUT)
-
-# Alternative byte model from fx-deepmix: 2x200 online LSTM, no obias/BitLSTM.
-target93_deepmix_lstm:
-	$(MAKE) cmix CMIX_OBIAS_RECORD=0 ALTXS=1 DEEPMIX_CONTEXTS=1 \
-		DEEPMIX_LSTM=1 OUT=$(OUT)
-
-# Explicit transformer ablation. This target must demonstrate a nonzero
-# activation count and enough payload saving to pay for two model copies.
-target93_transformer:
-	$(MAKE) cmix ALTXS=1 TRANSFORMER=1 DEEPMIX_CONTEXTS=1 \
-		TOKEN_NGRAM=$(TOKEN_NGRAM) \
-		DELTA_MEMORY=$(DELTA_MEMORY) OUT=$(OUT)
-
-# Faithful fx2 architecture: the frozen transformer replaces the online LSTM.
-# It intentionally excludes M3/M5 because the weights target the old stream.
-fx2_transformer_cpu:
 	$(MAKE) cmix CMIX_OBIAS_RECORD=0 TRANSFORMER=1 \
-		TRANSFORMER_REPLACE=1 OUT=$(OUT)
+		TRANSFORMER_REPLACE=1 DEEPMIX_CONTEXTS=1 ESN_NLMS=1 \
+		TARGET93_CANONICAL=1 OUT=$(OUT)
 
-# Reproduction profile for the supplied fx-deepmix model family.
-deepmix_cpu:
-	$(MAKE) cmix CMIX_OBIAS_RECORD=0 DEEPMIX_CONTEXTS=1 \
-		DEEPMIX_LSTM=1 OUT=$(OUT)
+# Exact target93 predictor with research-only per-region branches. The
+# discovery engine itself is never linked into a submitted S1.
+selective20:
+	$(MAKE) cmix CMIX_OBIAS_RECORD=0 TRANSFORMER=1 \
+		TRANSFORMER_REPLACE=1 DEEPMIX_CONTEXTS=1 ESN_NLMS=1 \
+		DONOR_DISCOVERY=1 MINI_CMIX=1 VIRTUAL_REPLAY=1 OUT=$(OUT)
 
-# Research tools are standalone and never linked into S1/S2.
-byte_vocab:
-	$(CC) -O3 -std=c++17 tools/byte_vocab.cpp -o byte_vocab
+# Smallest production-capable variants used to charge S1 growth only once.
+target93-scr2:
+	$(MAKE) cmix CMIX_OBIAS_RECORD=0 TRANSFORMER=1 \
+		TRANSFORMER_REPLACE=1 DEEPMIX_CONTEXTS=1 ESN_NLMS=1 \
+		VIRTUAL_REPLAY=1 OUT=$(OUT)
 
-fxot_analyze:
-	$(CC) -O3 -std=c++17 tools/analyze_fxot_online.cpp \
-		src/models/delta-memory.cpp src/models/token-ngram-bias.cpp \
-		-o fxot_analyze
+target93-donor:
+	$(MAKE) cmix CMIX_OBIAS_RECORD=0 TRANSFORMER=1 \
+		TRANSFORMER_REPLACE=1 DEEPMIX_CONTEXTS=1 ESN_NLMS=1 \
+		DONOR=1 POSTR1=1 MINI_CMIX=1 OUT=$(OUT)
 
-# Compile discovery support without applying any action globally. Donor,
-# mini-cmix, SCR2/virtual-replay and post-R1 experts remain plan-gated.
-selective:
-	$(MAKE) cmix DONOR=1 POSTR1=1 MINI_CMIX=1 VIRTUAL_REPLAY=1 \
-		DONOR_DISCOVERY=1 POSTR1_TRANSFORM=1 OUT=$(OUT)
+target93-selective:
+	$(MAKE) cmix CMIX_OBIAS_RECORD=0 TRANSFORMER=1 \
+		TRANSFORMER_REPLACE=1 DEEPMIX_CONTEXTS=1 ESN_NLMS=1 \
+		DONOR=1 POSTR1=1 MINI_CMIX=1 VIRTUAL_REPLAY=1 OUT=$(OUT)
 
 clean:
-	rm -f *.o cmix cmix_prof remap byte_vocab fxot_analyze
+	rm -f *.o cmix cmix_prof remap build_selective_plan

@@ -176,6 +176,9 @@ Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled,
 #if FX4_DELTA_MEMORY_BIAS
   delta_memory_.emplace();
 #endif
+#if FX4_ESN_NLMS
+  esn_nlms_.emplace();
+#endif
 #if FX4_MINI_CMIX
   mini_shared_map_.assign(256u * 100000u, 0);
   AddMiniCmix();
@@ -829,6 +832,9 @@ void Predictor::AddMixers() {
   AddMixer(0, manager_.mx16, 0.005);
   AddMixer(0, manager_.mx14, 0.005);
   AddMixer(0, manager_.mx15, 0.005);
+#if FX4_GRAMMAR_MATCH
+  AddMixer(0, manager_.grammar_state_, 0.002);
+#endif
 
   input_size = mixer_0_.size() + auxiliary_size_;
   layers_[1].SetNumModels(input_size);
@@ -920,6 +926,7 @@ float Predictor::Predict() {
 #if FX4_GRAMMAR_MATCH
   {
     const float grammar_probability = grammar_model_->Predict()[0];
+    manager_.grammar_state_ = grammar_model_->MixerContext();
     if (grammar_probability == 0.5f) {
       grammar_zero_offset = gathered_n;
       gathered[gathered_n++] = 0.5f;
@@ -1062,6 +1069,15 @@ float Predictor::Predict() {
       layers_[0].Inputs()[ppmd_model_index],
       layers_[0].Inputs()[byte_mixer_index], aggregate_fxcm_logit);
 #endif
+#if FX4_ESN_NLMS
+  p = esn_nlms_->Predict(p, sigmoid_.Logit(std::max(1.0e-5f,
+      std::min(1.0f - 1.0e-5f, p))),
+      layers_[0].Inputs()[ppmd_model_index],
+      layers_[0].Inputs()[byte_mixer_index], aggregate_fxcm_logit,
+      manager_.bpos & 7u, manager_.line_class_,
+      byte_model_->EffectiveOrder(),
+      static_cast<unsigned int>(manager_.longest_match_));
+#endif
 #if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
   donor_branch_ppmd_probability_ =
       Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]);
@@ -1111,6 +1127,9 @@ void Predictor::Perceive(int bit) {
 #endif
 #if FX4_DELTA_MEMORY_BIAS
   delta_memory_->Perceive(bit);
+#endif
+#if FX4_ESN_NLMS
+  esn_nlms_->Perceive(bit);
 #endif
 #if FX4_SELECTIVE_POSTR1
   if (postr1_experts_ && postr1_prediction_used_)

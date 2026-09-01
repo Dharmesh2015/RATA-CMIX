@@ -57,13 +57,11 @@ class GrammarMatch : public Model {
   unsigned char ExpectedByte() const { return expected_byte_; }
   int StateIndex() const { return state_; }
 
-#ifdef GM_MIXER
   // Layer-0 mixer context (the design's Stage-4 amplifier): 0 when idle,
   // else 1 + state index (family x position bucket). Always < 256.
   unsigned long long MixerContext() const {
     return have_expectation_ ? 1ULL + state_ : 0ULL;
   }
-#endif
 
 #ifdef GM_REVTS
   // Regime windows (byte-offset gate in the modeled stream). Defaults are

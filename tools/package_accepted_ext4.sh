@@ -13,11 +13,14 @@ cd "$work"
 test -x "$accepted_core"
 test -s dictionary/english.dic
 test -s src/readalike_prepr/data/new_article_order
+test -s models/transformer6m/6m-q4-fp32.tfwc2
 test -x tools/upx
 
 rm -rf final_run
 mkdir final_run
 cp "$accepted_core" final_run/cmix_orig
+cp models/transformer6m/6m-q4-fp32.tfwc2 \
+  final_run/transformer6m.weights
 chmod +x final_run/cmix_orig
 
 if ! tools/upx -t final_run/cmix_orig >/dev/null 2>&1; then
@@ -26,6 +29,7 @@ fi
 tools/upx -t final_run/cmix_orig
 
 cd final_run
+export FX4_TRANSFORMER_WEIGHTS="$PWD/transformer6m.weights"
 rm -f comp_dict comp_order header.dat cmix ppm.temp
 ./cmix_orig -c ../dictionary/english.dic comp_dict
 rm -f ppm.temp
@@ -41,8 +45,9 @@ rm -f ppm.temp verify_order
 
 dict_size="$(stat -c%s comp_dict)"
 order_size="$(stat -c%s comp_order)"
-./cmix_orig -h "$dict_size" "$order_size" 0
-cat cmix_orig comp_dict comp_order header.dat > cmix
+transformer_size="$(stat -c%s transformer6m.weights)"
+./cmix_orig -h "$dict_size" "$order_size" 0 "$transformer_size"
+cat cmix_orig comp_dict comp_order transformer6m.weights header.dat > cmix
 chmod 0755 cmix
 
 core_size="$(stat -c%s cmix_orig)"
@@ -53,6 +58,7 @@ s1_hash="$(sha256sum cmix | awk '{print $1}')"
 echo "Packed accepted core: $core_size bytes"
 echo "Embedded dictionary:  $dict_size bytes"
 echo "Embedded order:       $order_size bytes"
+echo "Transformer model:     $transformer_size bytes"
 echo "Final Hutter S1:      $s1_size bytes"
 echo "Core SHA-256:         $core_hash"
 echo "S1 SHA-256:           $s1_hash"
@@ -65,6 +71,7 @@ cp -f cmix "$source_root/run/cmix"
   echo "Packed accepted core: $core_size bytes"
   echo "Embedded dictionary:  $dict_size bytes"
   echo "Embedded order:       $order_size bytes"
+  echo "Transformer model:    $transformer_size bytes"
   echo "Final Hutter S1:      $s1_size bytes"
   echo "Core SHA-256:         $core_hash"
   echo "S1 SHA-256:           $s1_hash"

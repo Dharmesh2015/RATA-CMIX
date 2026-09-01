@@ -40,6 +40,11 @@ HugeBuf::~HugeBuf() {
 }
 
 void OptModel::load(const char* weights_path) {
+#if defined(FX2_TRANSFORMER_COMPRESSED_ONLY)
+  // Submission builds carry only FX2TFWC1/FX2TFWC2. Keeping the raw loader
+  // out of this translation unit avoids pulling training-only code into S1.
+  WeightsFile wf = WeightsFile::load_compressed(weights_path);
+#else
   // accept both the raw FX2TFW01 file and the losslessly compressed
   // FX2TFWC1/FX2TFWC2 files (bit-identical tensors either way)
   char magic[8] = {0};
@@ -50,6 +55,7 @@ void OptModel::load(const char* weights_path) {
   WeightsFile wf = std::memcmp(magic, "FX2TFWC", 7) == 0
                        ? WeightsFile::load_compressed(weights_path)
                        : WeightsFile::load(weights_path);
+#endif
 
   {  // config sanity (same checks as the naive loader)
     const WTensor& ci = wf.get("config.ints", DT_I32, {11});

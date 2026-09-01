@@ -33,6 +33,11 @@
 #include <limits>
 
 namespace {
+
+#if FX4_TRANSFORMER_REPLACES_LSTM
+constexpr unsigned long long kCanonicalTransformerStreamBytes =
+    587138826ULL;
+#endif
 const int kMinVocabFileSize = 10000;
 
 #if FX4_RESIDUAL_ORACLE_TRACE
@@ -299,6 +304,7 @@ void ClearOutput() {
 #endif
 }
 
+#if FX4_VIRTUAL_REPLAY
 class CausalScr2RangeCursor {
  public:
   CausalScr2RangeCursor(const VirtualReplayPlan* plan,
@@ -365,6 +371,7 @@ struct CausalScr2PatternStats {
   std::uint16_t suffix_length = 0;
   double estimated_gain_bits = 0.0;
 };
+#endif
 
 bool Compress(unsigned long long input_bytes, std::ifstream* is,
     std::ofstream* os, unsigned long long* output_bytes, Predictor* p,
@@ -401,6 +408,7 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
   ClearOutput();
   std::vector<char> buffer(FX4_IO_BUFFER_BYTES);
   unsigned long long pos = 0;
+#if FX4_VIRTUAL_REPLAY
   std::size_t replay_index = 0;
   CausalScr2Matcher causal_scr2(
       replay_plan && replay_plan->causal_scr2()
@@ -419,6 +427,9 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
       ? replay_plan->causal_ranges().size() : 1;
   std::vector<std::array<CausalScr2PatternStats, 129>> causal_stats(
       collect_causal_stats ? causal_range_count : 0);
+#else
+  (void)replay_plan;
+#endif
 #if FX4_DONOR_PLAN
   const char* stats_path = std::getenv("FX4_REGION_STATS");
   std::ofstream stats;
@@ -497,6 +508,7 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
     if (got == 0) break;
     size_t i = 0;
     while (i < got) {
+#if FX4_VIRTUAL_REPLAY
       std::uint64_t causal_begin = 0;
       std::uint64_t causal_end = 0;
       bool causal_entered = false;
@@ -596,15 +608,18 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
           continue;
         }
       }
+#endif
 
       const std::uint8_t value = static_cast<std::uint8_t>(buffer[i]);
       if (!before_byte(pos)) return false;
       e.BeginTraceByte(pos, value, 0);
       for (int bit = 7; bit >= 0; --bit) e.Encode((value >> bit) & 1);
       e.EndTraceByte();
+#if FX4_VIRTUAL_REPLAY
       if (replay_plan && replay_plan->causal_scr2()) {
         causal_scr2.ObserveByte(value);
       }
+#endif
       after_byte(pos, value);
       report_progress(pos);
       ++pos;
@@ -622,9 +637,12 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
 #endif
 
   }
+#if FX4_VIRTUAL_REPLAY
   if (replay_plan && !replay_plan->causal_scr2() &&
       replay_index != replay_plan->event_count()) return false;
+#endif
   e.Flush();
+#if FX4_VIRTUAL_REPLAY
   if (replay_plan && replay_plan->causal_scr2()) {
     fprintf(stderr,
         "causal SCR2: triggers=%llu takes=%llu replayed=%llu bytes\n",
@@ -657,6 +675,7 @@ bool Compress(unsigned long long input_bytes, std::ifstream* is,
       if (!stats.good()) return false;
     }
   }
+#endif
 #if FX4_DONOR_PLAN
   if (stats.is_open()) {
     const size_t region_end = e.OutputSize();
@@ -695,12 +714,16 @@ bool Decompress(unsigned long long output_length, std::ifstream* is,
   unsigned long long next_progress = 0;
   std::vector<char> output;
   output.reserve(FX4_IO_BUFFER_BYTES);
+#if FX4_VIRTUAL_REPLAY
   std::size_t replay_index = 0;
   CausalScr2Matcher causal_scr2(
       replay_plan && replay_plan->causal_scr2()
           ? replay_plan->causal_prior_code() : 0,
       CausalScr2PatternMask(replay_plan), output_length);
   CausalScr2RangeCursor causal_ranges(replay_plan, output_length);
+#else
+  (void)replay_plan;
+#endif
   ClearOutput();
 
   auto before_byte = [&](unsigned long long logical_pos) -> bool {
@@ -744,6 +767,7 @@ bool Decompress(unsigned long long output_length, std::ifstream* is,
 
   unsigned long long pos = 0;
   while (pos < output_length) {
+#if FX4_VIRTUAL_REPLAY
     std::uint64_t causal_begin = 0;
     std::uint64_t causal_end = 0;
     bool causal_entered = false;
@@ -803,21 +827,26 @@ bool Decompress(unsigned long long output_length, std::ifstream* is,
         continue;
       }
     }
+#endif
 
     if (!before_byte(pos)) return false;
     int byte = 1;
     while (byte < 256) byte += byte + d.Decode();
     const std::uint8_t value = static_cast<std::uint8_t>(byte);
+#if FX4_VIRTUAL_REPLAY
     if (replay_plan && replay_plan->causal_scr2()) {
       causal_scr2.ObserveByte(value);
     }
+#endif
     emit_byte(value);
     after_byte(pos, value);
     report_progress(pos);
     ++pos;
   }
+#if FX4_VIRTUAL_REPLAY
   if (replay_plan && !replay_plan->causal_scr2() &&
       replay_index != replay_plan->event_count()) return false;
+#endif
   if (!output.empty()) {
     os->write(output.data(), static_cast<std::streamsize>(output.size()));
   }
@@ -1051,6 +1080,15 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
   temp_in.seekg(0, std::ios::end);
   unsigned long long temp_bytes = temp_in.tellg();
   temp_in.seekg(0, std::ios::beg);
+#if FX4_TRANSFORMER_REPLACES_LSTM
+  if (enable_transformer6m &&
+      temp_bytes != kCanonicalTransformerStreamBytes) {
+    fprintf(stderr,
+        "transformer stream mismatch: expected %llu bytes, got %llu\n",
+        kCanonicalTransformerStreamBytes, temp_bytes);
+    return false;
+  }
+#endif
 
   std::vector<bool> vocab(256, false);
   const bool force_full_vocab =
@@ -1144,8 +1182,9 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     uint64_t discovery_output_bytes = 0;
     const bool discovery_ok = RunDonorForkDiscovery(
         temp_path, output_path, temp_bytes, vocab, dictionary,
-        enable_preprocess || dictionary != nullptr, active_donor_plan,
-        &discovery_output_bytes);
+        enable_preprocess || dictionary != nullptr,
+        enable_transformer6m || EnvironmentEnabled("FX4_ENABLE_TRANSFORMER6M"),
+        active_donor_plan, &discovery_output_bytes);
     *output_bytes = discovery_output_bytes;
     remove(output_path.c_str());
     remove(temp_path.c_str());
@@ -1252,6 +1291,15 @@ bool RunDecompression(const std::string& input_path,
   }
   if (!dictionary_used && dictionary != NULL) return false;
   if (dictionary_used && dictionary == NULL) return false;
+#if FX4_TRANSFORMER_REPLACES_LSTM
+  if (enable_transformer6m &&
+      *output_bytes != kCanonicalTransformerStreamBytes) {
+    fprintf(stderr,
+        "transformer archive stream mismatch: expected %llu bytes, got %llu\n",
+        kCanonicalTransformerStreamBytes, *output_bytes);
+    return false;
+  }
+#endif
 
   if (*output_bytes == 0) {  // undo store
     if (scr2_used || postr1_transform_used || virtual_replay_used ||

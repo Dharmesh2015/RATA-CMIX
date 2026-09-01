@@ -6,6 +6,7 @@ readonly run_root=/root/fx4run
 readonly input_path="$1"
 readonly export_path="$2"
 readonly rebuild_s1="$(printenv REBUILD_S1 2>/dev/null || printf 0)"
+readonly min_free_bytes=25000000000
 
 test -f "$input_path"
 if [[ "$(stat -c%s "$input_path")" -ne 1000000000 ]]; then
@@ -22,12 +23,18 @@ fi
 pkill -9 -x cmix 2>/dev/null || true
 rm -rf -- "$resolved"
 mkdir -p "$run_root"
+available_bytes="$(df -PB1 /root | awk 'NR==2 {print $4}')"
+if [[ -z "$available_bytes" || "$available_bytes" -lt "$min_free_bytes" ]]; then
+  echo "Need at least 25 GB free on native WSL ext4; available: ${available_bytes:-unknown} bytes." >&2
+  exit 2
+fi
 cp "$input_path" "$run_root/enwik9"
 
 if [[ "$rebuild_s1" == 1 ]]; then
   cp -a "$source_root/src" "$run_root/src"
   cp -a "$source_root/dictionary" "$run_root/dictionary"
   cp -a "$source_root/install_tools" "$run_root/install_tools"
+  cp -a "$source_root/models" "$run_root/models"
   cp -a "$source_root/tools" "$run_root/tools"
 
   cp "$source_root/makefile" "$source_root/build_and_construct_comp.sh" \
@@ -43,6 +50,9 @@ fi
 
 cd "$run_root"
 chmod 0755 cmix
+export CUDA_VISIBLE_DEVICES=""
+unset FX4_DONOR_PLAN FX4_DONOR_DISCOVERY_RESULTS FX4_CAUSAL_SCR2
+unset FX4_ENABLE_SCR2 FX4_POSTR1_PLAN FX4_RESEARCH_DONOR_BOOTSTRAP
 cpu=0
 if (( $(nproc) > 7 )); then cpu=7; fi
 cooldown="$(printenv FX4_COOLDOWN_SECONDS 2>/dev/null || printf 120)"
@@ -55,7 +65,7 @@ sleep "$cooldown"
 
 rm -f archive9 cmix_payload compress.log compress.time.txt ppm.temp
 /usr/bin/time -v -o compress.time.txt \
-  nice -n -20 taskset -c "$cpu" ./cmix -e enwik9 cmix_payload \
+  nice -n 5 taskset -c "$cpu" ./cmix -e enwik9 cmix_payload \
   2>&1 | tee compress.log
 
 test -s archive9

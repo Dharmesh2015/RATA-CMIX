@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "NOTICE: validate_1mb_ext4.sh is a legacy raw-helper regression." >&2
+echo "It does not activate or validate the canonical-stream transformer." >&2
+echo "Do not use its 99,345-byte gate to accept target93." >&2
+
 if [[ "$#" -ne 2 ]]; then
   echo "usage: $0 SOURCE_ROOT ENWIK9" >&2
   exit 2

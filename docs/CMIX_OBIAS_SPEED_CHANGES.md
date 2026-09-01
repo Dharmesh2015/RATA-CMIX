@@ -180,3 +180,8 @@ clang-built objects with the system `g++` (GCC 12, same ABI) produced a working
 336 KB ELF that runs — confirming the full object set links with **zero
 unresolved application symbols**. All build artifacts (.o, binary) were then
 removed; the tree is pristine.
+# Historical note
+
+This document records rejected cmix-obias/PGO experiments. The connected
+`target93` build does not expose `prof_gen` or `prof_use` and does not package
+cmix-obias. See `TARGET93_CPU_PIPELINE.md` for the current production path.

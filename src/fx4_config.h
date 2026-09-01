@@ -13,6 +13,12 @@
 #define FX4_STDERR_PROGRESS 0
 #endif
 
+// Set only by the single packaged CPU target. The checks at the end of this
+// file make accidental research switches a compile-time error.
+#ifndef FX4_TARGET93_CANONICAL
+#define FX4_TARGET93_CANONICAL 0
+#endif
+
 #ifndef FX4_IO_BUFFER_BYTES
 #define FX4_IO_BUFFER_BYTES (1u << 20)
 #endif
@@ -72,6 +78,14 @@
 
 #ifndef FX4_GRAMMAR_MATCH
 #define FX4_GRAMMAR_MATCH 0
+#endif
+
+// Tiny deterministic echo-state/NLMS correction expert. It has no model
+// asset or side data: encoder and decoder learn identical state online from
+// already-coded bits. The expert is mixed against the accepted probability
+// through an adaptive baseline anchor so weak periods remain near baseline.
+#ifndef FX4_ESN_NLMS
+#define FX4_ESN_NLMS 0
 #endif
 
 // Lightweight Nacrith-inspired causal side expert. It uses bounded byte/WRT
@@ -210,5 +224,24 @@
 // self-contained and restored before the R1 inverse.
 #ifndef FX4_POSTR1_TRANSFORM
 #define FX4_POSTR1_TRANSFORM 0
+#endif
+
+#if FX4_TARGET93_CANONICAL
+#if !FX4_TRANSFORMER6M || !FX4_TRANSFORMER_REPLACES_LSTM || \
+    !FX4_DEEPMIX_CONTEXTS || !FX4_GRAMMAR_MATCH || !FX4_ESN_NLMS
+#error target93 requires transformer replacement, DeepMix/GrammarMatch, and ESN/NLMS
+#endif
+#if FX4_ALTXS_M3_M5 || FX4_DONOR_PLAN || FX4_DONOR_FORK_DISCOVERY || \
+    FX4_RESEARCH_DONOR_BOOTSTRAP || FX4_RESEARCH_STREAM_DUMP || \
+    FX4_VIRTUAL_REPLAY || FX4_SCR2 || FX4_SELECTIVE_POSTR1 || \
+    FX4_MINI_CMIX || FX4_SHADOW_LSTM200 || FX4_TOKEN_NGRAM_BIAS || \
+    FX4_TOPOLOGY_RECURRENCE || FX4_CAUSAL_CNN || \
+    FX4_RESIDUAL_ORACLE_TRACE || FX4_RESIDUAL_LSTM96 || \
+    FX4_POSTR1_TRANSFORM
+#error target93 cannot include stream-changing, discovery, or rejected experts
+#endif
+#ifdef KH_OBIAS
+#error target93 cannot include the online-LSTM obias head
+#endif
 #endif
 #endif
