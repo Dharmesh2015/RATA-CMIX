@@ -160,6 +160,15 @@ int selfextract_comp() {
   setenv("KH_BITLSTM32", ".head_blob_s1", 1);
 #endif
 //  std::cout << "Decompressing the file with the new article order..." << std::endl;
+  // The article-order/dictionary helper streams are small binary side data
+  // (article order has on the order of 15 distinct byte values) and cannot
+  // satisfy the transformer's 205-symbol vocabulary requirement. system()
+  // forks a shell that inherits this process's environment, so a
+  // FX4_ENABLE_TRANSFORMER6M=1 set for the main enwik9 payload would
+  // otherwise leak into these unrelated helper decodes and hard-fail them
+  // (FX4_TRANSFORMER6M_REQUIRED builds exit(2) on an incompatible stream,
+  // which system() reports back here as status 512 = 2 << 8).
+  unsetenv("FX4_ENABLE_TRANSFORMER6M");
   int status = system("./cmix -d .new_article_order.comp .new_article_order");
   if (status != 0) {
     fprintf(stderr, "selfextract failed: article order decode status=%d\n", status);
@@ -278,6 +287,11 @@ int selfextract_decomp() {
   fwrite(p1 + decmpressor_binary_size, header.dict_size, 1, fo);
   fclose(fo);
 
+  // See the matching comment in selfextract_comp(): this helper stream's
+  // vocabulary cannot satisfy the transformer's 205-symbol requirement, and
+  // system() would otherwise leak an inherited FX4_ENABLE_TRANSFORMER6M=1
+  // into it.
+  unsetenv("FX4_ENABLE_TRANSFORMER6M");
   int status = system("./archive9 -d .dict.comp_decomp .dict");//_decomp
   if (status != 0) {
     fprintf(stderr, "selfextract failed: dictionary decode status=%d\n", status);
