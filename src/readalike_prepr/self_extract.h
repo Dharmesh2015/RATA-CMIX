@@ -73,6 +73,10 @@ int selfextract_comp() {
 // open itslef to read auxilary data (dictionary and neworder)
   FILE *f = NULL, *fo = NULL;
   f = fopen("cmix", "rb");
+  if (f == NULL) {
+    perror("selfextract failed to open ./cmix");
+    return 1;
+  }
 
   // get the size of the whole binary
   fseek(f, 0, SEEK_END);

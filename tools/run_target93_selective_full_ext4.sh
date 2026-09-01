@@ -222,9 +222,24 @@ metadata_new="$result_root/run.meta.new"
     echo "ppm_rss_mb=$ppm_rss_mb"
   } >"$metadata_new"
 if [[ -f "$metadata" ]] && ! cmp -s "$metadata" "$metadata_new"; then
-  echo "result directory belongs to another source/input/configuration" >&2
-  diff -u "$metadata" "$metadata_new" >&2 || true
-  exit 2
+  durable_results=0
+  shopt -s nullglob
+  for ledger in "$result_root"/search.*.csv \
+      "$result_root"/search.*.winner.complete; do
+    if [[ "$ledger" == *.winner.complete ]] ||
+        [[ "$(wc -l <"$ledger")" -gt 1 ]]; then
+      durable_results=1
+      break
+    fi
+  done
+  shopt -u nullglob
+  if [[ "$durable_results" -ne 0 ]]; then
+    echo "result directory belongs to another source/input/configuration" >&2
+    diff -u "$metadata" "$metadata_new" >&2 || true
+    exit 2
+  fi
+  echo "Source changed before any durable recipient result; restarting safely."
+  rm -f "$metadata"
 fi
 mv -f "$metadata_new" "$metadata"
 
@@ -274,6 +289,11 @@ run_phase() {
   fi
   write_state "discovery_$phase"
   cd "$work_root"
+  # selfextract_comp() intentionally opens ./cmix so its recursive helper
+  # decodes use the same self-contained S1. Stage the discovery S1 under that
+  # canonical name for every resumable phase.
+  cp "$work_root/bin/cmix_discovery" "$work_root/cmix"
+  chmod 0755 "$work_root/cmix"
   rm -f "payload_$phase" "payload_$phase.cmix.temp" ppm.temp
   local -a phase_environment=(
     "${common_environment[@]}"
@@ -289,7 +309,7 @@ run_phase() {
   /usr/bin/time -v -o "$result_root/$phase.time.txt" \
     env "${phase_environment[@]}" \
       nice -n "$(printenv FX4_NICE 2>/dev/null || printf 5)" \
-      taskset -c "$cpu" ./bin/cmix_discovery \
+      taskset -c "$cpu" ./cmix \
       -e enwik9 "payload_$phase" 2>&1 | tee -a "$result_root/$phase.log"
   status=${PIPESTATUS[0]}
   set -e
