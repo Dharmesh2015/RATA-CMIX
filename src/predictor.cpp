@@ -520,6 +520,7 @@ unsigned long long Predictor::GetNumModels() {
 #if !FX4_TRANSFORMER_REPLACES_LSTM
   if (transformer6m_) num += 1;
 #endif
+#endif
   return num;
 }
 
