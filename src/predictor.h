@@ -54,7 +54,8 @@
 
 class Predictor {
  public:
-  Predictor(const std::vector<bool>& vocab, bool scr2_enabled = false);
+  Predictor(const std::vector<bool>& vocab, bool scr2_enabled = false,
+      bool enable_transformer6m = false);
   float Predict();
   void Perceive(int bit);
   void Pretrain(int bit);
@@ -110,7 +111,7 @@ class Predictor {
   void AddMatch();
   void AddDoubleIndirect();
 #if FX4_TRANSFORMER6M
-  void InitializeTransformer6m();
+  void InitializeTransformer6m(bool required);
   void Transformer6mByteUpdate();
 #endif
 #if FX4_MINI_CMIX
@@ -180,12 +181,15 @@ class Predictor {
 #endif
 #if FX4_TRANSFORMER6M
   std::unique_ptr<fx2::opt::TransformerOpt> transformer6m_;
+  std::array<bool, 256> transformer6m_model_vocab_{};
   std::array<int, 256> transformer6m_byte_to_index_{};
   std::vector<unsigned char> transformer6m_vocab_bytes_;
   std::vector<std::uint16_t> transformer6m_half_scratch_;
   std::vector<float> transformer6m_probabilities_;
+  std::vector<float> transformer6m_actual_probabilities_;
   std::array<unsigned char, 15> transformer6m_separator_window_{};
   unsigned long long transformer6m_article_tokens_ = 0;
+  bool transformer6m_prediction_active_ = false;
   // Independent byte-to-bit range conversion for the transformer's
   // distribution (null Lstm; reuses ByteModel's Predict()/Perceive()). Fed
   // to the outer adaptive mixer as one more input alongside byte_mixer_,

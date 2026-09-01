@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate causal residual corrections from an FXOT-v1 trace.
+"""Evaluate causal residual corrections from an FXOT-v1/v2 trace.
 
 The per-bit oracle is deliberately labelled as noncausal: it is only a ceiling.
 Every deployable result is trained on an earlier chronological split and scored
@@ -18,11 +18,13 @@ import numpy as np
 
 
 HEADER = struct.Struct("<4sHHQQQ")
-RECORD = np.dtype([
+RECORD_V1 = np.dtype([
     ("base_p", "<u2"), ("final_p", "<u2"),
     ("ppmd", "u1"), ("lstm", "u1"), ("fxcm", "u1"),
     ("flags", "u1"), ("ppm_meta", "u1"), ("match", "u1"),
 ], align=False)
+RECORD_V2 = np.dtype(
+    RECORD_V1.descr + [("transformer", "u1")], align=False)
 LN2 = math.log(2.0)
 DELTA_GRID = np.asarray([-2.0, -1.0, -0.5, -0.25, 0.0,
                          0.25, 0.5, 1.0, 2.0], dtype=np.float64)
@@ -213,10 +215,13 @@ def main() -> int:
     if len(raw) != HEADER.size:
         raise SystemExit("truncated FXOT header")
     magic, version, record_size, stream_size, limit_bytes, _ = HEADER.unpack(raw)
-    if magic != b"FXOT" or version != 1 or record_size != RECORD.itemsize:
+    if magic != b"FXOT" or version not in (1, 2):
         raise SystemExit("unsupported FXOT trace")
-    record_count = (args.trace.stat().st_size - HEADER.size) // RECORD.itemsize
-    data = np.memmap(args.trace, mode="r", dtype=RECORD,
+    record_type = RECORD_V1 if version == 1 else RECORD_V2
+    if record_size != record_type.itemsize:
+        raise SystemExit("unsupported FXOT trace")
+    record_count = (args.trace.stat().st_size - HEADER.size) // record_size
+    data = np.memmap(args.trace, mode="r", dtype=record_type,
                      offset=HEADER.size, shape=(record_count,))
     train_end = record_count * 70 // 100
     validation_begin = record_count * 85 // 100

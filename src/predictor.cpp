@@ -105,6 +105,19 @@ constexpr unsigned char kTransformerArticleSeparator[15] = {
     0x08, 0x08, 0x25, 0xac, 0x65, 0x27, 0x05,
     0x08, 0x08, 0x08, 0x08, 0x25, 0xac, 0x68, 0x27};
 constexpr unsigned long long kTransformerMaxArticleTokens = 1ull << 17;
+// Exact ascending-byte vocabulary of the stream used to train the public
+// 205-symbol model. M3/M5 keeps those bytes for the main product but appends
+// a small sealed inverse stream that can contain every byte value.
+constexpr unsigned char kTransformerAbsentBytes[] = {
+    0x00, 0x01, 0x02, 0x04, 0x08, 0x0b, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+    0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+    0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
+    0x54, 0x55, 0x56, 0x57, 0x59, 0x5a, 0x60,
+    0x7b, 0x7c, 0x7d, 0x7e, 0x7f};
+static_assert(256 - sizeof(kTransformerAbsentBytes) == 205,
+    "transformer6m model vocabulary must remain 205 bytes");
 
 bool ReadableTransformerFile(const char* path) {
   if (!path || !path[0]) return false;
@@ -117,7 +130,8 @@ bool ReadableTransformerFile(const char* path) {
 }  // namespace
 #endif
 
-Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled)
+Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled,
+    bool enable_transformer6m)
     : manager_(), sigmoid_(100001), vocab_(vocab) {
   (void)scr2_enabled;
   fxcm_neutral_input_ = sigmoid_.Logit(0.5f);
@@ -137,7 +151,11 @@ Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled)
   AddMatch();
   AddDoubleIndirect();
 #if FX4_TRANSFORMER6M
-  InitializeTransformer6m();
+  if (enable_transformer6m) {
+    InitializeTransformer6m(FX4_TRANSFORMER6M_REQUIRED != 0);
+  }
+#else
+  (void)enable_transformer6m;
 #endif
   // Construct the accepted mixer/LSTM before auxiliary models consume rand().
   // This preserves the baseline LSTM initialization exactly.
@@ -320,17 +338,29 @@ float Predictor::PpmdEscapeRate() const {
 }
 
 #if FX4_TRANSFORMER6M
-void Predictor::InitializeTransformer6m() {
-  transformer6m_byte_to_index_.fill(-1);
-  for (unsigned int byte = 0; byte < vocab_.size(); ++byte) {
-    if (vocab_[byte]) {
-      transformer6m_byte_to_index_[byte] =
-          static_cast<int>(transformer6m_vocab_bytes_.size());
-      transformer6m_vocab_bytes_.push_back(static_cast<unsigned char>(byte));
-    }
+void Predictor::InitializeTransformer6m(bool required) {
+  transformer6m_model_vocab_.fill(true);
+  for (unsigned char byte : kTransformerAbsentBytes) {
+    transformer6m_model_vocab_[byte] = false;
   }
-  if (transformer6m_vocab_bytes_.size() != 205u) {
-    // Small S1 helper streams retain the online LSTM.
+  transformer6m_byte_to_index_.fill(-1);
+  bool compatible = true;
+  unsigned int actual_vocab_size = 0;
+  for (unsigned int byte = 0; byte < vocab_.size(); ++byte) {
+    actual_vocab_size += vocab_[byte];
+    if (!transformer6m_model_vocab_[byte]) continue;
+    compatible = compatible && vocab_[byte];
+    transformer6m_byte_to_index_[byte] =
+        static_cast<int>(transformer6m_vocab_bytes_.size());
+    transformer6m_vocab_bytes_.push_back(static_cast<unsigned char>(byte));
+  }
+  if (!compatible || transformer6m_vocab_bytes_.size() != 205u) {
+    if (required) {
+      std::fprintf(stderr,
+          "FX4 transformer6m cannot cover this stream vocabulary "
+          "(stream=%u, model=205)\n", actual_vocab_size);
+      std::exit(2);
+    }
     return;
   }
 
@@ -350,37 +380,57 @@ void Predictor::InitializeTransformer6m() {
     }
   }
   if (!selected) {
-#if FX4_TRANSFORMER6M_REQUIRED
-    std::fprintf(stderr,
-        "FX4 transformer6m weights are required; set "
-        "FX4_TRANSFORMER_WEIGHTS or package .tfweights\n");
-    std::exit(2);
-#else
+    if (required) {
+      std::fprintf(stderr,
+          "FX4 transformer6m weights are required; set "
+          "FX4_TRANSFORMER_WEIGHTS or package .tfweights\n");
+      std::exit(2);
+    }
     return;
-#endif
   }
 
   transformer6m_.reset(new fx2::opt::TransformerOpt(
       selected, fx2::opt::AttnKind::KVI8));
   transformer6m_half_scratch_.resize(205u);
   transformer6m_probabilities_.assign(205u, 1.0f);
+  transformer6m_actual_probabilities_.assign(
+      actual_vocab_size, 1.0f / std::max(1u, actual_vocab_size));
   transformer6m_separator_window_.fill(0xffu);
+  std::fprintf(stderr,
+      "FX4 transformer6m active: model_vocab=205 stream_vocab=%u "
+      "unknown-byte passthrough=%s\n", actual_vocab_size,
+      actual_vocab_size == 205 ? "off" : "on");
 }
 
 void Predictor::Transformer6mByteUpdate() {
   const std::valarray<float>& ppmd = byte_model_->BytePredict();
+  float known_mass = 0.0f;
   for (unsigned int i = 0; i < transformer6m_vocab_bytes_.size(); ++i) {
     transformer6m_probabilities_[i] = ppmd[transformer6m_vocab_bytes_[i]];
+    known_mass += transformer6m_probabilities_[i];
+  }
+  if (!(known_mass > 1.0e-12f)) known_mass = 1.0f;
+  for (float& probability : transformer6m_probabilities_) {
+    probability /= known_mass;
   }
   TransformerFloatsToHalves(transformer6m_probabilities_.data(),
       transformer6m_half_scratch_.data(), transformer6m_half_scratch_.size());
 
   const int token = transformer6m_byte_to_index_[manager_.bit_context_];
   if (token < 0) {
-    std::fprintf(stderr,
-        "FX4 transformer6m byte 0x%02x is absent from the vocabulary\n",
-        manager_.bit_context_);
-    std::exit(2);
+    // M5's compact inverse stream contains bytes unseen during transformer
+    // training. Preserve PPMd's full 256-way distribution and restart the
+    // frozen model at the next known byte instead of inventing an embedding.
+    transformer6m_article_tokens_ = 0;
+    transformer6m_separator_window_.fill(0xffu);
+    transformer6m_prediction_active_ = false;
+    unsigned int actual = 0;
+    for (unsigned int byte = 0; byte < vocab_.size(); ++byte) {
+      if (vocab_[byte]) transformer6m_actual_probabilities_[actual++] = ppmd[byte];
+    }
+    transformer6m_mixer_->SetProbs(
+        transformer6m_actual_probabilities_.data());
+    return;
   }
   std::memmove(transformer6m_separator_window_.data(),
       transformer6m_separator_window_.data() + 1,
@@ -399,6 +449,7 @@ void Predictor::Transformer6mByteUpdate() {
         transformer6m_probabilities_.data(),
         transformer6m_half_scratch_.size());
     transformer6m_article_tokens_ = 0;
+    transformer6m_prediction_active_ = false;
   } else {
     if (transformer6m_article_tokens_ == 1) transformer6m_->begin_article();
     transformer6m_->step(static_cast<std::uint8_t>(token),
@@ -410,11 +461,25 @@ void Predictor::Transformer6mByteUpdate() {
     TransformerHalvesToFloats(transformer6m_half_scratch_.data(),
         transformer6m_probabilities_.data(),
         transformer6m_half_scratch_.size());
+    transformer6m_prediction_active_ = true;
   }
+  float model_sum = 0.0f;
   for (float& probability : transformer6m_probabilities_) {
     if (!(probability >= 1.0e-6f)) probability = 1.0e-6f;
+    model_sum += probability;
   }
-  transformer6m_mixer_->SetProbs(transformer6m_probabilities_.data());
+  if (!(model_sum > 0.0f)) model_sum = 1.0f;
+
+  unsigned int actual = 0;
+  for (unsigned int byte = 0; byte < vocab_.size(); ++byte) {
+    if (!vocab_[byte]) continue;
+    const int model_index = transformer6m_byte_to_index_[byte];
+    transformer6m_actual_probabilities_[actual++] = model_index >= 0
+        ? known_mass * transformer6m_probabilities_[model_index] / model_sum
+        : ppmd[byte];
+  }
+  transformer6m_mixer_->SetProbs(
+      transformer6m_actual_probabilities_.data());
 }
 #endif
 
@@ -872,8 +937,10 @@ float Predictor::Predict() {
   trace_lstm_probability_ = lstm_probability;
   trace_fxcm_probability_ = bounded_fxcm_probability;
 #if FX4_TRANSFORMER6M
-  trace_transformer_probability_ = transformer6m_ ? Sigmoid::Logistic(
-      layers_[0].Inputs()[transformer6m_model_index]) : -1.0f;
+  trace_transformer_probability_ =
+      transformer6m_ && transformer6m_prediction_active_
+      ? Sigmoid::Logistic(layers_[0].Inputs()[transformer6m_model_index])
+      : -1.0f;
 #endif
   trace_bit_position_ = static_cast<std::uint8_t>(manager_.bpos & 7u);
   trace_ppmd_order_ = static_cast<std::uint8_t>(

@@ -106,8 +106,6 @@ bool CopyResearchStream(const std::string& source, const char* destination) {
 }
 #endif
 
-#if FX4_RESEARCH_STREAM_DUMP || FX4_SCR2 || FX4_DONOR_PLAN || \
-    FX4_POSTR1_TRANSFORM || FX4_RESEARCH_DONOR_BOOTSTRAP
 bool EnvironmentEnabled(const char* name) {
   const char* value = std::getenv(name);
   return value && *value && std::strcmp(value, "0") != 0;
@@ -148,7 +146,6 @@ void ConfigureResearchDonorProfile(
   if (!EnvironmentEnabled("FX4_RESEARCH_DONOR_PROFILE")) return;
   predictor->SetPostR1DonorProfile(bytes, ResearchDonorSegments(bytes.size()));
 }
-#endif
 #endif
 }
 
@@ -859,7 +856,8 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     unsigned long long* output_bytes,
     const char* post_wrt_side_path = nullptr,
     const altxs::ProductMeta* altxs_meta = nullptr,
-    const char* altxs_m3_side_path = nullptr) {
+    const char* altxs_m3_side_path = nullptr,
+    bool enable_transformer6m = false) {
   const bool raw_entropy_input =
 #if FX4_DONOR_PLAN
       EnvironmentEnabled("FX4_RAW_ENTROPY_INPUT");
@@ -1171,7 +1169,8 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
     return false;
   }
 #endif
-  Predictor p(vocab, scr2_used);
+  Predictor p(vocab, scr2_used, enable_transformer6m ||
+      EnvironmentEnabled("FX4_ENABLE_TRANSFORMER6M"));
   if (enable_preprocess
 #if FX4_DONOR_FORK_DISCOVERY || FX4_DONOR_PLAN
       || dictionary != nullptr
@@ -1206,7 +1205,8 @@ bool RunDecompression(const std::string& input_path,
     const std::string& temp_path, const std::string& output_path,
     FILE* dictionary, unsigned long long* input_bytes,
     unsigned long long* output_bytes,
-    const char* post_wrt_side_path = nullptr) {
+    const char* post_wrt_side_path = nullptr,
+    bool enable_transformer6m = false) {
   std::ifstream data_in(input_path, std::ios::in | std::ios::binary);
   if (!data_in.is_open()) return false;
 
@@ -1288,7 +1288,8 @@ bool RunDecompression(const std::string& input_path,
         LoadResearchDonorBootstrap();
     AddResearchDonorVocabulary(research_donor, &vocab);
 #endif
-    Predictor p(vocab, scr2_used);
+    Predictor p(vocab, scr2_used, enable_transformer6m ||
+        EnvironmentEnabled("FX4_ENABLE_TRANSFORMER6M"));
     if (dictionary_used) preprocessor::Pretrain(&p, dictionary);
 #if FX4_RESEARCH_DONOR_BOOTSTRAP
     if (!EnvironmentEnabled("FX4_RESEARCH_DONOR_PROFILE_ONLY")) {
@@ -1439,7 +1440,8 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
     dictionary = fopen(".dict", "rb");//_decomp
 
     if (!RunDecompression(input_path, temp_path, output_path, dictionary,
-        &input_bytes, &output_bytes, ".r1_payload_lex_side_decomp")) {
+        &input_bytes, &output_bytes, ".r1_payload_lex_side_decomp",
+        FX4_TRANSFORMER6M != 0)) {
       return Help();
     }
     std::cout << "Cmix decompression finished" << std::endl;
@@ -1541,10 +1543,11 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
 #if FX4_ALTXS_M3_M5
     if (!RunCompression(enable_preprocess, input_path, temp_path, output_path,
         dictionary, &input_bytes, &output_bytes, nullptr, &altxs_meta,
-        kAltxsM3Side)) {
+        kAltxsM3Side, FX4_TRANSFORMER6M != 0)) {
 #else
     if (!RunCompression(enable_preprocess, input_path, temp_path, output_path,
-        dictionary, &input_bytes, &output_bytes, ".r1_payload_lex_side")) {
+        dictionary, &input_bytes, &output_bytes, ".r1_payload_lex_side",
+        nullptr, nullptr, FX4_TRANSFORMER6M != 0)) {
 #endif
       return Help();
     }
@@ -1659,8 +1662,12 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
     header.decomp_input_size = atoi(argv[4]);
 #ifdef KH_BITLSTM32_ARCHIVE
     header.head_blob_size = 0;
-    if (argc < 7) return Help();
-    header.s1_head_blob_size = atoi(argv[6]);
+    int head_blob_argument = 5;
+#ifdef KH_TRANSFORMER6M_ARCHIVE
+    head_blob_argument = 6;
+#endif
+    if (argc <= head_blob_argument) return Help();
+    header.s1_head_blob_size = atoi(argv[head_blob_argument]);
     if (header.s1_head_blob_size <= 0) return Help();
 #endif
 #ifdef KH_RESIDUAL_LSTM96_ARCHIVE
@@ -1679,7 +1686,7 @@ if ((argc != 1) && (argv[1][1] != 'h') && (argc < 4 || argc > 5 || strlen(argv[1
     output_path = argv[3];
     dictionary = fopen(".dict", "rb");
     if (!RunDecompression(input_path, temp_path, output_path, dictionary,
-        &input_bytes, &output_bytes)) {
+        &input_bytes, &output_bytes, nullptr, FX4_TRANSFORMER6M != 0)) {
       return Help();
     }
     goto print_end_message;

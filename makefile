@@ -240,7 +240,8 @@ cmix: fast slow cold head obias residual96 $(ALTXS_TARGET) \
 		$(TRANSFORMER_OBJECTS) -s -o $(OUT)
 	rm -f *.o
 
-.PHONY: selective record altxs_record target93 transformer_objects clean
+.PHONY: selective record altxs_record target93 target93_transformer \
+	transformer_objects byte_vocab fxot_analyze clean
 record: cmix
 
 # Reversible altxs M3+M5 outer transform on top of the cmix-obias predictor.
@@ -248,10 +249,27 @@ record: cmix
 altxs_record:
 	$(MAKE) cmix ALTXS=1 OUT=$(OUT)
 
-# Canonical CPU-only 93 MB research path. M3+M5 and the transformer are one
-# archive family; the model is packaged into both S1 and S2 and counted.
+# Canonical CPU-only 93 MB research baseline. The public transformer is not
+# included here: its 205-symbol model was inactive on the real M3+M5 stream,
+# so paying for it in both S1 and S2 cannot be an accepted baseline.
 target93:
-	$(MAKE) cmix ALTXS=1 TRANSFORMER=1 TOKEN_NGRAM=$(TOKEN_NGRAM) OUT=$(OUT)
+	$(MAKE) cmix ALTXS=1 TOKEN_NGRAM=$(TOKEN_NGRAM) \
+		DELTA_MEMORY=$(DELTA_MEMORY) OUT=$(OUT)
+
+# Explicit transformer ablation. This target must demonstrate a nonzero
+# activation count and enough payload saving to pay for two model copies.
+target93_transformer:
+	$(MAKE) cmix ALTXS=1 TRANSFORMER=1 TOKEN_NGRAM=$(TOKEN_NGRAM) \
+		DELTA_MEMORY=$(DELTA_MEMORY) OUT=$(OUT)
+
+# Research tools are standalone and never linked into S1/S2.
+byte_vocab:
+	$(CC) -O3 -std=c++17 tools/byte_vocab.cpp -o byte_vocab
+
+fxot_analyze:
+	$(CC) -O3 -std=c++17 tools/analyze_fxot_online.cpp \
+		src/models/delta-memory.cpp src/models/token-ngram-bias.cpp \
+		-o fxot_analyze
 
 # Compile discovery support without applying any action globally. Donor,
 # mini-cmix, SCR2/virtual-replay and post-R1 experts remain plan-gated.
