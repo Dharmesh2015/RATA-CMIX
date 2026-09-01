@@ -1171,6 +1171,17 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
 #endif
   Predictor p(vocab, scr2_used, enable_transformer6m ||
       EnvironmentEnabled("FX4_ENABLE_TRANSFORMER6M"));
+#if FX4_SELECTIVE_POSTR1
+  // Blanket discovery-portfolio switch for whole-stream A/B testing, not a
+  // selective span plan: every baseline-anchored expert (SCR2 lanes,
+  // CausalCnn, ShadowLstm200, URL structure, DMC, etc.) gets a chance to
+  // train/predict on the entire stream from byte 0. Off unless requested;
+  // each expert still returns the accepted baseline probability when its
+  // own signal is weak, per PostR1Experts' baseline-anchored design.
+  if (EnvironmentEnabled("FX4_POSTR1_ALL")) {
+    p.EnablePostR1Portfolio(PostR1Experts::kAllPredictors);
+  }
+#endif
   if (enable_preprocess
 #if FX4_DONOR_FORK_DISCOVERY || FX4_DONOR_PLAN
       || dictionary != nullptr
@@ -1290,6 +1301,13 @@ bool RunDecompression(const std::string& input_path,
 #endif
     Predictor p(vocab, scr2_used, enable_transformer6m ||
         EnvironmentEnabled("FX4_ENABLE_TRANSFORMER6M"));
+#if FX4_SELECTIVE_POSTR1
+    // Must mirror the encoder-side FX4_POSTR1_ALL hook exactly, or decode
+    // desyncs from the archive's actual coded probabilities.
+    if (EnvironmentEnabled("FX4_POSTR1_ALL")) {
+      p.EnablePostR1Portfolio(PostR1Experts::kAllPredictors);
+    }
+#endif
     if (dictionary_used) preprocessor::Pretrain(&p, dictionary);
 #if FX4_RESEARCH_DONOR_BOOTSTRAP
     if (!EnvironmentEnabled("FX4_RESEARCH_DONOR_PROFILE_ONLY")) {
