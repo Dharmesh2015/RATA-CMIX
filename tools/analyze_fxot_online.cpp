@@ -2,6 +2,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -148,8 +149,9 @@ std::string FormatCandidate(const Candidate& candidate,
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2 || argc > 3) {
-    std::cerr << "usage: fxot_analyze TRACE.fxot [REPORT.txt]\n";
+  if (argc < 2 || argc > 5) {
+    std::cerr << "usage: fxot_analyze TRACE.fxot [REPORT.txt] "
+                 "[CURRENT_TOTAL] [TARGET_TOTAL]\n";
     return 2;
   }
 
@@ -280,10 +282,15 @@ int main(int argc, char** argv) {
     report << FormatCandidate(candidate, baseline.loss, record_count,
         holdout_records, kEntropyBytes) << " blocks=" << block->blocks << '\n';
   }
-  constexpr std::uint64_t kCurrentTotal = 108492825ull;
-  constexpr std::uint64_t kTargetTotal = 93000000ull;
+  const std::uint64_t current_total = argc >= 4
+      ? std::strtoull(argv[3], nullptr, 10) : 108492825ull;
+  const std::uint64_t target_total = argc >= 5
+      ? std::strtoull(argv[4], nullptr, 10) : 93000000ull;
   report << "\n93MB_required_total_saving="
-         << (kCurrentTotal - kTargetTotal) << " bytes\n";
+         << (current_total > target_total
+             ? current_total - target_total : 0) << " bytes\n"
+         << "current_total=" << current_total << " target_total="
+         << target_total << '\n';
 
   std::cout << report.str();
   if (argc == 3) {

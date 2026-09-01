@@ -25,8 +25,11 @@ ORACLE_TRACE ?= 0
 RESIDUAL_LSTM96 ?= 0
 ALTXS ?= 0
 TRANSFORMER ?= 0
+TRANSFORMER_REPLACE ?= 0
 TOKEN_NGRAM ?= 0
 DELTA_MEMORY ?= 0
+DEEPMIX_CONTEXTS ?= 0
+DEEPMIX_LSTM ?= 0
 
 DONOR_SOURCE :=
 DONOR_HEADER :=
@@ -43,6 +46,8 @@ ALTXS_C_OBJECTS :=
 ALTXS_TARGET :=
 TRANSFORMER_OBJECTS :=
 TRANSFORMER_TARGET :=
+GRAMMAR_SOURCE :=
+GRAMMAR_OBJECT :=
 TOKEN_NGRAM_SOURCE :=
 TOKEN_NGRAM_OBJECT :=
 DELTA_MEMORY_SOURCE :=
@@ -90,12 +95,26 @@ ALTXS_TARGET := altxs_objects
 endif
 ifeq ($(TRANSFORMER),1)
 override CFLAGS_DEFINES += -DFX4_TRANSFORMER6M=1 \
-	-DFX4_TRANSFORMER6M_REQUIRED=1 -DKH_TRANSFORMER6M_ARCHIVE \
-	-DKH_BITLSTM32_REQUIRED=1
+	-DFX4_TRANSFORMER6M_REQUIRED=1 -DKH_TRANSFORMER6M_ARCHIVE
+ifeq ($(TRANSFORMER_REPLACE),1)
+override CFLAGS_DEFINES += -DFX4_TRANSFORMER_REPLACES_LSTM=1
+else
+override CFLAGS_DEFINES += -DKH_BITLSTM32_REQUIRED=1
+endif
 TRANSFORMER_OBJECTS := tf_weights_io.o tf_weights_io_compressed.o \
 	tf_qmat_dense.o tf_qmat_sparse.o tf_attn.o tf_kda.o tf_glue.o \
 	tf_arena_build.o tf_model_opt.o
 TRANSFORMER_TARGET := transformer_objects
+endif
+ifeq ($(DEEPMIX_CONTEXTS),1)
+override CFLAGS_DEFINES += -DFX4_DEEPMIX_CONTEXTS=1 \
+	-DFX4_GRAMMAR_MATCH=1 -DGM_REVTS=1 -DIDHOIST
+GRAMMAR_SOURCE := src/models/grammar-match.cpp
+GRAMMAR_OBJECT := grammar-match.o
+endif
+ifeq ($(DEEPMIX_LSTM),1)
+override CFLAGS_DEFINES += -DFX4_LSTM_CELLS=200 \
+	-DFX4_LSTM_LAYERS=2 -DFX4_LSTM_LEARNING_RATE=0.06f
 endif
 ifeq ($(TOKEN_NGRAM),1)
 override CFLAGS_DEFINES += -DFX4_TOKEN_NGRAM_BIAS=1
@@ -204,7 +223,8 @@ fast:
 		src/contexts/sparse.cpp src/models/bracket.cpp \
 		src/models/byte-model.cpp src/models/direct-hash.cpp \
 		src/models/direct.cpp src/models/match.cpp src/models/fxcmv1.cpp \
-		$(POSTR1_SOURCE) $(TOKEN_NGRAM_SOURCE) $(DELTA_MEMORY_SOURCE) \
+		$(GRAMMAR_SOURCE) $(POSTR1_SOURCE) $(TOKEN_NGRAM_SOURCE) \
+		$(DELTA_MEMORY_SOURCE) \
 		src/models/ppmd.cpp \
 		src/states/nonstationary.cpp \
 		src/states/run-map.cpp src/mixer/byte-mixer.cpp \
@@ -231,7 +251,8 @@ cmix: fast slow cold head obias residual96 $(ALTXS_TARGET) \
 		decoder.o dictionary.o direct-hash.o direct.o $(DONOR_OBJECT) \
 		$(DONOR_DISCOVERY_OBJECT) encoder.o indirect-hash.o interval-hash.o \
 		interval.o match.o mixer-input.o mixer.o nonstationary.o fxcmv1.o \
-		$(POSTR1_OBJECT) $(TOKEN_NGRAM_OBJECT) $(DELTA_MEMORY_OBJECT) \
+		$(GRAMMAR_OBJECT) $(POSTR1_OBJECT) $(TOKEN_NGRAM_OBJECT) \
+		$(DELTA_MEMORY_OBJECT) \
 		ppmd.o predictor.o preprocessor.o \
 		r1_reorder_transform.o scr2_transform.o virtual_replay_plan.o \
 		postr1_transform.o $(ALTXS_CPP_OBJECT) $(ALTXS_C_OBJECTS) \
@@ -240,8 +261,9 @@ cmix: fast slow cold head obias residual96 $(ALTXS_TARGET) \
 		$(TRANSFORMER_OBJECTS) -s -o $(OUT)
 	rm -f *.o
 
-.PHONY: selective record altxs_record target93 target93_transformer \
-	transformer_objects byte_vocab fxot_analyze clean
+.PHONY: selective record altxs_record target93 target93_baseline \
+	target93_deepmix_lstm target93_transformer fx2_transformer_cpu \
+	deepmix_cpu transformer_objects byte_vocab fxot_analyze clean
 record: cmix
 
 # Reversible altxs M3+M5 outer transform on top of the cmix-obias predictor.
@@ -252,15 +274,38 @@ altxs_record:
 # Canonical CPU-only 93 MB research baseline. The public transformer is not
 # included here: its 205-symbol model was inactive on the real M3+M5 stream,
 # so paying for it in both S1 and S2 cannot be an accepted baseline.
-target93:
+target93_baseline:
 	$(MAKE) cmix ALTXS=1 TOKEN_NGRAM=$(TOKEN_NGRAM) \
 		DELTA_MEMORY=$(DELTA_MEMORY) OUT=$(OUT)
+
+# Main CPU-only research candidate: keep the established M3/M5 + obias path,
+# then add only DeepMix's complementary grammar/FXCM context changes.
+target93:
+	$(MAKE) cmix ALTXS=1 DEEPMIX_CONTEXTS=1 \
+		TOKEN_NGRAM=$(TOKEN_NGRAM) DELTA_MEMORY=$(DELTA_MEMORY) OUT=$(OUT)
+
+# Alternative byte model from fx-deepmix: 2x200 online LSTM, no obias/BitLSTM.
+target93_deepmix_lstm:
+	$(MAKE) cmix CMIX_OBIAS_RECORD=0 ALTXS=1 DEEPMIX_CONTEXTS=1 \
+		DEEPMIX_LSTM=1 OUT=$(OUT)
 
 # Explicit transformer ablation. This target must demonstrate a nonzero
 # activation count and enough payload saving to pay for two model copies.
 target93_transformer:
-	$(MAKE) cmix ALTXS=1 TRANSFORMER=1 TOKEN_NGRAM=$(TOKEN_NGRAM) \
+	$(MAKE) cmix ALTXS=1 TRANSFORMER=1 DEEPMIX_CONTEXTS=1 \
+		TOKEN_NGRAM=$(TOKEN_NGRAM) \
 		DELTA_MEMORY=$(DELTA_MEMORY) OUT=$(OUT)
+
+# Faithful fx2 architecture: the frozen transformer replaces the online LSTM.
+# It intentionally excludes M3/M5 because the weights target the old stream.
+fx2_transformer_cpu:
+	$(MAKE) cmix CMIX_OBIAS_RECORD=0 TRANSFORMER=1 \
+		TRANSFORMER_REPLACE=1 OUT=$(OUT)
+
+# Reproduction profile for the supplied fx-deepmix model family.
+deepmix_cpu:
+	$(MAKE) cmix CMIX_OBIAS_RECORD=0 DEEPMIX_CONTEXTS=1 \
+		DEEPMIX_LSTM=1 OUT=$(OUT)
 
 # Research tools are standalone and never linked into S1/S2.
 byte_vocab:
@@ -278,4 +323,4 @@ selective:
 		DONOR_DISCOVERY=1 POSTR1_TRANSFORM=1 OUT=$(OUT)
 
 clean:
-	rm -f *.o cmix cmix_prof remap
+	rm -f *.o cmix cmix_prof remap byte_vocab fxot_analyze

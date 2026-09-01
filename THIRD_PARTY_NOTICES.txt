@@ -42,8 +42,18 @@ research bundle:
   src/third_party/fx2_transformer/
   models/transformer6m/6m-q4-fp32.tfwc2
 
-The transformer replaces the online byte LSTM only when TRANSFORMER=1;
-PPMd, FXCM, the final mixers, and the BitLSTM32 terminal head remain active.
+The `fx2_transformer_cpu` profile uses the published architecture: the
+transformer replaces the online byte LSTM while PPMd, FXCM and the final
+mixers remain active. The `target93_transformer` profile is a separate,
+unvalidated additive ablation for FX4's M3/M5 stream.
 The imported source is distributed under the GNU General Public License,
 version 3. Its original license is preserved as
 src/third_party/fx2_transformer/LICENSE.
+
+fx-deepmix model additions
+==========================
+
+This tree includes the GrammarMatch model and selected gated FXCM context
+changes from the supplied fx-deepmix source tree. The original project is
+derived from cmix-lex and distributed under the GNU General Public License,
+version 3. The imported code is disabled outside explicit DeepMix profiles.

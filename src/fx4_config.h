@@ -56,6 +56,24 @@
 #define FX4_TRANSFORMER6M_REQUIRED 0
 #endif
 
+// The published fx2-cmix-transformer uses the frozen transformer instead of
+// the online byte LSTM. Keep this separate from the additive M3/M5 ablation:
+// the supplied weights are only validated on the original 205-symbol stream.
+#ifndef FX4_TRANSFORMER_REPLACES_LSTM
+#define FX4_TRANSFORMER_REPLACES_LSTM 0
+#endif
+
+// CPU-only model additions retained from fx-deepmix. These gates are kept
+// explicit because their gains were measured on its cmix-lex stream and must
+// still be revalidated after FX4's M3/M5 transform.
+#ifndef FX4_DEEPMIX_CONTEXTS
+#define FX4_DEEPMIX_CONTEXTS 0
+#endif
+
+#ifndef FX4_GRAMMAR_MATCH
+#define FX4_GRAMMAR_MATCH 0
+#endif
+
 // Lightweight Nacrith-inspired causal side expert. It uses bounded byte/WRT
 // n-gram counts plus an online log-space bias; no LLM/GPU code is included.
 #ifndef FX4_TOKEN_NGRAM_BIAS

@@ -14,6 +14,9 @@
 #include "models/direct-hash.h"
 #include "models/indirect.h"
 #include "models/match.h"
+#if FX4_GRAMMAR_MATCH
+#include "models/grammar-match.h"
+#endif
 #include "models/ppmd.h"
 #include "models/bracket.h"
 #include "models/fxcmv1.h"
@@ -135,6 +138,9 @@ class Predictor {
   llvm::SmallVector<Indirect<RunMap>, 1> indirect_r_models_; // run map
   llvm::SmallVector<Direct, 4> direct_models_;
   llvm::SmallVector<Match, 10> match_models_;
+#if FX4_GRAMMAR_MATCH
+  std::optional<GrammarMatch> grammar_model_;
+#endif
 #if FX4_MINI_CMIX
   llvm::SmallVector<Direct, 3> mini_direct_models_;
   llvm::SmallVector<DirectHash, 2> mini_direct_hash_models_;
@@ -190,11 +196,11 @@ class Predictor {
   std::array<unsigned char, 15> transformer6m_separator_window_{};
   unsigned long long transformer6m_article_tokens_ = 0;
   bool transformer6m_prediction_active_ = false;
-  // Independent byte-to-bit range conversion for the transformer's
-  // distribution (null Lstm; reuses ByteModel's Predict()/Perceive()). Fed
-  // to the outer adaptive mixer as one more input alongside byte_mixer_,
-  // not as a replacement for it -- see predictor.cpp Perceive()/Predict().
+#if !FX4_TRANSFORMER_REPLACES_LSTM
+  // Additive ablation only. The faithful fx2 profile writes the transformer
+  // distribution directly into byte_mixer_ and does not allocate this lane.
   std::optional<ByteMixer> transformer6m_mixer_;
+#endif
 #endif
 #ifdef KH_OBIAS
   std::unique_ptr<KhObiasPrior> obias_;

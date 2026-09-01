@@ -12,6 +12,13 @@
 #include <immintrin.h>
 #endif
 
+#if FX4_TRANSFORMER_REPLACES_LSTM && !FX4_TRANSFORMER6M
+#error FX4_TRANSFORMER_REPLACES_LSTM requires FX4_TRANSFORMER6M
+#endif
+#if FX4_TRANSFORMER_REPLACES_LSTM && defined(KH_OBIAS)
+#error The faithful transformer-replacement profile cannot use the LSTM obias head
+#endif
+
 #if FX4_TRANSFORMER6M
 namespace {
 
@@ -149,6 +156,9 @@ Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled,
   AddPPMD();
   AddWord();
   AddMatch();
+#if FX4_GRAMMAR_MATCH
+  grammar_model_.emplace(manager_.bit_context_, 200, 0.5f);
+#endif
   AddDoubleIndirect();
 #if FX4_TRANSFORMER6M
   if (enable_transformer6m) {
@@ -428,8 +438,12 @@ void Predictor::Transformer6mByteUpdate() {
     for (unsigned int byte = 0; byte < vocab_.size(); ++byte) {
       if (vocab_[byte]) transformer6m_actual_probabilities_[actual++] = ppmd[byte];
     }
+#if FX4_TRANSFORMER_REPLACES_LSTM
+    byte_mixer_->SetProbs(transformer6m_actual_probabilities_.data());
+#else
     transformer6m_mixer_->SetProbs(
         transformer6m_actual_probabilities_.data());
+#endif
     return;
   }
   std::memmove(transformer6m_separator_window_.data(),
@@ -478,8 +492,12 @@ void Predictor::Transformer6mByteUpdate() {
         ? known_mass * transformer6m_probabilities_[model_index] / model_sum
         : ppmd[byte];
   }
+#if FX4_TRANSFORMER_REPLACES_LSTM
+  byte_mixer_->SetProbs(transformer6m_actual_probabilities_.data());
+#else
   transformer6m_mixer_->SetProbs(
       transformer6m_actual_probabilities_.data());
+#endif
 }
 #endif
 
@@ -491,11 +509,15 @@ unsigned long long Predictor::GetNumModels() {
   num += fxcm_model_.NumOutputs();
   num += direct_models_.size();
   num += match_models_.size();
+#if FX4_GRAMMAR_MATCH
+  num += grammar_model_->NumOutputs();
+#endif
   num += indirect_ns_models_.size();
   num += indirect_r_models_.size();
   num += byte_model_->NumOutputs();
   num += byte_mixer_->NumOutputs();
 #if FX4_TRANSFORMER6M
+#if !FX4_TRANSFORMER_REPLACES_LSTM
   if (transformer6m_) num += 1;
 #endif
   return num;
@@ -711,15 +733,19 @@ void Predictor::AddMixers() {
   for (unsigned int i = 0; i < vocab_.size(); ++i) {
     if (vocab_[i]) ++vocab_size;
   }
-  // The validated online LSTM always mixes every other model's output here,
-  // whether or not the transformer is active (see FX4_TRANSFORMER6M below):
-  // the record config (LSTM + obias_prior + full PPMd feature injection) is
-  // never removed, only ever added to.
+  Lstm* online_lstm = new Lstm(vocab_size, vocab_size, FX4_LSTM_CELLS,
+      FX4_LSTM_LAYERS, FX4_LSTM_HORIZON, FX4_LSTM_LEARNING_RATE,
+      FX4_LSTM_GRADIENT_CLIP);
+#if FX4_TRANSFORMER6M && FX4_TRANSFORMER_REPLACES_LSTM
+  if (transformer6m_) {
+    delete online_lstm;
+    online_lstm = nullptr;
+  }
+#endif
   byte_mixer_.emplace(1, manager_.bit_context_, vocab_, vocab_size,
-      new Lstm(vocab_size, vocab_size, FX4_LSTM_CELLS,
-          FX4_LSTM_LAYERS, FX4_LSTM_HORIZON, FX4_LSTM_LEARNING_RATE,
-          FX4_LSTM_GRADIENT_CLIP));
+      online_lstm);
 #if FX4_TRANSFORMER6M
+#if !FX4_TRANSFORMER_REPLACES_LSTM
   if (transformer6m_) {
     // Additional ensemble member, not a replacement: this second ByteMixer
     // (null Lstm) only reuses ByteModel's byte-to-bit range conversion to
@@ -731,6 +757,7 @@ void Predictor::AddMixers() {
     transformer6m_mixer_.emplace(1, manager_.bit_context_, vocab_,
         vocab_size, nullptr);
   }
+#endif
 #endif
 
 #ifdef KH_OBIAS
@@ -812,7 +839,7 @@ void Predictor::AddMixers() {
 }
 int lstmpr=0, lstmex=0;
 float byte_mixer_output=0.0f;
-#if FX4_TRANSFORMER6M
+#if FX4_TRANSFORMER6M && !FX4_TRANSFORMER_REPLACES_LSTM
 float transformer6m_mixer_output=0.0f;
 #endif
 
@@ -872,6 +899,9 @@ float Predictor::Predict() {
   // its unchecked path above.
   float gathered[64];
   unsigned int gathered_n = 0;
+#if FX4_GRAMMAR_MATCH
+  unsigned int grammar_zero_offset = 64;
+#endif
   for (unsigned int i = 0; i < direct_models_.size(); ++i) {
     const std::valarray<float>& outputs = direct_models_[i].Predict();
     for (unsigned int j = 0; j < outputs.size(); ++j) {
@@ -886,6 +916,17 @@ float Predictor::Predict() {
       gathered[gathered_n++] = outputs[j];
     }
   }
+#if FX4_GRAMMAR_MATCH
+  {
+    const float grammar_probability = grammar_model_->Predict()[0];
+    if (grammar_probability == 0.5f) {
+      grammar_zero_offset = gathered_n;
+      gathered[gathered_n++] = 0.5f;
+    } else {
+      gathered[gathered_n++] = grammar_probability;
+    }
+  }
+#endif
  
   for (unsigned int i = 0; i < indirect_ns_models_.size(); ++i) {
     const std::valarray<float>& outputs = indirect_ns_models_[i].Predict();
@@ -903,7 +944,7 @@ float Predictor::Predict() {
   const unsigned int ppmd_model_index = input_index + gathered_n;
   gathered[gathered_n++] = byte_model_->Predict()[0];
 
-#if FX4_TRANSFORMER6M
+#if FX4_TRANSFORMER6M && !FX4_TRANSFORMER_REPLACES_LSTM
   // Inserted before byte_mixer_output below so byte_mixer_index (computed
   // as input_index - 1 further down) still resolves to byte_mixer_output,
   // not to this entry -- downstream specialist/tier-2 mixing code depends
@@ -920,6 +961,11 @@ float Predictor::Predict() {
   if (byte_mixer_output == 0 || byte_mixer_output == 1) byte_mixer_override = byte_mixer_output;
   gathered[gathered_n++] = byte_mixer_output;
   layers_[0].SetInputsChecked(input_index, gathered, gathered_n);
+#if FX4_GRAMMAR_MATCH
+  if (grammar_zero_offset < gathered_n) {
+    layers_[0].SetZero(input_index + grammar_zero_offset);
+  }
+#endif
   input_index += gathered_n;
   auto byte_mixer_index = input_index - 1;
 
@@ -937,10 +983,16 @@ float Predictor::Predict() {
   trace_lstm_probability_ = lstm_probability;
   trace_fxcm_probability_ = bounded_fxcm_probability;
 #if FX4_TRANSFORMER6M
+#if FX4_TRANSFORMER_REPLACES_LSTM
+  trace_transformer_probability_ =
+      transformer6m_ && transformer6m_prediction_active_
+      ? lstm_probability : -1.0f;
+#else
   trace_transformer_probability_ =
       transformer6m_ && transformer6m_prediction_active_
       ? Sigmoid::Logistic(layers_[0].Inputs()[transformer6m_model_index])
       : -1.0f;
+#endif
 #endif
   trace_bit_position_ = static_cast<std::uint8_t>(manager_.bpos & 7u);
   trace_ppmd_order_ = static_cast<std::uint8_t>(
@@ -1075,6 +1127,9 @@ void Predictor::Perceive(int bit) {
   for (unsigned int i = 0; i < match_models_.size(); ++i) {
     match_models_[i].Perceive(bit);
   }
+#if FX4_GRAMMAR_MATCH
+  grammar_model_->Perceive(bit);
+#endif
   for (unsigned int i = 0; i < indirect_ns_models_.size(); ++i) {
     indirect_ns_models_[i].Perceive(bit);
   }
@@ -1088,7 +1143,9 @@ void Predictor::Perceive(int bit) {
 
   byte_mixer_->Perceive(bit);
 #if FX4_TRANSFORMER6M
+#if !FX4_TRANSFORMER_REPLACES_LSTM
   if (transformer6m_) transformer6m_mixer_->Perceive(bit);
+#endif
 #endif
 #if FX4_SHADOW_LSTM200
   shadow_lstm200_->Perceive(bit);
@@ -1116,6 +1173,9 @@ void Predictor::Perceive(int bit) {
     for (unsigned int i = 0; i < match_models_.size(); ++i) {
       match_models_[i].ByteUpdate();
     }
+#if FX4_GRAMMAR_MATCH
+    grammar_model_->ByteUpdate();
+#endif
     for (unsigned int i = 0; i < indirect_ns_models_.size(); ++i) {
       indirect_ns_models_[i].ByteUpdate();
     }
@@ -1136,11 +1196,16 @@ void Predictor::Perceive(int bit) {
 #endif
 #if FX4_TRANSFORMER6M
     if (transformer6m_) {
-      // Additional, not exclusive: the LSTM/obias path below still runs
-      // unconditionally, so this only ever adds a signal, never removes one.
       Transformer6mByteUpdate();
     }
 #endif
+    const bool run_online_lstm =
+#if FX4_TRANSFORMER6M && FX4_TRANSFORMER_REPLACES_LSTM
+        !transformer6m_;
+#else
+        true;
+#endif
+    if (run_online_lstm) {
 #ifdef KH_OBIAS
     if (obias_active_) {
       float probabilities[256];
@@ -1161,6 +1226,7 @@ void Predictor::Perceive(int bit) {
 #endif
 
     byte_mixer_->ByteUpdate();
+    }
 #if FX4_SHADOW_LSTM200
     shadow_lstm200_->ByteUpdate();
 #endif
@@ -1175,9 +1241,11 @@ void Predictor::Perceive(int bit) {
   }
   byte_mixer_output = byte_mixer_->Predict()[0];
 #if FX4_TRANSFORMER6M
+#if !FX4_TRANSFORMER_REPLACES_LSTM
   if (transformer6m_) {
     transformer6m_mixer_output = transformer6m_mixer_->Predict()[0];
   }
+#endif
 #endif
 #if FX4_SHADOW_LSTM200
   shadow_lstm200_output_ = shadow_lstm200_->Predict()[0];
@@ -1278,6 +1346,9 @@ void Predictor::Pretrain(int bit) {
   for (unsigned int i = 0; i < match_models_.size(); ++i) {
     match_models_[i].Predict();
   }
+#if FX4_GRAMMAR_MATCH
+  grammar_model_->Predict();
+#endif
   for (unsigned int i = 0; i < indirect_ns_models_.size(); ++i) {
     indirect_ns_models_[i].Predict();
   }
@@ -1297,6 +1368,9 @@ void Predictor::Pretrain(int bit) {
   for (unsigned int i = 0; i < match_models_.size(); ++i) {
     match_models_[i].Perceive(bit);
   }
+#if FX4_GRAMMAR_MATCH
+  grammar_model_->Perceive(bit);
+#endif
   for (unsigned int i = 0; i < indirect_ns_models_.size(); ++i) {
     indirect_ns_models_[i].Perceive(bit);
   }
@@ -1319,6 +1393,9 @@ void Predictor::Pretrain(int bit) {
     for (unsigned int i = 0; i < match_models_.size(); ++i) {
       match_models_[i].ByteUpdate();
     }
+#if FX4_GRAMMAR_MATCH
+    grammar_model_->ByteUpdate();
+#endif
     for (unsigned int i = 0; i < indirect_ns_models_.size(); ++i) {
       indirect_ns_models_[i].ByteUpdate();
     }

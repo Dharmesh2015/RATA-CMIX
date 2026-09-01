@@ -25,6 +25,7 @@
 */
 
 #include "fxcmv1.h"
+#include "../fx4_config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1218,7 +1219,16 @@ struct ContextMap3 {
     inline void update(const int i) {    
         U32 *p=&ts[cxtn[i]], p0=p[0];
         const int pr1=p0>>14;
-        p[0]+=(x.y<<18)-pr1;
+        const int inc=(x.y<<18)-pr1;
+#if FX4_DEEPMIX_CONTEXTS
+        // DeepMix's deterministic overflow repair. The stock update can wrap
+        // U32 max to zero during a pure one-run and invert a confident state.
+        if (inc>0 && p0>0xffffffffu-static_cast<U32>(inc)) {
+            p[0]=0xffffffffu;
+            return;
+        }
+#endif
+        p[0]+=inc;
     }
     inline int set(const int c, int) {
         assert(c>=0 && c<256);
@@ -3805,7 +3815,11 @@ U32 wt3b=0,wt3cxt=0,wt3cxtW=0,wt3cxtW1=0,wt4cxtW=0,wt4cxtW1=0;
 int pr; // Our most important variable - final prediction
 
 StateMap1 smA[3];
+#if FX4_DEEPMIX_CONTEXTS
+SmallStationaryContextMap scmA[7];
+#else
 SmallStationaryContextMap scmA[3];   
+#endif
 Mixer1 mxA[18]; 
 Mixer1 mxA1[6]; 
 Mixer1 mxA2[4]; 
@@ -3881,9 +3895,21 @@ void PredictorInit() {
     scmA[0].Init(8);
     scmA[1].Init(9); 
     scmA[2].Init(8); 
+#if FX4_DEEPMIX_CONTEXTS
+    scmA[3].Init(8);
+    scmA[4].Init(8);
+    scmA[5].Init(8);
+    scmA[6].Init(7);
+#endif
 
     maps1.Init(16,8);
+#if FX4_DEEPMIX_CONTEXTS
+    // maps2 is indexed only by deccode>>2 (<0x8000), so the upper half of
+    // the 16-bit context space is unreachable. This is output-neutral.
+    maps2.Init(15,8);
+#else
     maps2.Init(16,8);
+#endif
     const int dccount=6;
     dcsm.Init(28,dccount-1, &STA7[0][0] );
     dcsm0.Init(28,dccount, &STA7[0][0] );
@@ -4034,7 +4060,11 @@ void PredictorFree() {
     smA[1].Free(); 
     smA[2].Free(); 
     for (int i=0;i<4;i++) mmmO[i].Free();
+#if FX4_DEEPMIX_CONTEXTS
+    for (int i=0;i<7;i++) scmA[i].Free();
+#else
     for (int i=0;i<3;i++) scmA[i].Free();
+#endif
     maps1.Free();
     maps2.Free();
     dcsm.Free();
@@ -5563,6 +5593,12 @@ void __attribute__ ((noinline)) setByteContexts() {
         scmA[0].set(c1);
         scmA[1].set(stream3b&0x1ff);
         scmA[2].set(brcxt.cxt);
+#if FX4_DEEPMIX_CONTEXTS
+        scmA[3].set(c2*isParagraph);
+        scmA[4].set((indirectWord&0xffffff)>>16);
+        scmA[5].set(stream2b&0xff);
+        scmA[6].set(isParagraph+2*(stream3bR&0x3f));
+#endif
  
         if (wshift||c1==LF) {
             U16 sb=worcxt0.sBytes(1);
@@ -5674,6 +5710,12 @@ int modelPrediction() {
     scmA[0].mix(sscmrate);
     scmA[1].mix(sscmrate);
     scmA[2].mix(sscmrate);
+#if FX4_DEEPMIX_CONTEXTS
+    scmA[3].mix(sscmrate);
+    scmA[4].mix(sscmrate);
+    scmA[5].mix(sscmrate);
+    scmA[6].mix(sscmrate);
+#endif
   
     isMatch=MatchModel2mix();
     
@@ -5864,7 +5906,11 @@ int modelPrediction() {
     mxA[10].cxt=(x.c4&0xffff);
     mxA[11].cxt=(stream3b&0x3f)*256 +x.c0;  
     mxA[12].cxt=oldwt1+(stream2bR&255)*32;
+#if FX4_DEEPMIX_CONTEXTS
+    mxA[13].cxt=(stream3bR&511)+(ordP&7)*512;
+#else
     mxA[13].cxt=(stream3bR&511);
+#endif
     mxA[14].cxt=(BrFcIdx*8+FcIdx)*8+wrt3_c0b;
     mxA[15].cxt=(numbers|words)*16+(stream2bR&15); 
     mxA[16].cxt=xmlS&1023; 
