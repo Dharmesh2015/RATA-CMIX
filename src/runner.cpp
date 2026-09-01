@@ -1178,8 +1178,22 @@ bool RunCompression(bool enable_preprocess, const std::string& input_path,
   // train/predict on the entire stream from byte 0. Off unless requested;
   // each expert still returns the accepted baseline probability when its
   // own signal is weak, per PostR1Experts' baseline-anchored design.
+  //
+  // Must be SetPostR1Span, not just EnablePostR1Portfolio: EnablePortfolio()
+  // only ever sets observed_mask_ (lets experts train/observe), while
+  // Predict() gates all correction on evaluation_mask_, which only SetSpan()
+  // sets (see PostR1Experts::SetSpan vs EnablePortfolio in
+  // postr1_experts.cpp). Calling EnablePostR1Portfolio alone leaves
+  // evaluation_mask_ at 0, so Predict() takes its "if (evaluation_mask_ ==
+  // 0) return baseline_probability_;" early return on every bit -- the
+  // experts train silently but never actually correct anything. (Found via
+  // a real A/B run producing byte-identical output with this flag on vs.
+  // off, which is otherwise essentially impossible with several
+  // online-adaptive experts genuinely engaging over millions of bits.)
   if (EnvironmentEnabled("FX4_POSTR1_ALL")) {
-    p.EnablePostR1Portfolio(PostR1Experts::kAllPredictors);
+    p.SetPostR1Span(0, PostR1Experts::kAllPredictors,
+        static_cast<std::uint8_t>(PostR1Experts::StreamClass::kMixed), 0,
+        0x07ffu);
   }
 #endif
   if (enable_preprocess
@@ -1302,10 +1316,13 @@ bool RunDecompression(const std::string& input_path,
     Predictor p(vocab, scr2_used, enable_transformer6m ||
         EnvironmentEnabled("FX4_ENABLE_TRANSFORMER6M"));
 #if FX4_SELECTIVE_POSTR1
-    // Must mirror the encoder-side FX4_POSTR1_ALL hook exactly, or decode
-    // desyncs from the archive's actual coded probabilities.
+    // Must mirror the encoder-side FX4_POSTR1_ALL hook exactly (SetPostR1Span,
+    // not just EnablePostR1Portfolio -- see the encoder-side comment), or
+    // decode desyncs from the archive's actual coded probabilities.
     if (EnvironmentEnabled("FX4_POSTR1_ALL")) {
-      p.EnablePostR1Portfolio(PostR1Experts::kAllPredictors);
+      p.SetPostR1Span(0, PostR1Experts::kAllPredictors,
+          static_cast<std::uint8_t>(PostR1Experts::StreamClass::kMixed), 0,
+          0x07ffu);
     }
 #endif
     if (dictionary_used) preprocessor::Pretrain(&p, dictionary);
