@@ -21,7 +21,7 @@ DEFINES := -DSEED=923 -DUPDATE_LIMIT=3000 -DNDEBUG \
 	-DFX4_TARGET93_CANONICAL=1 \
 	-DCMIX_PPMD_RSS_BUDGET_MB=8704
 
-ARCH_FLAGS ?= -march=native -mtune=native
+ARCH_FLAGS ?= -march=x86-64-v3 -mtune=generic
 LTO_FLAGS := -flto=thin
 
 # PGO=generate builds the instrumented binary used only by the

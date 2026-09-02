@@ -7,7 +7,7 @@ cd "$ROOT_DIR"
 readonly DICTIONARY="$ROOT_DIR/dictionary/english.dic"
 readonly ARTICLE_ORDER="$ROOT_DIR/src/readalike_prepr/data/new_article_order"
 readonly TRANSFORMER="$ROOT_DIR/models/transformer6m/6m-q4-fp32.tfwc2"
-readonly CXX_BIN="${CXX:-clang++}"
+readonly CXX_BIN="${CXX:-clang++-17}"
 
 test -s "$DICTIONARY"
 test -s "$ARTICLE_ORDER"

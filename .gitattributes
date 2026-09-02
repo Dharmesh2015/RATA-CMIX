@@ -1,0 +1,15 @@
+# Shell/build scripts must stay LF -- a CRLF shebang breaks execution on the
+# Linux judging host, and `make` recipe lines can misparse with a trailing CR.
+*.sh text eol=lf
+makefile text eol=lf
+comp9.args text eol=lf
+entry.env text eol=lf
+
+# Everything the compressor reads as raw bytes must never be newline-
+# converted, regardless of any contributor's local core.autocrlf setting.
+dictionary/** binary
+models/** binary
+src/readalike_prepr/data/** binary
+prof_input/** binary
+pgo/** binary
+example-source/** binary

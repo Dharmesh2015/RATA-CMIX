@@ -22,6 +22,6 @@ cp -a "$source_root/build_and_construct_comp.sh" \
 
 cd "$build_root"
 chmod 0555 build_and_construct_comp.sh
-CXX=clang++ ./build_and_construct_comp.sh
+CXX=clang++-17 ./build_and_construct_comp.sh
 test -s cmix
 install -m 0555 cmix /work/cmix
