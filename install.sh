@@ -6,12 +6,17 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -o Acquire::Retries=3
 apt-get install --yes --no-install-recommends \
   -o Acquire::Retries=3 \
-  binutils clang coreutils curl libc6-dev libstdc++-12-dev lld make \
+  binutils clang coreutils curl libc6-dev lld make \
   time util-linux xz-utils
 rm -rf /var/lib/apt/lists/*
 
 # The judging base image already provides this exact pinned binary. Download
-# it only for a plain Ubuntu 22.04 Google Cloud host.
+# it only for a plain Ubuntu 20.04 (focal) Google Cloud host -- the image
+# James Bowery's own alpha-testing instructions specify
+# (ubuntu-2004-focal-v20240731, ubuntu-os-cloud). libstdc++-12-dev does not
+# exist in focal's archive (GCC 12 postdates the release); this target
+# builds -std=c++17 only, which focal's default libc6-dev/libstdc++ already
+# supports, so no newer libstdc++ package is needed.
 upx=/opt/upx/upx-5.1.1-amd64_linux/upx
 if [ ! -x "$upx" ]; then
   tmp="$(mktemp -d)"

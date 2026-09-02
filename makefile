@@ -1,5 +1,8 @@
 CXX := clang++
 OUT ?= cmix
+PGO ?= use
+PGO_PROFILE := pgo/default.profdata
+PGO_RAW_DIR := pgo-raw
 
 .DEFAULT_GOAL := target93
 
@@ -18,18 +21,40 @@ DEFINES := -DSEED=923 -DUPDATE_LIMIT=3000 -DNDEBUG \
 	-DCMIX_PPMD_RSS_BUDGET_MB=8704
 
 ARCH_FLAGS ?= -march=native -mtune=native
+LTO_FLAGS := -flto=thin
+
+# PGO=generate builds the instrumented binary used only by the
+# pgo-instrumented target below. The default, PGO=use, applies the
+# committed pgo/default.profdata automatically whenever it's present, so
+# a plain `make target93` -- exactly what build.sh runs during judging,
+# with no extra flags or steps available to it -- already gets the
+# profile-guided build. A missing profile falls back to a plain
+# optimized (still LTO'd) build with a make-time warning, never a hard
+# failure: this repository must still build without the profile checked
+# out.
+ifeq ($(PGO),generate)
+PGO_FLAGS := -fprofile-generate=$(PGO_RAW_DIR)
+else
+PGO_FLAGS := $(if $(wildcard $(PGO_PROFILE)),-fprofile-use=$(PGO_PROFILE) -Wno-profile-instr-out-of-date,)
+ifeq ($(wildcard $(PGO_PROFILE)),)
+$(warning $(PGO_PROFILE) not found; building without profile guidance)
+endif
+endif
+
 COMMON := $(DEFINES) -m64 -Wall -std=c++17 -fno-exceptions \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-fno-threadsafe-statics -Wno-unknown-escape-sequence \
 	-Wno-unused-variable -Wno-unneeded-internal-declaration \
 	-Wno-unused-but-set-variable -Wno-format $(ARCH_FLAGS) \
-	-fdata-sections -ffunction-sections
+	-fdata-sections -ffunction-sections $(LTO_FLAGS) $(PGO_FLAGS)
 FAST_FLAGS := $(COMMON) -O3 -ffp-model=fast
 SLOW_FLAGS := $(COMMON) -Os -ffp-model=fast
 COLD_FLAGS := $(COMMON) -Oz -ffp-model=fast
 TRANSFORMER_FLAGS := -m64 -O3 -std=c++17 -Wall -Wextra \
-	-fno-math-errno $(ARCH_FLAGS) -fdata-sections -ffunction-sections
-LDFLAGS := -m64 -fuse-ld=lld -Wl,--gc-sections -std=c++17
+	-fno-math-errno $(ARCH_FLAGS) -fdata-sections -ffunction-sections \
+	$(LTO_FLAGS) $(PGO_FLAGS)
+LDFLAGS := -m64 -fuse-ld=lld -Wl,--gc-sections -std=c++17 $(LTO_FLAGS) \
+	$(PGO_FLAGS)
 
 FAST_SOURCES := \
 	src/coder/decoder.cpp src/coder/encoder.cpp \
@@ -56,7 +81,8 @@ TRANSFORMER_OBJECTS := tf_weights_io_compressed.o \
 	tf_qmat_dense.o tf_qmat_sparse.o tf_attn.o tf_kda.o tf_glue.o \
 	tf_arena_build.o tf_model_opt.o
 
-.PHONY: target93 cmix fast slow cold transformer_objects clean
+.PHONY: target93 cmix fast slow cold transformer_objects clean \
+	pgo-instrumented pgo-merge
 
 target93: cmix
 
@@ -111,5 +137,22 @@ cmix: fast slow cold transformer_objects
 		$(TRANSFORMER_OBJECTS) -s -o $(OUT)
 	rm -f *.o
 
+# Builds an instrumented binary at cmix_pgo_instrumented. Run it over a
+# representative input (prof_input/input) to produce *.profraw files in
+# pgo-raw/, then `make pgo-merge` to fold them into pgo/default.profdata.
+# See docs/PGO_LTO.md.
+pgo-instrumented:
+	$(MAKE) clean
+	rm -rf $(PGO_RAW_DIR)
+	mkdir -p $(PGO_RAW_DIR)
+	$(MAKE) cmix PGO=generate OUT=cmix_pgo_instrumented
+	rm -f *.o
+
+pgo-merge:
+	test -n "$$(ls $(PGO_RAW_DIR)/*.profraw 2>/dev/null)"
+	mkdir -p $(dir $(PGO_PROFILE))
+	llvm-profdata merge -output=$(PGO_PROFILE) $(PGO_RAW_DIR)/*.profraw
+
 clean:
-	rm -f *.o cmix cmix_orig
+	rm -f *.o cmix cmix_orig cmix_pgo_instrumented
+	rm -rf $(PGO_RAW_DIR)
