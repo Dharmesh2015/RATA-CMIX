@@ -94,15 +94,8 @@ struct ContextManager {
   unsigned int line_class_ = 0, line_prefix_hash_ = 0;
   std::vector<unsigned char> history_, shared_map_;
   std::vector<unsigned long long> words_, recent_bytes_;
-#if FX4_MINI_CMIX
-  // Keep auxiliary contexts inline so references held by primary models stay
-  // valid when the optional portfolio is added.
-  llvm::SmallVector<ContextHash, 20> context_hash_contexts_;
-  llvm::SmallVector<Sparse, 24> sparse_contexts_;
-#else
   llvm::SmallVector<ContextHash, 12> context_hash_contexts_;
   llvm::SmallVector<Sparse, 18> sparse_contexts_;
-#endif
   llvm::SmallVector<BracketContext, 1> bracket_contexts_;
   // Every stored value is explicitly masked to 32 bits or less (verified:
   // ind1<=0xFF, ind2<=0xFFFFFFFF exactly, ind3<=0x1FFFFFF, ind5<=0x3FFFFFFF

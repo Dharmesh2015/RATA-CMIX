@@ -49,7 +49,6 @@ typedef unsigned long long qword;
 // recommended for normal usage.
 bool mmap_to_disk = FX4_PPMD_MMAP_TO_DISK != 0;
 qword mmap_size;
-bool mmap_private_fork_mode = false;
 static constexpr char mmap_path[] = "ppm.temp";
 
 // Disk-backed PPM keeps the 14GB heap outside anonymous RAM, but pages still
@@ -66,19 +65,6 @@ static constexpr char mmap_path[] = "ppm.temp";
 #endif
 static constexpr unsigned long long kMmapRemapIntervalBytes =
     FX4_PPMD_REMAP_INTERVAL;
-
-static bool UsePrivateForkMapping() {
-#if FX4_DONOR_FORK_DISCOVERY
-  // Legacy discovery forks predictors and needs copy-on-write. Winner-first
-  // discovery evaluates count-only branches in one process, so retain the
-  // normal cmix-lex shared mapping and residency eviction for that path.
-  const char* winner_mode = std::getenv("FX4_DONOR_WINNER_SEARCH");
-  return !(winner_mode && *winner_mode &&
-      std::strcmp(winner_mode, "0") != 0);
-#else
-  return false;
-#endif
-}
 
 // Total-VmRSS budget (MB) that triggers a purge, overridable at runtime via
 // the CMIX_PPM_RSS_MB env var.  The default keeps the Hutter 10 GB path: the
@@ -200,7 +186,6 @@ int StartSubAllocator( qword SASize ) {
 
   if (mmap_to_disk) {
     mmap_size = t;
-    mmap_private_fork_mode = UsePrivateForkMapping();
     int fd = open(mmap_path, O_RDWR | O_CREAT | O_TRUNC | O_NOATIME,
         (mode_t)0664);
     if(fd < 0){
@@ -210,13 +195,8 @@ int StartSubAllocator( qword SASize ) {
     if (ftruncate(fd, t) == -1) {
       exit(EXIT_FAILURE);
     }
-    // Exact donor discovery forks two predictors from the same byte boundary.
-    // MAP_PRIVATE gives each branch copy-on-write PPM state. The accepted
-    // compressor remains MAP_SHARED and retains the cmix-lex RSS behavior.
-    const int map_flags = mmap_private_fork_mode
-        ? MAP_PRIVATE | MAP_NORESERVE : MAP_SHARED;
     HeapStart = (byte*) mmap(
-        NULL, t, PROT_READ|PROT_WRITE, map_flags, fd, 0);
+        NULL, t, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
     if(HeapStart == MAP_FAILED){
       exit(EXIT_FAILURE);
     }

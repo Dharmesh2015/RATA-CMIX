@@ -15,9 +15,6 @@
 #if FX4_TRANSFORMER_REPLACES_LSTM && !FX4_TRANSFORMER6M
 #error FX4_TRANSFORMER_REPLACES_LSTM requires FX4_TRANSFORMER6M
 #endif
-#if FX4_TRANSFORMER_REPLACES_LSTM && defined(KH_OBIAS)
-#error The faithful transformer-replacement profile cannot use the LSTM obias head
-#endif
 
 #if FX4_TRANSFORMER6M
 namespace {
@@ -137,10 +134,9 @@ bool ReadableTransformerFile(const char* path) {
 }  // namespace
 #endif
 
-Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled,
+Predictor::Predictor(const std::vector<bool>& vocab,
     bool enable_transformer6m)
     : manager_(), sigmoid_(100001), vocab_(vocab) {
-  (void)scr2_enabled;
   fxcm_neutral_input_ = sigmoid_.Logit(0.5f);
   for (int raw = -2047; raw <= 2047; ++raw) {
     float p = fxcm_model_.RawPredictionProbability(static_cast<short>(raw));
@@ -149,208 +145,27 @@ Predictor::Predictor(const std::vector<bool>& vocab, bool scr2_enabled,
     fxcm_stretched_inputs_[raw + 2047] = sigmoid_.Logit(p);
   }
   fxcm_stretched_inputs_[4095] = fxcm_neutral_input_;
-#if FX4_SPECIALIST_CORRECTOR
   specialist_error_.fill(0.25f);
-#endif
   AddBracket();
   AddPPMD();
   AddWord();
   AddMatch();
-#if FX4_GRAMMAR_MATCH
   grammar_model_.emplace(manager_.bit_context_, 200, 0.5f);
-#endif
   AddDoubleIndirect();
-#if FX4_TRANSFORMER6M
   if (enable_transformer6m) {
-    InitializeTransformer6m(FX4_TRANSFORMER6M_REQUIRED != 0);
+    InitializeTransformer6m(true);
   }
-#else
-  (void)enable_transformer6m;
-#endif
   // Construct the accepted mixer/LSTM before auxiliary models consume rand().
   // This preserves the baseline LSTM initialization exactly.
   AddMixers();
-#if FX4_TOKEN_NGRAM_BIAS
-  token_ngram_bias_.emplace();
-#endif
-#if FX4_DELTA_MEMORY_BIAS
-  delta_memory_.emplace();
-#endif
-#if FX4_ESN_NLMS
   esn_nlms_.emplace();
-#endif
-#if FX4_MINI_CMIX
-  mini_shared_map_.assign(256u * 100000u, 0);
-  AddMiniCmix();
-#endif
-#if FX4_SHADOW_LSTM200
-  unsigned int shadow_vocab_size = 0;
-  for (bool present : vocab_) {
-    if (present) ++shadow_vocab_size;
-  }
-  shadow_lstm200_.emplace(1, manager_.bit_context_, vocab_,
-      shadow_vocab_size,
-      new Lstm(shadow_vocab_size, shadow_vocab_size,
-          FX4_SHADOW_LSTM_CELLS, FX4_LSTM_LAYERS, FX4_LSTM_HORIZON,
-          FX4_LSTM_LEARNING_RATE, FX4_LSTM_GRADIENT_CLIP));
-#endif
   auxiliary_size_ = 3;
-#if FX4_MINI_CMIX
-  mini_cmix_recent_error_.fill(0.25f);
-#endif
 }
 
 void Predictor::FreeFxcmMemory() {
   fxcm_model_.FreeMemory();
 }
 
-void Predictor::EnablePostR1Portfolio(std::uint32_t mask) {
-#if FX4_SELECTIVE_POSTR1
-  postr1_portfolio_mask_ |= mask;
-  if (!postr1_experts_) {
-    postr1_experts_.reset(new PostR1Experts());
-    postr1_residual_one_.fill(0.5f);
-  }
-  postr1_experts_->EnablePortfolio(postr1_portfolio_mask_);
-  byte_model_->SetOrderBandsNeeded(
-      (postr1_experts_->training_mask() & PostR1Experts::kPpmdEscapeOrder) != 0);
-#else
-  (void)mask;
-#endif
-}
-
-void Predictor::SetPostR1Span(std::uint64_t logical_offset,
-    std::uint32_t mask, std::uint8_t stream_class,
-    std::uint8_t profile_id, std::uint16_t mini_model_mask) {
-#if FX4_SELECTIVE_POSTR1
-  if (mask != 0) {
-    EnablePostR1Portfolio(mask);
-    // Each selected action starts from the same neutral specialist state used
-    // by discovery. The accepted PPMd/LSTM/FXCM state remains continuous.
-    postr1_experts_.reset(new PostR1Experts());
-    postr1_experts_->EnablePortfolio(postr1_portfolio_mask_);
-  }
-  if (!postr1_experts_) return;
-  if (stream_class > static_cast<std::uint8_t>(
-          PostR1Experts::StreamClass::kMixed)) {
-    stream_class = static_cast<std::uint8_t>(
-        PostR1Experts::StreamClass::kMixed);
-  }
-  postr1_residual_gain_ = (profile_id >> 6) & 3u;
-  postr1_experts_->SetSpan(logical_offset, mask,
-      static_cast<PostR1Experts::StreamClass>(stream_class), profile_id,
-      mini_model_mask);
-  byte_model_->SetOrderBandsNeeded(
-      (postr1_experts_->training_mask() & PostR1Experts::kPpmdEscapeOrder) != 0);
-#else
-  (void)logical_offset;
-  (void)mask;
-  (void)stream_class;
-  (void)profile_id;
-  (void)mini_model_mask;
-#endif
-}
-
-void Predictor::SetPostR1DonorProfile(
-    const std::vector<std::uint8_t>& bytes,
-    const std::vector<std::uint32_t>& segment_lengths) {
-#if FX4_SELECTIVE_POSTR1
-  if (!postr1_experts_) {
-    EnablePostR1Portfolio(PostR1Experts::kDonorProfile);
-  }
-  postr1_experts_->SetDonorProfile(bytes, segment_lengths);
-#else
-  (void)bytes;
-  (void)segment_lengths;
-#endif
-}
-
-bool Predictor::HasPostR1DonorProfile() const {
-#if FX4_SELECTIVE_POSTR1
-  return postr1_experts_ && postr1_experts_->HasDonorProfile();
-#else
-  return false;
-#endif
-}
-#if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
-void Predictor::SetPostR1BranchSignals(PostR1Experts* target) const {
-  std::array<float, 11> mini_model_probabilities{};
-  mini_model_probabilities.fill(0.5f);
-#if FX4_MINI_CMIX
-  mini_model_probabilities = mini_cmix_model_probabilities_;
-#endif
-  target->SetModelSignals(donor_branch_ppmd_probability_,
-      donor_branch_lstm_probability_,
-#if FX4_SHADOW_LSTM200
-      donor_branch_shadow_lstm_probability_,
-#else
-      0.5f,
-#endif
-      donor_branch_fxcm_probability_,
-#if FX4_MINI_CMIX
-      mini_cmix_probability_,
-#else
-      0.5f,
-#endif
-      mini_model_probabilities, donor_branch_ppmd_order_bands_,
-      donor_branch_ppmd_order_, donor_branch_escape_depth_,
-      donor_branch_escape_rate_, donor_branch_residual_probability_,
-      donor_branch_match_length_);
-}
-#endif
-
-#if FX4_SELECTIVE_POSTR1
-void Predictor::UpdatePostR1ResidualDistribution() {
-  const std::valarray<float>& ppmd = byte_model_->BytePredict();
-  const std::valarray<float>& lstm = byte_mixer_->ByteProbabilities();
-  postr1_mass_.fill(0.0f);
-  for (unsigned int symbol = 0; symbol < 256; ++symbol) {
-    if (!vocab_[symbol]) continue;
-    const float p = std::max(1.0e-30f, ppmd[symbol]);
-    const float q = std::max(1.0e-30f, lstm[symbol]);
-    const float middle = std::sqrt(p * q);
-    float mass = middle;
-    if (postr1_residual_gain_ == 0) {
-      mass = std::sqrt(p * middle);       // g = 0.25
-    } else if (postr1_residual_gain_ == 2) {
-      mass = std::sqrt(q * middle);       // g = 0.75
-    } else if (postr1_residual_gain_ == 3) {
-      mass = q;                           // g = 1.00
-    }
-    postr1_mass_[256 + symbol] = mass;
-  }
-  for (int node = 255; node >= 1; --node) {
-    postr1_mass_[node] =
-        postr1_mass_[node * 2] + postr1_mass_[node * 2 + 1];
-    postr1_residual_one_[node] = postr1_mass_[node] > 0.0f
-        ? postr1_mass_[node * 2 + 1] / postr1_mass_[node]
-        : 0.5f;
-  }
-}
-
-float Predictor::PostR1ResidualProbability() const {
-  const unsigned int node = manager_.bit_context_ & 255u;
-  return node == 0 ? 0.5f : postr1_residual_one_[node];
-}
-#endif
-
-float Predictor::PpmdByteProbability(std::uint8_t byte) const {
-  return byte_model_->ByteProbability(byte);
-}
-
-unsigned int Predictor::PpmdEffectiveOrder() const {
-  return byte_model_->EffectiveOrder();
-}
-
-unsigned int Predictor::PpmdEscapeDepth() const {
-  return byte_model_->LastEscapeDepth();
-}
-
-float Predictor::PpmdEscapeRate() const {
-  return byte_model_->RecentEscapeRate();
-}
-
-#if FX4_TRANSFORMER6M
 void Predictor::InitializeTransformer6m(bool required) {
   transformer6m_model_vocab_.fill(true);
   for (unsigned char byte : kTransformerAbsentBytes) {
@@ -441,12 +256,7 @@ void Predictor::Transformer6mByteUpdate() {
     for (unsigned int byte = 0; byte < vocab_.size(); ++byte) {
       if (vocab_[byte]) transformer6m_actual_probabilities_[actual++] = ppmd[byte];
     }
-#if FX4_TRANSFORMER_REPLACES_LSTM
     byte_mixer_->SetProbs(transformer6m_actual_probabilities_.data());
-#else
-    transformer6m_mixer_->SetProbs(
-        transformer6m_actual_probabilities_.data());
-#endif
     return;
   }
   std::memmove(transformer6m_separator_window_.data(),
@@ -495,14 +305,8 @@ void Predictor::Transformer6mByteUpdate() {
         ? known_mass * transformer6m_probabilities_[model_index] / model_sum
         : ppmd[byte];
   }
-#if FX4_TRANSFORMER_REPLACES_LSTM
   byte_mixer_->SetProbs(transformer6m_actual_probabilities_.data());
-#else
-  transformer6m_mixer_->SetProbs(
-      transformer6m_actual_probabilities_.data());
-#endif
 }
-#endif
 
 unsigned long long Predictor::GetNumModels() {
   unsigned long long num = 0;
@@ -519,11 +323,6 @@ unsigned long long Predictor::GetNumModels() {
   num += indirect_r_models_.size();
   num += byte_model_->NumOutputs();
   num += byte_mixer_->NumOutputs();
-#if FX4_TRANSFORMER6M
-#if !FX4_TRANSFORMER_REPLACES_LSTM
-  if (transformer6m_) num += 1;
-#endif
-#endif
   return num;
 }
 
@@ -550,12 +349,8 @@ void Predictor::AddBracket() {
 void Predictor::AddPPMD() {
   byte_model_.emplace(FX4_PPMD_ORDER, FX4_PPMD_MEMORY_MB,
       manager_.bit_context_, vocab_);
-  // No post-R1 portfolio is active yet at construction time, so the
-  // order-band trees (only consumed by the kPpmdEscapeOrder expert) are
-  // unnecessary overhead until/unless EnablePostR1Portfolio or
-  // SetPostR1Span actually requests that expert. See
-  // PPMD::SetOrderBandsNeeded for why this cannot affect p_base/archive
-  // bytes.
+  // The production mixer consumes the direct PPMd probability, not the
+  // experimental order-band side predictions.
   byte_model_->SetOrderBandsNeeded(false);
 }
 
@@ -624,111 +419,6 @@ void Predictor::AddDoubleIndirect() {
   indirect_ns_models_.emplace_back(manager_.nonstationary_, manager_.ind5,  manager_.bit_context_, delta, manager_.shared_map_);
 }
 
-#if FX4_MINI_CMIX
-void Predictor::AddMiniCmix() {
-  constexpr int direct_limit = 30;
-  constexpr float direct_delta = 0.0f;
-  for (unsigned int order = 0; order < 3; ++order) {
-    const Context& context =
-        manager_.AddContextHashContext(manager_.bit_context_, order, 8);
-    mini_direct_models_.emplace_back(context.GetContext(),
-        manager_.bit_context_, direct_limit, direct_delta, context.Size());
-  }
-  {
-    const Context& context =
-        manager_.AddContextHashContext(manager_.bit_context_, 3, 8);
-    mini_direct_hash_models_.emplace_back(context.GetContext(),
-        manager_.bit_context_, direct_limit, direct_delta, 100000);
-  }
-
-  const std::vector<std::vector<unsigned int>> word_indirect = {
-      {1, 2, 3}, {1, 2, 3, 4}, {7}, {7, 2}};
-  for (const auto& params : word_indirect) {
-    const Context& context = manager_.AddSparseContext(manager_.words_, params);
-    mini_indirect_models_.emplace_back(manager_.nonstationary_,
-        context.GetContext(), manager_.bit_context_, 200,
-        mini_shared_map_);
-  }
-
-  {
-    const Context& context =
-        manager_.AddContextHashContext(manager_.bit_context_, 2, 8);
-    mini_match_models_.emplace_back(manager_.history_, context.GetContext(),
-        manager_.bit_context_, 200, 0.5, std::min<unsigned long long>(
-            2000000, context.Size()), &mini_longest_match_);
-  }
-  {
-    const Context& context = manager_.AddSparseContext(
-        manager_.words_, std::vector<unsigned int>{7});
-    mini_match_models_.emplace_back(manager_.history_, context.GetContext(),
-        manager_.bit_context_, 200, 0.5, 2000000,
-        &mini_longest_match_);
-  }
-  {
-    const Context& context = manager_.AddSparseContext(
-        manager_.words_, std::vector<unsigned int>{1});
-    // Upstream cmix uses 500,000 slots here. The current DirectHash layout
-    // would consume roughly 640 MiB at that size; 100,000 keeps this
-    // complementary expert within the Hutter memory budget.
-    mini_direct_hash_models_.emplace_back(context.GetContext(),
-        manager_.bit_context_, direct_limit, direct_delta, 100000);
-  }
-}
-
-float Predictor::PredictMiniCmix(std::uint16_t model_mask) {
-  model_mask &= 0x07ffu;
-  mini_cmix_inputs_.fill(0.0f);
-  mini_cmix_model_probabilities_.fill(0.5f);
-  mini_cmix_inputs_[0] = 1.0f;
-  auto add_prediction = [this](unsigned int model, float probability) {
-    const float bounded = std::max(1.0e-4f,
-        std::min(1.0f - 1.0e-4f, probability));
-    mini_cmix_model_probabilities_[model] = bounded;
-    mini_cmix_inputs_[model + 1] = std::max(-4.0f,
-        std::min(4.0f, sigmoid_.Logit(bounded)));
-  };
-  for (unsigned int i = 0; i < mini_direct_models_.size(); ++i)
-    add_prediction(i, mini_direct_models_[i].Predict()[0]);
-  add_prediction(3, mini_direct_hash_models_[0].Predict()[0]);
-  for (unsigned int i = 0; i < mini_indirect_models_.size(); ++i)
-    add_prediction(4 + i, mini_indirect_models_[i].Predict()[0]);
-  for (unsigned int i = 0; i < mini_match_models_.size(); ++i)
-    add_prediction(8 + i, mini_match_models_[i].Predict()[0]);
-  add_prediction(10, mini_direct_hash_models_[1].Predict()[0]);
-
-  mini_cmix_context_ = ((manager_.bpos & 7u) << 4) |
-      ((manager_.line_class_ & 7u) << 1) |
-      static_cast<unsigned int>(manager_.wrt_state_ != 0);
-  float logit = 0.0f;
-  unsigned int selected = 0;
-  for (unsigned int model = 0; model < kMiniCmixModelCount; ++model) {
-    if (model_mask & (1u << model)) {
-      logit += mini_cmix_inputs_[model + 1];
-      ++selected;
-    }
-  }
-  if (selected) logit /= static_cast<float>(selected);
-  logit = std::max(-8.0f, std::min(8.0f, logit));
-  mini_cmix_probability_ = Sigmoid::Logistic(logit);
-  return mini_cmix_probability_;
-}
-
-void Predictor::PerceiveMiniCmix(int bit, std::uint16_t model_mask) {
-  (void)model_mask;
-  for (auto& model : mini_direct_models_) model.Perceive(bit);
-  for (auto& model : mini_direct_hash_models_) model.Perceive(bit);
-  for (auto& model : mini_indirect_models_) model.Perceive(bit);
-  for (auto& model : mini_match_models_) model.Perceive(bit);
-}
-void Predictor::ByteUpdateMiniCmix(std::uint16_t model_mask) {
-  (void)model_mask;
-  for (auto& model : mini_direct_models_) model.ByteUpdate();
-  for (auto& model : mini_direct_hash_models_) model.ByteUpdate();
-  for (auto& model : mini_indirect_models_) model.ByteUpdate();
-  for (auto& model : mini_match_models_) model.ByteUpdate();
-}
-#endif
-
 unsigned int Discretize(float p) {
   return 1 + 4094 * p;
 }
@@ -748,56 +438,6 @@ void Predictor::AddMixers() {
 #endif
   byte_mixer_.emplace(1, manager_.bit_context_, vocab_, vocab_size,
       online_lstm);
-#if FX4_TRANSFORMER6M
-#if !FX4_TRANSFORMER_REPLACES_LSTM
-  if (transformer6m_) {
-    // Additional ensemble member, not a replacement: this second ByteMixer
-    // (null Lstm) only reuses ByteModel's byte-to-bit range conversion to
-    // turn the transformer's frozen, possibly stream-mismatched
-    // distribution into one more scalar input for the outer adaptive
-    // mixer (see Predict()/GetNumModels()), which learns its own weight
-    // for it -- a bad prediction gets down-weighted instead of silently
-    // replacing a proven signal.
-    transformer6m_mixer_.emplace(1, manager_.bit_context_, vocab_,
-        vocab_size, nullptr);
-  }
-#endif
-#endif
-
-#ifdef KH_OBIAS
-  const char* obias_path = std::getenv("KH_OBIAS");
-  if (obias_path && obias_path[0]) {
-    obias_.reset(new KhObiasPrior(obias_path));
-    obias_active_ = obias_->ok();
-  }
-  if (const char* keep_aux = std::getenv("KH_OBIAS_KEEP_AUX")) {
-    obias_keep_aux_ = keep_aux[0] && std::strcmp(keep_aux, "0") != 0;
-  }
-#ifdef KH_OBIAS_CONST_GATE
-  // Record configuration: a standalone constant 0.15 PPMd log-prior with
-  // the accepted auxiliary input retained. It needs no additional blob.
-  if (!obias_active_) {
-    obias_.reset(new KhObiasPrior(nullptr));
-    obias_active_ = obias_->ok();
-    obias_keep_aux_ = true;
-  }
-#endif
-#ifdef KH_OBIAS_ARCHIVE
-  if (!obias_active_ && (!obias_path || !obias_path[0])) {
-    FILE* probe = fopen(".obias_blob_decomp", "rb");
-    if (probe) {
-      fseek(probe, 0, SEEK_END);
-      const long size = ftell(probe);
-      fclose(probe);
-      if (size > 0) {
-        obias_.reset(new KhObiasPrior(".obias_blob_decomp"));
-        obias_active_ = obias_->ok();
-      }
-    }
-  }
-#endif
-#endif
-
   for (int i = 0; i < 2; ++i) {
     layers_.emplace_back(sigmoid_,
         1.0e-4);
@@ -846,34 +486,9 @@ void Predictor::AddMixers() {
 }
 int lstmpr=0, lstmex=0;
 float byte_mixer_output=0.0f;
-#if FX4_TRANSFORMER6M && !FX4_TRANSFORMER_REPLACES_LSTM
-float transformer6m_mixer_output=0.0f;
-#endif
 
 float Predictor::Predict() {
   unsigned int input_index = 0;
-#if FX4_SELECTIVE_POSTR1
-  float mini_cmix_probability = 0.5f;
-  std::array<float, 11> mini_model_probabilities{};
-  mini_model_probabilities.fill(0.5f);
-#if FX4_MINI_CMIX
-  mini_cmix_tracking_ =
-#if FX4_DONOR_FORK_DISCOVERY
-      true;
-#else
-      postr1_experts_ && postr1_experts_->MiniCmixTrackingNeeded();
-#endif
-  mini_cmix_used_ = postr1_experts_ && postr1_experts_->MiniCmixNeeded();
-  mini_cmix_model_mask_ = mini_cmix_used_
-      ? postr1_experts_->MiniCmixModelMask() : 0u;
-  if (mini_cmix_tracking_) {
-    // Keep one continuously warmed all-model aggregate. Selective subset
-    // trials use the simultaneously captured individual probabilities.
-    mini_cmix_probability = PredictMiniCmix(0x07ffu);
-    mini_model_probabilities = mini_cmix_model_probabilities_;
-  }
-#endif
-#endif
   auto bracket_model_output = bracket_model_->Predict()[0];
   layers_[0].SetInput(input_index++, bracket_model_output);
 
@@ -899,7 +514,6 @@ float Predictor::Predict() {
       std::min(1.0f - 1.0e-4f, aggregate_fxcm_probability));
   const float aggregate_fxcm_logit =
       sigmoid_.Logit(bounded_fxcm_probability);
-  const unsigned int fxcm_model_index = input_index - 1;
 
   // Collect the low-count model tail and perform one checked conversion into
   // the flat MixerInput row. FXCM's large already-stretched prefix remains on
@@ -952,18 +566,6 @@ float Predictor::Predict() {
   const unsigned int ppmd_model_index = input_index + gathered_n;
   gathered[gathered_n++] = byte_model_->Predict()[0];
 
-#if FX4_TRANSFORMER6M && !FX4_TRANSFORMER_REPLACES_LSTM
-  // Inserted before byte_mixer_output below so byte_mixer_index (computed
-  // as input_index - 1 further down) still resolves to byte_mixer_output,
-  // not to this entry -- downstream specialist/tier-2 mixing code depends
-  // on that exact index referring to the validated LSTM's own output.
-  unsigned int transformer6m_model_index = 0;
-  if (transformer6m_) {
-    transformer6m_model_index = input_index + gathered_n;
-    gathered[gathered_n++] = transformer6m_mixer_output;
-  }
-#endif
-
   float byte_mixer_override = -1;
 
   if (byte_mixer_output == 0 || byte_mixer_output == 1) byte_mixer_override = byte_mixer_output;
@@ -977,45 +579,10 @@ float Predictor::Predict() {
   input_index += gathered_n;
   auto byte_mixer_index = input_index - 1;
 
-  bool postr1_training = false;
-#if FX4_SELECTIVE_POSTR1
-  postr1_training =
-      postr1_experts_ && postr1_experts_->training_mask() != 0;
-#endif
   const float ppmd_probability =
       Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]);
   const float lstm_probability =
       Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]);
-#if FX4_RESIDUAL_ORACLE_TRACE || FX4_RESIDUAL_LSTM96
-  trace_ppmd_probability_ = ppmd_probability;
-  trace_lstm_probability_ = lstm_probability;
-  trace_fxcm_probability_ = bounded_fxcm_probability;
-#if FX4_TRANSFORMER6M
-#if FX4_TRANSFORMER_REPLACES_LSTM
-  trace_transformer_probability_ =
-      transformer6m_ && transformer6m_prediction_active_
-      ? lstm_probability : -1.0f;
-#else
-  trace_transformer_probability_ =
-      transformer6m_ && transformer6m_prediction_active_
-      ? Sigmoid::Logistic(layers_[0].Inputs()[transformer6m_model_index])
-      : -1.0f;
-#endif
-#endif
-  trace_bit_position_ = static_cast<std::uint8_t>(manager_.bpos & 7u);
-  trace_ppmd_order_ = static_cast<std::uint8_t>(
-      std::min<unsigned int>(byte_model_->EffectiveOrder(), 31u));
-  trace_escape_depth_ = static_cast<std::uint8_t>(
-      std::min<unsigned int>(byte_model_->LastEscapeDepth(), 7u));
-  trace_match_length_ = static_cast<std::uint8_t>(
-      std::min<unsigned long long>(manager_.longest_match_, 255u));
-#if FX4_SPECIALIST_CORRECTOR
-  trace_stream_class_ = static_cast<std::uint8_t>(
-      std::min<unsigned int>(SpecialistStreamClass(), 7u));
-#else
-  trace_stream_class_ = 0;
-#endif
-#endif
   const float auxiliary_average =
       (bounded_fxcm_probability + lstm_probability + ppmd_probability) /
       3.0f;
@@ -1037,37 +604,13 @@ float Predictor::Predict() {
   layers_[1].SetStretchedInput(
       mixer_0_.size() + 2, layers_[0].Inputs()[ppmd_model_index]);
 
-#if defined(KH_TRACE) || defined(KH_BITLSTM32) || \
-    FX4_RESIDUAL_ORACLE_TRACE || FX4_RESIDUAL_LSTM96
-  // The bitlstm32 head consumes the original cmix-obias feature prefix:
-  // 23 mixer outputs, FXCM and LSTM. Discovery's direct-PPMd lane follows
-  // those 25 values and is intentionally ignored by the published head.
-  kh_stage1_in_ = layers_[1].Inputs();
-  kh_stage1_n_ = static_cast<int>(mixer_0_.size() + auxiliary_size_);
-  kh_override_ = byte_mixer_override >= 0 ? 1 : 0;
-#endif
-
   const float m1raw = mixer_1_[0].Mix();
-#if defined(KH_TRACE) || defined(KH_BITLSTM32) || \
-    FX4_RESIDUAL_ORACLE_TRACE || FX4_RESIDUAL_LSTM96
-  kh_m1raw_ = m1raw;
-#endif
   float p = Sigmoid::Logistic(m1raw);
   p = sse_.Predict(p);
 #if FX4_SPECIALIST_CORRECTOR
   p = PredictSpecialist(p, layers_[0].Inputs()[ppmd_model_index],
       layers_[0].Inputs()[byte_mixer_index],
       aggregate_fxcm_logit);
-#endif
-#if FX4_TOKEN_NGRAM_BIAS
-  p = token_ngram_bias_->Predict(p, sigmoid_.Logit(std::max(1.0e-5f,
-      std::min(1.0f - 1.0e-5f, p))));
-#endif
-#if FX4_DELTA_MEMORY_BIAS
-  p = delta_memory_->Predict(p, sigmoid_.Logit(std::max(1.0e-5f,
-      std::min(1.0f - 1.0e-5f, p))),
-      layers_[0].Inputs()[ppmd_model_index],
-      layers_[0].Inputs()[byte_mixer_index], aggregate_fxcm_logit);
 #endif
 #if FX4_ESN_NLMS
   p = esn_nlms_->Predict(p, sigmoid_.Logit(std::max(1.0e-5f,
@@ -1078,62 +621,13 @@ float Predictor::Predict() {
       byte_model_->EffectiveOrder(),
       static_cast<unsigned int>(manager_.longest_match_));
 #endif
-#if FX4_DONOR_FORK_DISCOVERY && FX4_SELECTIVE_POSTR1
-  donor_branch_ppmd_probability_ =
-      Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]);
-  donor_branch_lstm_probability_ =
-      Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]);
-#if FX4_SHADOW_LSTM200
-  donor_branch_shadow_lstm_probability_ = shadow_lstm200_output_;
-#endif
-  donor_branch_fxcm_probability_ = aggregate_fxcm_probability;
-  donor_branch_ppmd_order_bands_ = byte_model_->PredictOrderBands();
-  donor_branch_ppmd_order_ = byte_model_->EffectiveOrder();
-  donor_branch_escape_depth_ = byte_model_->LastEscapeDepth();
-  donor_branch_escape_rate_ = byte_model_->RecentEscapeRate();
-  donor_branch_residual_probability_ = PostR1ResidualProbability();
-  donor_branch_match_length_ =
-      static_cast<unsigned int>(manager_.longest_match_);
-#endif
-#if FX4_SELECTIVE_POSTR1
-  postr1_prediction_used_ = false;
-  if (byte_mixer_override < 0 && postr1_training) {
-    postr1_experts_->SetModelSignals(
-        Sigmoid::Logistic(layers_[0].Inputs()[ppmd_model_index]),
-        Sigmoid::Logistic(layers_[0].Inputs()[byte_mixer_index]),
-#if FX4_SHADOW_LSTM200
-        shadow_lstm200_output_,
-#else
-        0.5f,
-#endif
-        aggregate_fxcm_probability, mini_cmix_probability,
-        mini_model_probabilities,
-        byte_model_->PredictOrderBands(), byte_model_->EffectiveOrder(),
-        byte_model_->LastEscapeDepth(), byte_model_->RecentEscapeRate(),
-        PostR1ResidualProbability(),
-        static_cast<unsigned int>(manager_.longest_match_));
-    p = postr1_experts_->Predict(
-        p, manager_.bit_context_, manager_.bpos & 7u);
-    postr1_prediction_used_ = true;
-  }
-#endif
   if (byte_mixer_override >= 0) return byte_mixer_override;
   return p;
 }
 
 void Predictor::Perceive(int bit) {
-#if FX4_TOKEN_NGRAM_BIAS
-  token_ngram_bias_->Perceive(bit);
-#endif
-#if FX4_DELTA_MEMORY_BIAS
-  delta_memory_->Perceive(bit);
-#endif
 #if FX4_ESN_NLMS
   esn_nlms_->Perceive(bit);
-#endif
-#if FX4_SELECTIVE_POSTR1
-  if (postr1_experts_ && postr1_prediction_used_)
-    postr1_experts_->Perceive(bit);
 #endif
 #if FX4_SPECIALIST_CORRECTOR
   PerceiveSpecialist(bit);
@@ -1156,20 +650,9 @@ void Predictor::Perceive(int bit) {
   for (unsigned int i = 0; i < indirect_r_models_.size(); ++i) {
     indirect_r_models_[i].Perceive(bit);
   }
-#if FX4_MINI_CMIX
-  if (mini_cmix_tracking_) PerceiveMiniCmix(bit, 0x07ffu);
-#endif
   byte_model_->Perceive(bit);
 
   byte_mixer_->Perceive(bit);
-#if FX4_TRANSFORMER6M
-#if !FX4_TRANSFORMER_REPLACES_LSTM
-  if (transformer6m_) transformer6m_mixer_->Perceive(bit);
-#endif
-#endif
-#if FX4_SHADOW_LSTM200
-  shadow_lstm200_->Perceive(bit);
-#endif
 
   for (auto& mixer: mixer_0_) {
     mixer.Perceive(bit);
@@ -1203,17 +686,9 @@ void Predictor::Perceive(int bit) {
     for (unsigned int i = 0; i < indirect_r_models_.size(); ++i) {
       indirect_r_models_[i].ByteUpdate();
     }
-#if FX4_MINI_CMIX
-    if (mini_cmix_tracking_) ByteUpdateMiniCmix(0x07ffu);
-#endif
     byte_model_->ByteUpdate();
 
     const std::valarray<float>& p = byte_model_->BytePredict();
-#if FX4_SHADOW_LSTM200
-    for (unsigned int j = 0; j < 256; ++j) {
-      shadow_lstm200_->SetInput(j, p[j]);
-    }
-#endif
 #if FX4_TRANSFORMER6M
     if (transformer6m_) {
       Transformer6mByteUpdate();
@@ -1226,50 +701,13 @@ void Predictor::Perceive(int bit) {
         true;
 #endif
     if (run_online_lstm) {
-#ifdef KH_OBIAS
-    if (obias_active_) {
-      float probabilities[256];
-      for (unsigned int j = 0; j < 256; ++j) probabilities[j] = p[j];
-      obias_->Advance(static_cast<unsigned char>(manager_.bit_context_),
-          probabilities);
-      byte_mixer_->SetOutputBias(obias_->Bias());
-    }
-    if (!obias_active_ || obias_keep_aux_) {
       for (unsigned int j = 0; j < 256; ++j) {
         byte_mixer_->SetInput(j, p[j]);
       }
+      byte_mixer_->ByteUpdate();
     }
-#else
-    for (unsigned int j = 0; j < 256; ++j) {
-      byte_mixer_->SetInput(j, p[j]);
-    }
-#endif
-
-    byte_mixer_->ByteUpdate();
-    }
-#if FX4_SHADOW_LSTM200
-    shadow_lstm200_->ByteUpdate();
-#endif
-#if FX4_SELECTIVE_POSTR1
-    if (postr1_experts_) {
-      if (postr1_experts_->training_mask() & PostR1Experts::kResidualLstm) {
-        UpdatePostR1ResidualDistribution();
-      }
-      postr1_experts_->ByteUpdate(manager_.recent_bytes_[0]);
-    }
-#endif
   }
   byte_mixer_output = byte_mixer_->Predict()[0];
-#if FX4_TRANSFORMER6M
-#if !FX4_TRANSFORMER_REPLACES_LSTM
-  if (transformer6m_) {
-    transformer6m_mixer_output = transformer6m_mixer_->Predict()[0];
-  }
-#endif
-#endif
-#if FX4_SHADOW_LSTM200
-  shadow_lstm200_output_ = shadow_lstm200_->Predict()[0];
-#endif
   lstmpr=Discretize(byte_mixer_output);
   lstmex=byte_mixer_->ex;
   fxcm_model_.Perceive(bit);
@@ -1375,9 +813,6 @@ void Predictor::Pretrain(int bit) {
   for (unsigned int i = 0; i < indirect_r_models_.size(); ++i) {
     indirect_r_models_[i].Predict();
   }
-#if FX4_MINI_CMIX
-  PredictMiniCmix(0x07ffu);
-#endif
 
   bracket_model_->Perceive(bit);
   fxcm_model_.Perceive(bit);
@@ -1397,9 +832,6 @@ void Predictor::Pretrain(int bit) {
   for (unsigned int i = 0; i < indirect_r_models_.size(); ++i) {
     indirect_r_models_[i].Perceive(bit);
   }
-#if FX4_MINI_CMIX
-  PerceiveMiniCmix(bit, 0x07ffu);
-#endif
 
   bool byte_update = false;
   if (manager_.bit_context_ >= 128) byte_update = true;
@@ -1422,9 +854,6 @@ void Predictor::Pretrain(int bit) {
     for (unsigned int i = 0; i < indirect_r_models_.size(); ++i) {
       indirect_r_models_[i].ByteUpdate();
     }
-#if FX4_MINI_CMIX
-    ByteUpdateMiniCmix(0x07ffu);
-#endif
     manager_.bit_context_ = 1;
   }
 }

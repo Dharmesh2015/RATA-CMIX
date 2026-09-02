@@ -1,7 +1,6 @@
 #include "lstm-layer.h"
 
 #include "sigmoid.h"
-#include "kh-lstm-params.h"
 
 #include <math.h>
 #include <algorithm>
@@ -62,7 +61,7 @@ inline LstmLayer::LstmLayer(unsigned int input_size, unsigned int auxiliary_inpu
     state_(LstmAllocFloats(LstmPad16(num_cells))),
     state_error_(num_cells), stored_error_(num_cells),
     input_ptrs_(horizon),
-    gradient_clip_(gradient_clip), learning_rate_(KhLstmGateLr(learning_rate)),
+    gradient_clip_(gradient_clip), learning_rate_(learning_rate),
     num_cells_(num_cells), epoch_(0), horizon_(horizon),
     input_size_(auxiliary_input_size), output_size_(output_size),
     dense_width_(input_size - output_size),
@@ -81,10 +80,8 @@ inline LstmLayer::LstmLayer(unsigned int input_size, unsigned int auxiliary_inpu
         output_size + auxiliary_input_size),
     output_gate_(input_size, output_size, num_cells, horizon,
         output_size + auxiliary_input_size) {
-  // combo_llif12 (env KH_LSTM_LLIF12): Xavier bound x init_scale. Disabled the
-  // scale is 1.0f, whose multiply is IEEE-exact -> identical golden init.
-  float val = KhGetLstmParams().init_scale *
-      sqrt(6.0f / float(input_size_ + output_size_));
+  // Frozen helper-stream initialization used by the accepted release build.
+  float val = 0.5f * sqrt(6.0f / float(input_size_ + output_size_));
   float low = -val;
   float range = 2 * val;
   // Same Rand() call order as before: (forget, input, output) per (i, j),
@@ -104,9 +101,7 @@ inline LstmLayer::LstmLayer(unsigned int input_size, unsigned int auxiliary_inpu
         output_gate_.wdense(i)[j - output_size_] = wo;
       }
     }
-    // combo_llif12: forget-gate dense bias init (1.0 golden, 0.0 with
-    // KH_LSTM_LLIF12).
-    forget_gate_.wdense(i)[dense_width_ - 1] = KhGetLstmParams().forget_bias;
+    forget_gate_.wdense(i)[dense_width_ - 1] = 0.0f;
   }
 #if SIMD_ACT_F16
   {

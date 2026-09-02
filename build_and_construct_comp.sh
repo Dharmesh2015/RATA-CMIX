@@ -7,19 +7,20 @@ cd "$ROOT_DIR"
 readonly DICTIONARY="$ROOT_DIR/dictionary/english.dic"
 readonly ARTICLE_ORDER="$ROOT_DIR/src/readalike_prepr/data/new_article_order"
 readonly TRANSFORMER="$ROOT_DIR/models/transformer6m/6m-q4-fp32.tfwc2"
+readonly CXX_BIN="${CXX:-clang++}"
 
 test -s "$DICTIONARY"
 test -s "$ARTICLE_ORDER"
 test -s "$TRANSFORMER"
-command -v clang++-17 >/dev/null
+command -v "$CXX_BIN" >/dev/null
 
 # One connected production candidate. It deliberately keeps the canonical
 # cmix-lex post-R1 stream; see docs/TARGET93_CPU_PIPELINE.md.
 make clean
-make target93 -j"$(nproc)" OUT=cmix
+make target93 -j"$(nproc)" CXX="$CXX_BIN" OUT=cmix
 
-if command -v llvm-strip-17 >/dev/null 2>&1; then
-  llvm-strip-17 --strip-all cmix
+if command -v llvm-strip >/dev/null 2>&1; then
+  llvm-strip --strip-all cmix
 else
   strip --strip-all cmix
 fi
@@ -28,13 +29,18 @@ if command -v objcopy >/dev/null 2>&1; then
     --remove-section=.note.gnu.build-id --remove-section=.note.ABI-tag \
     cmix 2>/dev/null || true
 fi
-if command -v upx >/dev/null 2>&1; then
-  upx --ultra-brute cmix >/dev/null
-  upx -t cmix >/dev/null
-elif [[ -x tools/upx ]]; then
-  tools/upx --ultra-brute cmix >/dev/null
-  tools/upx -t cmix >/dev/null
+UPX_BIN=""
+if [[ -x /opt/upx/upx-5.1.1-amd64_linux/upx ]]; then
+  UPX_BIN=/opt/upx/upx-5.1.1-amd64_linux/upx
+elif command -v upx >/dev/null 2>&1; then
+  UPX_BIN="$(command -v upx)"
 fi
+[[ -n "$UPX_BIN" ]] || {
+  echo "UPX 5.1.1 is required; run ./install.sh first" >&2
+  exit 1
+}
+"$UPX_BIN" --ultra-brute cmix >/dev/null
+"$UPX_BIN" -t cmix >/dev/null
 
 rm -rf run
 mkdir -p run

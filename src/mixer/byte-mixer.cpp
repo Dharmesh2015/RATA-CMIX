@@ -49,20 +49,3 @@ void ByteMixer::ByteUpdate() {
   ByteModel::ByteUpdate();
 }
 
-#ifdef KH_OBIAS
-void ByteMixer::SetOutputBias(const float* bias256) {
-  if (!lstm_) return;
-  if (bias256 == nullptr) {
-    lstm_->SetOutputBias(nullptr);
-    return;
-  }
-  if (folded_bias_.size() != vocab_size_) {
-    folded_bias_.resize(vocab_size_, 0.0f);
-  }
-  unsigned int k = 0;
-  for (int i = 0; i < 256; ++i) {
-    if (vocab_[i]) folded_bias_[k++] = bias256[i];
-  }
-  lstm_->SetOutputBias(&folded_bias_[0]);
-}
-#endif

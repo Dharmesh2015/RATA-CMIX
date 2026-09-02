@@ -20,21 +20,8 @@ class Lstm {
   const float* Perceive(unsigned int input);
   const float* Predict(unsigned int input);
   void SetInput(const std::valarray<float>& input);
-  void SetRecurrentTraining(bool enabled) {
-    recurrent_training_enabled_ = enabled;
-  }
-#ifdef KH_OBIAS
-  // KH_OBIAS: additive output-logit bias row (256 floats, owned by the
-  // caller, re-read every Predict). Applied after the deferred rank-1
-  // corrections and before the exp, so every downstream quantity (probs,
-  // error rows, BPTT) sees it consistently. Null (default) = no-op.
-  void SetOutputBias(const float* bias) { out_bias_ = bias; }
-#endif
 
  private:
-#ifdef KH_OBIAS
-  const float* out_bias_ = nullptr;
-#endif
   float* LayerInputRow(unsigned int epoch, unsigned int layer) {
     return layer_input_.get() + ((size_t)epoch * num_layers_ + layer) * sli_;
   }
@@ -92,8 +79,6 @@ class Lstm {
   unsigned int num_cells_, num_layers_, epoch_, horizon_, input_size_,
       output_size_, hidden_size_;
   int last_input_ = -1;
-  bool recurrent_training_enabled_ = true;
-  unsigned int horizons_since_recurrent_training_ = 0;
 };
 #include "lstm.hpp"
 #endif

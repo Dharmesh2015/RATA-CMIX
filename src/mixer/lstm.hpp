@@ -1,6 +1,5 @@
 #include "lstm.h"
 
-#include "kh-lstm-params.h"
 
 #include <numeric>
 #include <stdlib.h>
@@ -11,7 +10,7 @@
 inline Lstm::Lstm(unsigned int input_size, unsigned int output_size, unsigned int
     num_cells, unsigned int num_layers, int horizon, float learning_rate,
     float gradient_clip) : input_history_(horizon),
-    learning_rate_(KhLstmOutputLr(learning_rate)), num_cells_(num_cells),
+    learning_rate_(learning_rate), num_cells_(num_cells),
     num_layers_(num_layers), epoch_(0), horizon_(horizon),
     input_size_(input_size), output_size_(output_size) {
   layer_input_len_.resize(num_layers);
@@ -169,9 +168,6 @@ inline const float* Lstm::Perceive(unsigned int input) {
   input_history_[last_epoch] = input;
   if (epoch_ == 0) {
     ComputeOutputBptt();
-    const bool run_recurrent = recurrent_training_enabled_ ||
-        horizons_since_recurrent_training_ >= 7;
-    if (run_recurrent) {
     float* he = hidden_error_.get();
     for (int epoch = horizon_ - 1; epoch >= 0; --epoch) {
       for (int layer = layers_.size() - 1; layer >= 0; --layer) {
@@ -185,10 +181,6 @@ inline const float* Lstm::Perceive(unsigned int input) {
         layers_[layer].BackwardPass(LayerInputRow(epoch, layer), epoch, layer,
             input_symbol, he);
       }
-    }
-      horizons_since_recurrent_training_ = 0;
-    } else {
-      ++horizons_since_recurrent_training_;
     }
     // Every snapshot of the finished burst has been consumed; fold its
     // pending updates into W before recording the new burst's first update.
@@ -259,11 +251,6 @@ inline const float* Lstm::Predict(unsigned int input) {
       out[input_history_[k - 1]] += s;
     }
   }
-#ifdef KH_OBIAS
-  if (out_bias_ != nullptr) {
-    for (unsigned int i = 0; i < output_size_; ++i) out[i] += out_bias_[i];
-  }
-#endif
   simd_act::Exp(out, output_size_);
   float total = 0;
   for (unsigned int i = 0; i < output_size_; ++i) {
