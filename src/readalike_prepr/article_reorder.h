@@ -131,6 +131,7 @@ void reorder() {
       auto it = remap.find(stoi(line));
       if (it != remap.end()) {
         int res = it->second;
+        if (res < 0 || res >= (int)used.size()) continue;
         positions.push_back(res);
         used[res] = 1;
       }

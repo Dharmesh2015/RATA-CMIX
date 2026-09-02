@@ -1,5 +1,6 @@
-CXX := clang++
+CXX := clang++-17
 OUT ?= cmix
+STRIP_FLAG ?= -s
 PGO ?= use
 PGO_PROFILE := pgo/default.profdata
 PGO_RAW_DIR := pgo-raw
@@ -134,7 +135,7 @@ cmix: fast slow cold transformer_objects
 		interval-hash.o interval.o match.o mixer-input.o mixer.o \
 		nonstationary.o ppmd.o predictor.o preprocessor.o \
 		r1_reorder_transform.o run-map.o runner.o sigmoid.o sparse.o sse.o \
-		$(TRANSFORMER_OBJECTS) -s -o $(OUT)
+		$(TRANSFORMER_OBJECTS) $(STRIP_FLAG) -o $(OUT)
 	rm -f *.o
 
 # Builds an instrumented binary at cmix_pgo_instrumented. Run it over a
@@ -151,7 +152,7 @@ pgo-instrumented:
 pgo-merge:
 	test -n "$$(ls $(PGO_RAW_DIR)/*.profraw 2>/dev/null)"
 	mkdir -p $(dir $(PGO_PROFILE))
-	llvm-profdata merge -output=$(PGO_PROFILE) $(PGO_RAW_DIR)/*.profraw
+	llvm-profdata-17 merge -output=$(PGO_PROFILE) $(PGO_RAW_DIR)/*.profraw
 
 clean:
 	rm -f *.o cmix cmix_orig cmix_pgo_instrumented
