@@ -1,5 +1,0 @@
-recipient_region,recipient_offset,baseline_payload_bytes,selected_payload_bytes,gain_bytes,net_gain_bytes,donor_count,donors,candidate_count,exact_trials
-2,2097908,140911,140911,0,0,0,-,4,4
-3,3146668,116668,116668,0,0,0,-,4,4
-4,4195514,219317,219317,0,0,0,-,4,4
-5,5243475,117224,117224,0,0,0,-,4,4

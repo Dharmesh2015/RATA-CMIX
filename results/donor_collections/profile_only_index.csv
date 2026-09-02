@@ -1,3 +1,0 @@
-name,recipient_offset,recipient_length,donor_count,archive_bytes,charged_edge_bytes,all_in_bytes,baseline_bytes,net_saving_bytes,roundtrip,full_prefix_status
-C421-D388-7,441450496,1048576,7,198781,25,198806,198857,51,exact,not_yet_validated
-G3-D2-2,3146668,1048846,2,126012,25,126037,126072,35,exact,timeout_90m_inconclusive

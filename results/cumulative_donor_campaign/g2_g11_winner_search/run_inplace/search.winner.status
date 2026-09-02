@@ -1,7 +1,0 @@
-phase=region_limit
-recipient_region=12
-recipient_offset=12582912
-new_trials_this_run=36
-gain_bytes=0
-donors=-
-pid=830

@@ -1,5 +1,0 @@
-kind,id,start,end,length,overlap_bytes,status
-canonical_recipient,421,441450496,442499072,1048576,1048576,accepted_fixed_1mib_keep_exact
-page_aligned_group,421,441379615,442438432,1058817,987936,discovery_probe_not_accepted_substitute
-page_aligned_group,422,442438432,443490137,1051705,60640,discovery_probe_not_accepted_substitute
-accepted_donor_source_group,388,406790108,407838930,1048822,22528,contains_accepted_donor_windows

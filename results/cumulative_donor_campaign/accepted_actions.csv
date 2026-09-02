@@ -1,2 +1,0 @@
-group,recipient_offset,recipient_length,mode,profile,stream_class,residual_gain,donors,scr2_plan_sha256,net_gain_bytes,archive_sha256,status
-5,5243475,1048325,donor_profile,0,10,1,4195584:1024,,363,ab988693a74da0455fa77e5cbdd04c0c4a37d55e88c87e5c56387ca687fed642,accepted_exact_verified

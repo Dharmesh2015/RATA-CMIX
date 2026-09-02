@@ -1,6 +1,0 @@
-Packed accepted core: 139524 bytes
-Embedded dictionary:  100878 bytes
-Embedded order:       199758 bytes
-Final Hutter S1:      440172 bytes
-Core SHA-256:         d1c379e25715e61f87aa1c1beeab1c3a36632ea4fff8ec28ccb20eb269992615
-S1 SHA-256:           5e7e5c956ec6ca661ad865ef37806f24feb668d169d28e4a68066e9590617398
