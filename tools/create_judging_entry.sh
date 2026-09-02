@@ -6,8 +6,11 @@ archive="${1:-}"
 output_root="${2:-$root/dist}"
 entry_name="${3:-FX4}"
 
-if [[ -z "$archive" || ! -s "$archive" ]]; then
-  echo "usage: $0 /path/to/archive9 [output-root] [entry-name]" >&2
+# archive9 is optional: pass "" (or omit it) to stage entry.env and the
+# source tarball before compression has finished, then re-run with the
+# real archive9 once it exists to fill that piece in.
+if [[ -n "$archive" && ! -s "$archive" ]]; then
+  echo "usage: $0 [/path/to/archive9|''] [output-root] [entry-name]" >&2
   exit 2
 fi
 if [[ ! "$entry_name" =~ ^[A-Za-z0-9_.-]+$ ]]; then
@@ -15,7 +18,7 @@ if [[ ! "$entry_name" =~ ^[A-Za-z0-9_.-]+$ ]]; then
   exit 2
 fi
 
-archive="$(realpath "$archive")"
+[[ -n "$archive" ]] && archive="$(realpath "$archive")"
 entry_dir="$output_root/Entries/$entry_name"
 if [[ -e "$entry_dir" ]]; then
   echo "refusing to replace existing entry directory: $entry_dir" >&2
@@ -95,23 +98,30 @@ fi
 mkdir -p "$entry_dir"
 tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
   -czf "$entry_dir/fx4-cmix-source.tar.gz" -C "$stage" fx4-cmix-source
-install -m 0555 "$archive" "$entry_dir/archive9"
+if [[ -n "$archive" ]]; then
+  install -m 0555 "$archive" "$entry_dir/archive9"
+fi
 cp -a "$root/submission/entry.env" "$entry_dir/entry.env"
 
-top_count="$(tar -tzf "$entry_dir/fx4-cmix-source.tar.gz" |
+# Captured once and grepped in-memory: piping a full tar -tzf listing into
+# `grep -q` lets grep exit the instant it matches, which SIGPIPEs tar and
+# (under set -o pipefail) aborts the script even though the check passed.
+tar_listing="$(tar -tzf "$entry_dir/fx4-cmix-source.tar.gz")"
+top_count="$(printf '%s\n' "$tar_listing" |
   cut -d/ -f1 | LC_ALL=C sort -u | wc -l)"
 [[ "$top_count" -eq 1 ]]
-tar -tzf "$entry_dir/fx4-cmix-source.tar.gz" |
-  grep -qx 'fx4-cmix-source/install.sh'
-tar -tzf "$entry_dir/fx4-cmix-source.tar.gz" |
-  grep -qx 'fx4-cmix-source/build.sh'
-tar -tzf "$entry_dir/fx4-cmix-source.tar.gz" |
-  grep -qx 'fx4-cmix-source/comp9.args'
+grep -qx 'fx4-cmix-source/install.sh' <<<"$tar_listing"
+grep -qx 'fx4-cmix-source/build.sh' <<<"$tar_listing"
+grep -qx 'fx4-cmix-source/comp9.args' <<<"$tar_listing"
 
 printf 'Entry directory: %s\n' "$entry_dir"
-printf 'archive9:       %s bytes  %s\n' \
-  "$(stat -c%s "$entry_dir/archive9")" \
-  "$(sha256sum "$entry_dir/archive9" | cut -d' ' -f1)"
+if [[ -n "$archive" ]]; then
+  printf 'archive9:       %s bytes  %s\n' \
+    "$(stat -c%s "$entry_dir/archive9")" \
+    "$(sha256sum "$entry_dir/archive9" | cut -d' ' -f1)"
+else
+  printf 'archive9:       not yet provided -- re-run with a real archive9 to add it\n'
+fi
 printf 'source package: %s bytes  %s\n' \
   "$(stat -c%s "$entry_dir/fx4-cmix-source.tar.gz")" \
   "$(sha256sum "$entry_dir/fx4-cmix-source.tar.gz" | cut -d' ' -f1)"

@@ -7,8 +7,9 @@ cmix_*
 byte_vocab
 fxot_analyze
 
-# tools/create_judging_entry.sh default output
+# tools/create_judging_entry.sh output (default /dist/, or wherever pointed)
 /dist/
+/submission/Entries/
 
 # Runtime scratch files
 ppm.temp
