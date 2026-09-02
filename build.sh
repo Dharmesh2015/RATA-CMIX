@@ -19,6 +19,9 @@ cp -a "$source_root/models" "$build_root/models"
 cp -a "$source_root/makefile" "$build_root/makefile"
 cp -a "$source_root/build_and_construct_comp.sh" \
   "$build_root/build_and_construct_comp.sh"
+if [ -f "$source_root/pgo/default.profdata" ]; then
+  cp -a "$source_root/pgo" "$build_root/pgo"
+fi
 
 cd "$build_root"
 chmod 0555 build_and_construct_comp.sh
