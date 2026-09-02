@@ -1,12 +1,32 @@
 # FX4-CMIX Google Cloud Hutter Release
 
-This branch is the production-only, CPU-only FX4-CMIX candidate for enwik9.
-It removes the donor discovery engine, SCR2, URL/post-R1 portfolio experts,
-shadow LSTM-200, mini-cmix, residual traces, alternate M3/M5 streams and their
-archive formats.
+CPU-only enwik9 candidate, built on the cmix-lex lineage (Kaido Orav, Byron
+Knoll, Ibrahim Marcouch). This is a technical diff against that baseline; the
+checked-in configuration is one deterministic codec with no runtime feature
+flags that change its probabilities.
 
-The checked-in configuration is one deterministic codec. There are no runtime
-feature flags that change its probabilities.
+## What changed from cmix-lex
+
+1. **Frozen transformer replaces the online byte LSTM on the main stream.**
+   A 12-layer, width-192, ~6M-parameter CPU transformer, quantized for AVX2
+   int4/int8 inference, predicts the canonical 587,138,826-byte, 205-symbol
+   payload_lex/R1 stream in place of cmix-lex's online LSTM. Small embedded
+   helper streams (dictionary, article order) keep an online 200-cell LSTM
+   instead, since their vocabularies don't fit the frozen model.
+2. **GrammarMatch.** A new model that predicts two Wikipedia-specific
+   structural patterns directly from the post-WRT stream: piped-link labels
+   that extend their target's byte image, and in-article title recurrences.
+3. **DeepMix contexts.** Four additional FXCM context maps (article-order
+   and secondary-symbol signals) plus a deterministic overflow fix for
+   `ContextMap3`'s update (a `U32` counter could wrap during a long one-run
+   and invert a confident prediction).
+4. **ESN/NLMS correction** and a **contextual specialist corrector** layered
+   on top of the mixed prediction.
+5. **PPM storage**, unchanged in algorithm from cmix-lex's stable
+   `ppm.temp` mmap discipline, retuned to an 8,704 MiB RSS purge trigger.
+
+See [the architecture guide](docs/ARCHITECTURE.md) for the full model list,
+S1/S2 layout, and build details.
 
 ## Status
 
@@ -81,8 +101,7 @@ This creates:
 
 The source archive has exactly one top-level directory and contains only the
 production C++ codec, required assets, licenses, documentation and build
-inputs. Historical research/, results/, run/, notebooks, Python files,
-discovery scripts and transformer benchmarks are excluded.
+inputs.
 
 ## Alpha Judging Assistant
 
