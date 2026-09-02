@@ -11,8 +11,17 @@ The cmix compressor is a UPX-packed executable with an appended overlay:
     16-byte HeaderInfo trailer
 
 build_and_construct_comp.sh creates this file. The dictionary and article
-order are compressed and verified during the build. The transformer blob is
-losslessly stored because it is already a compact 2.93 MB model.
+order are compressed and verified during the build (compress, decompress,
+`cmp` against the original). The transformer blob is losslessly stored
+because it is already a compact 2.93 MB model.
+
+The packed core itself is built by `make target93`: clang++-17,
+`-march=x86-64-v3 -mtune=generic` (a fixed microarchitecture baseline, not
+the build host's exact CPU, since the judge's build host is not known in
+advance), `-flto=thin`, and profile-guided (`-fprofile-use=pgo/default.profdata`
+when that file is present) -- then stripped and UPX 5.1.1-packed
+(`--ultra-brute`). See [README.md](../README.md#how-s1-is-built) for the full
+build and PGO-regeneration commands.
 
 ## Compression
 
@@ -42,7 +51,6 @@ The connected predictor contains:
 The transformer replaces the online byte LSTM only on the canonical main
 stream. Small embedded helper streams use the optimized online 200-cell LSTM
 because their vocabularies are incompatible with the frozen 205-symbol model.
-This helper is not the removed shadow/selective LSTM-200 expert.
 
 ## PPM Storage
 
@@ -73,17 +81,11 @@ for exact inverse ordering is represented by the transformed stream.
 
 Running archive9 with no arguments creates enwik9_uncompressed.
 
-## Removed Research Paths
+## Source Package Contents
 
-The release executable does not contain:
-
-- donor plans, donor replay or donor discovery
-- SCR2 or virtual replay
-- URL and post-R1 portfolio experts
-- mini-cmix or shadow LSTM-200
-- residual ACTW/oracle/BitLSTM/obias heads
-- alternate ALTXS M3/M5 stream formats
-- Python runtime dependencies
-
-Old research ledgers can remain in a developer checkout, but the package
-builder uses an explicit allowlist and never ships them.
+`tools/create_judging_entry.sh` builds the submitted source tarball from an
+explicit allowlist: the production C++ codec, `dictionary/`, the frozen
+transformer weights, `pgo/default.profdata` and the inputs it was generated
+from, licenses, and this documentation. It never walks the working tree, so
+nothing outside that list can reach a submission regardless of what else
+exists in a developer checkout.

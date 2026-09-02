@@ -34,7 +34,8 @@ S1/S2 layout, and build details.
 ## Status
 
 - Branch: release/google-cloud-hutter
-- Platform: Linux x86-64, Ubuntu 22.04
+- Platform: Linux x86-64, Ubuntu 20.04 (focal)
+- Toolchain: clang++-17, LTO (`-flto=thin`), profile-guided (PGO), UPX 5.1.1
 - GPU: not used or linked
 - Main entropy stream: canonical 587,138,826-byte post-R1 stream
 - PPMd: order 25, 14,000 MiB file-backed heap
@@ -45,6 +46,50 @@ S1/S2 layout, and build details.
 target93 is the candidate name and research target. This repository does not
 claim a measured 93 MB archive. A complete judged compression and decompression
 run is still required before making a score claim.
+
+## Result
+
+Not yet measured. Update after a complete, judged compression and
+decompression run against the real enwik9.
+
+| Item | Value |
+| --- | ---: |
+| Previous record `L` | `TBD` bytes |
+| `archive9` | `TBD` bytes |
+| `cmix` | `TBD` bytes |
+| Total `S = archive9 + cmix` | `TBD` bytes |
+| Improvement `1 - S/L` | `TBD` |
+| Bytes below previous record | `TBD` |
+| Margin above 1% threshold | `TBD` |
+
+## Platform
+
+| Metric | Value |
+| --- | --- |
+| Machine type | `n4d-highmem-2` (2 vCPU, 16 GiB RAM) |
+| OS | Ubuntu 20.04.6 LTS (focal), `ubuntu-2004-focal-v20240731` |
+| Storage | GCE persistent disk, 100 GB |
+| Geekbench 5 `T` used for timing | `TBD` |
+
+## Run Measurements
+
+Compression run:
+
+| Metric | Value |
+| --- | ---: |
+| Wall time | `TBD` |
+| User + system CPU time | `TBD` |
+| Maximum resident set size | `TBD` |
+| Exit status | `TBD` |
+
+Verified full decompression run:
+
+| Metric | Value |
+| --- | ---: |
+| Wall time | `TBD` |
+| User + system CPU time | `TBD` |
+| Maximum resident set size | `TBD` |
+| Exit status | `TBD` |
 
 ## Production Pipeline
 
@@ -63,8 +108,21 @@ layout.
 
 ## Google Cloud Quick Start
 
-Use an Ubuntu 22.04 x86-64 VM with no GPU, at least 16 GiB RAM, and a local
-SSD volume with at least 150 GB capacity.
+Use an Ubuntu 20.04 (focal) x86-64 VM with no GPU, at least 16 GiB RAM, and a
+local disk with at least 100 GB capacity -- matching the judging image
+(`ubuntu-2004-focal-v20240731`, `ubuntu-os-cloud`) and resource limits in
+[ENTRANT_INSTRUCTIONS.md](https://github.com/jabowery/HutterPrizeJudgingAssistant/blob/main/ENTRANT_INSTRUCTIONS.md).
+For example:
+
+    gcloud compute instances create fast-vm-decomp \
+      --zone=us-central1-b \
+      --machine-type=n4d-highmem-2 \
+      --boot-disk-size=100GB \
+      --boot-disk-type=hyperdisk-balanced \
+      --image=ubuntu-2004-focal-v20240731 \
+      --image-project=ubuntu-os-cloud
+
+Then, on the VM:
 
     sudo ./install.sh
     ./build_and_construct_comp.sh
@@ -76,6 +134,46 @@ From a second SSH session:
 
 The run script pins the codec to one CPU, disables common GPU and threaded math
 runtimes, and refuses to reuse an existing run directory.
+
+## How S1 Is Built
+
+`build_and_construct_comp.sh` is the single source of truth for turning this
+source tree into `cmix` (S1); `build.sh` runs the same steps inside the
+judging harness's offline, read-only-`/entry` sandbox. Both do:
+
+1. `make target93` -- clang++-17, `-flto=thin`, and, when
+   `pgo/default.profdata` is present, `-fprofile-use`. Research profiles and
+   feature switches live only on `exp/selective-discovery`; this branch
+   compiles one fixed configuration.
+2. Strip the binary and UPX-pack it (`--ultra-brute`, verified with `upx -t`).
+3. Run the packed binary against itself to compress `dictionary/english.dic`
+   and the article-order file, then decompress each back and `cmp` against
+   the original -- a real reversibility check, not just a build check.
+4. Append the compressed dictionary, compressed article order, the frozen
+   transformer weights, and a small header after the packed executable. See
+   [the architecture guide](docs/ARCHITECTURE.md#s1-layout) for the exact
+   byte layout.
+
+### The PGO Profile
+
+`pgo/default.profdata` is generated once, ahead of time, and committed --
+`build.sh` runs offline and can't profile a fresh run itself. To regenerate
+it:
+
+    make pgo-instrumented
+    ./cmix_pgo_instrumented -e prof_input/input   profile_out_1
+    ./cmix_pgo_instrumented -e prof_input/input2  profile_out_2
+    make pgo-merge
+    make target93   # picks up pgo/default.profdata automatically
+
+`prof_input/` holds the exact inputs the committed profile was trained on, so
+the profile is reproducible from what's in the source package. A profile
+generated with a different clang++-17 build than the one `install.sh`
+provisions (for example, a distro-patched package instead of the
+`apt.llvm.org` build) can leave some functions' profile data unmatched at
+build time -- harmless (LLVM falls back to default heuristics for just that
+function, per-function, never a build failure), but for full effect the
+profile should be regenerated with the same toolchain `install.sh` installs.
 
 ## Verify archive9
 
@@ -103,8 +201,10 @@ This creates:
       fx4-cmix-source.tar.gz
 
 The source archive has exactly one top-level directory and contains only the
-production C++ codec, required assets, licenses, documentation and build
-inputs.
+production C++ codec, required assets (dictionary, transformer weights, the
+committed PGO profile and its generation inputs), licenses, documentation and
+build inputs -- copied by an explicit allowlist in the script, not a directory
+walk, so nothing else in a developer checkout can reach a submission.
 
 ## Alpha Judging Assistant
 

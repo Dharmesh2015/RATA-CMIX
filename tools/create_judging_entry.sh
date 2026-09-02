@@ -38,6 +38,13 @@ cp -a "$root/docs/." "$source_dir/docs/"
 cp -a "$root/dictionary" "$source_dir/dictionary"
 cp -a "$root/models/transformer6m/6m-q4-fp32.tfwc2" \
   "$source_dir/models/transformer6m/"
+if [[ -s "$root/pgo/default.profdata" ]]; then
+  mkdir -p "$source_dir/pgo"
+  cp -a "$root/pgo/default.profdata" "$source_dir/pgo/"
+fi
+if [[ -d "$root/prof_input" ]]; then
+  cp -a "$root/prof_input" "$source_dir/prof_input"
+fi
 
 for dir in coder contexts ds mixer models preprocess states utils; do
   cp -a "$root/src/$dir" "$source_dir/src/$dir"

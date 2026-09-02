@@ -4,11 +4,12 @@
 
 Use:
 
-- Ubuntu 22.04 LTS, x86-64.
+- Ubuntu 20.04 LTS (focal), x86-64 -- the actual judging image
+  (`ubuntu-2004-focal-v20240731`, `ubuntu-os-cloud`).
 - No GPU.
 - At least 16 GiB RAM. More host RAM is fine for development, but the judged
   process must remain below 10 GiB RSS.
-- At least 150 GB local SSD for the VM. Put the working directory on ext4 or
+- At least 100 GB local disk for the VM. Put the working directory on ext4 or
   XFS, not a network filesystem, Cloud Storage FUSE or an SMB mount.
 - No swap when reproducing the judging limit.
 
@@ -22,8 +23,9 @@ CPU count only speeds compilation.
     ./build_and_construct_comp.sh
 
 The installer is suitable for plain Ubuntu and for the judging assistant's
-dependency-image phase. It installs Clang/LLD and verifies the same UPX 5.1.1
-archive checksum used by the judging repository.
+dependency-image phase. It fetches clang++-17 from the official
+`apt.llvm.org` repository (focal's own archive only carries clang-10) and
+verifies the same UPX 5.1.1 archive checksum used by the judging repository.
 
 The build creates cmix, which is S1. Record its size and hash:
 
