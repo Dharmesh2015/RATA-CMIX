@@ -7,6 +7,9 @@ cmix_*
 byte_vocab
 fxot_analyze
 
+# tools/create_judging_entry.sh default output
+/dist/
+
 # Runtime scratch files
 ppm.temp
 *.partial
