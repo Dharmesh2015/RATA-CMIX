@@ -7,19 +7,22 @@ flags that change its probabilities.
 
 ## What changed from cmix-lex
 
-1. **Frozen transformer replaces the online byte LSTM on the main stream.**
-   A 12-layer, width-192, ~6M-parameter CPU transformer, quantized for AVX2
-   int4/int8 inference, predicts the canonical 587,138,826-byte, 205-symbol
+1. **Frozen transformer replaces the online byte LSTM on the main stream**
+   (fx2-cmix-transformer, Vladimer Ivanov, July 24, 2026). A 12-layer,
+   width-192, ~6M-parameter CPU transformer, quantized for AVX2 int4/int8
+   inference, predicts the canonical 587,138,826-byte, 205-symbol
    payload_lex/R1 stream in place of cmix-lex's online LSTM. Small embedded
    helper streams (dictionary, article order) keep an online 200-cell LSTM
    instead, since their vocabularies don't fit the frozen model.
-2. **GrammarMatch.** A new model that predicts two Wikipedia-specific
-   structural patterns directly from the post-WRT stream: piped-link labels
-   that extend their target's byte image, and in-article title recurrences.
-3. **DeepMix contexts.** Four additional FXCM context maps (article-order
-   and secondary-symbol signals) plus a deterministic overflow fix for
-   `ContextMap3`'s update (a `U32` counter could wrap during a long one-run
-   and invert a confident prediction).
+2. **GrammarMatch** (fx-deepmix, Halvor Yttredal, July 28, 2026). A model
+   that predicts two Wikipedia-specific structural patterns directly from
+   the post-WRT stream: piped-link labels that extend their target's byte
+   image, and in-article title recurrences.
+3. **DeepMix contexts** (fx-deepmix, Halvor Yttredal, July 28, 2026). Four
+   additional FXCM context maps (article-order and secondary-symbol
+   signals) plus a deterministic overflow fix for `ContextMap3`'s update
+   (a `U32` counter could wrap during a long one-run and invert a
+   confident prediction).
 4. **ESN/NLMS correction** and a **contextual specialist corrector** layered
    on top of the mixed prediction.
 5. **PPM storage**, unchanged in algorithm from cmix-lex's stable
