@@ -194,6 +194,33 @@ void ContextManager::UpdateWRTContext() {
   }
 }
 
+#if FX2_SPECIALIST
+// SPECIALIST support (ported from trophy-v93, Dharmesh Patel): per-line
+// stream-type classifier. Class is decided by the first non-space byte
+// of each line; reset on '
+'. Pure function of already-decoded bytes.
+void ContextManager::UpdateLineState(unsigned char c) {
+  if (c == '
+') {
+    line_class_ = 0;
+    line_prefix_hash_ = 0;
+    return;
+  }
+  if (line_break_ <= 8) {
+    line_prefix_hash_ = (line_prefix_hash_ * 131U + c) & 0xffU;
+  }
+  if (line_class_ != 0 || c == ' ' || c == '	' || c == '') return;
+  if (c == '#') line_class_ = 1;
+  else if (c == '@') line_class_ = 2;
+  else if ((c >= '0' && c <= '9') || c == 'N' || c == '-') line_class_ = 3;
+  else if (c >= 0x80) line_class_ = 4;
+  else if (c == '[') line_class_ = 5;
+  else if (c == '*' || c == 'P' || c == 'Q' || c == 'R' || c == 'L' ||
+      c == 'M' || c == '|') line_class_ = 6;
+  else line_class_ = 7;
+}
+#endif
+
 void ContextManager::UpdateContexts(int bit) {
   bit_context_ += bit_context_ + bit;
   long_bit_context_ = bit_context_;
@@ -207,6 +234,9 @@ void ContextManager::UpdateContexts(int bit) {
     } else if (line_break_ < 99) {
       ++line_break_;
     }
+#if FX2_SPECIALIST
+    UpdateLineState(static_cast<unsigned char>(bit_context_));
+#endif
 
     UpdateHistory();
     UpdateWords();

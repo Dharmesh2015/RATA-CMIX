@@ -259,6 +259,9 @@ Predictor::Predictor(const std::vector<bool>& vocab,
   AddDoubleIndirect();
   AddMixers();
   auxiliary_size_ = 2;
+#if FX2_SPECIALIST
+  specialist_error_.fill(0.25f);
+#endif
 }
 
 unsigned long long Predictor::GetNumModels() {
@@ -644,6 +647,12 @@ float Predictor::Predict() {
 
   float p = Sigmoid::Logistic(mixer_1_[0].Mix());
   p = sse_.Predict(p);
+#if FX2_SPECIALIST
+  p = PredictSpecialist(p,
+      layers_[0].Inputs()[byte_mixer_index - 1],  // ppmd byte-model logit
+      layers_[0].Inputs()[byte_mixer_index],      // byte-mixer (lstm/transformer) logit
+      layers_[0].Inputs()[fxcm_model_index]);     // fxcm logit
+#endif
   if (byte_mixer_override >= 0) {
     return byte_mixer_override;
   }
@@ -782,6 +791,9 @@ void Predictor::Perceive(int bit) {
     }
     return;
   }
+#if FX2_SPECIALIST
+  PerceiveSpecialist(bit);
+#endif
   bracket_model_->Perceive(bit);
 #if FX2_GRAMMAR_MATCH
   grammar_model_->Perceive(bit);
@@ -881,6 +893,89 @@ void Predictor::Perceive(int bit) {
   fxcm_model_->Perceive(bit);
   if (byte_update)manager_.bit_context_ = 1;
 }
+
+#if FX2_SPECIALIST
+// SPECIALIST (ported from trophy-v93, Dharmesh Patel; itself ported there
+// from an earlier fx4-cmix tree, GPL). Learning rate mirrors that release
+// value.
+#define FX2_SPECIALIST_LEARNING_RATE 0.0005f
+unsigned int Predictor::SpecialistStreamClass() const {
+  const unsigned int c = static_cast<unsigned int>(manager_.recent_bytes_[0]);
+  if (manager_.wrt_state_ != 0 || c >= 0x80 ||
+      (c >= 'a' && c <= 'z')) {
+    return 0;
+  }
+  if ((c >= '0' && c <= '9') || manager_.line_class_ == 3) return 1;
+  if (c == 'L' || c == 'N' || c == '/' || manager_.line_class_ == 2) {
+    return 2;
+  }
+  if (c == 'P' || c == 'Q' || c == 'R' || c == 'M') return 3;
+  if (c == '[' || c == ']' || manager_.line_class_ == 5) return 4;
+  if (c == '\n' || c == '*' || manager_.line_class_ == 1 ||
+      manager_.line_class_ == 6) {
+    return 5;
+  }
+  if (c == ':' || c == '?' || c == 'O') return 6;
+  return 7;
+}
+
+float Predictor::PredictSpecialist(float base_probability,
+    float ppmd_logit, float lstm_logit, float fxcm_logit) {
+  constexpr float kMinimumProbability = 1.0e-5f;
+  const float bounded_probability = std::max(kMinimumProbability,
+      std::min(1.0f - kMinimumProbability, base_probability));
+  const float base_logit = sigmoid_.Logit(bounded_probability);
+  const float disagreement = std::fabs(ppmd_logit - lstm_logit);
+  const unsigned int disagreement_bucket = disagreement >= 1.0f;
+  const float confidence = std::fabs(base_logit);
+  const unsigned int confidence_bucket =
+      (confidence >= 0.5f) + (confidence >= 1.5f) +
+      (confidence >= 3.0f);
+  specialist_coarse_context_ =
+      SpecialistStreamClass() * 8u + (manager_.bpos & 7u);
+  specialist_context_ =
+      (specialist_coarse_context_ * 2u + disagreement_bucket) * 8u +
+      confidence_bucket;
+
+  auto bounded_delta = [base_logit](float model_logit) {
+    return std::max(-4.0f, std::min(4.0f, model_logit - base_logit));
+  };
+  specialist_inputs_[0] = 1.0f;
+  specialist_inputs_[1] = bounded_delta(ppmd_logit);
+  specialist_inputs_[2] = bounded_delta(lstm_logit);
+  specialist_inputs_[3] = bounded_delta(fxcm_logit);
+  specialist_inputs_[4] =
+      std::max(-4.0f, std::min(4.0f, lstm_logit - ppmd_logit));
+
+  const auto& weights = specialist_weights_[specialist_context_];
+  const auto& coarse_weights =
+      specialist_coarse_weights_[specialist_coarse_context_];
+  float correction = 0.0f;
+  for (unsigned int i = 0; i < kSpecialistFeatures; ++i) {
+    correction +=
+        (weights[i] + coarse_weights[i]) * specialist_inputs_[i];
+  }
+  correction = std::max(-1.5f, std::min(1.5f, correction));
+  specialist_probability_ = Sigmoid::Logistic(base_logit + correction);
+  return specialist_probability_;
+}
+
+void Predictor::PerceiveSpecialist(int bit) {
+  const float error = specialist_probability_ - static_cast<float>(bit);
+  float& recent_error = specialist_error_[specialist_context_];
+  recent_error += 0.00390625f * (std::fabs(error) - recent_error);
+  const float learning_rate =
+      FX2_SPECIALIST_LEARNING_RATE * (0.5f + recent_error);
+  auto& weights = specialist_weights_[specialist_context_];
+  auto& coarse_weights =
+      specialist_coarse_weights_[specialist_coarse_context_];
+  for (unsigned int i = 0; i < kSpecialistFeatures; ++i) {
+    const float update = learning_rate * error * specialist_inputs_[i];
+    weights[i] -= 0.75f * update;
+    coarse_weights[i] -= 0.25f * update;
+  }
+}
+#endif
 
 void Predictor::Pretrain(int bit) {
   bracket_model_->Predict();

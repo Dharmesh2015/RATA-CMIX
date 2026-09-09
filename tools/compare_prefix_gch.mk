@@ -32,6 +32,19 @@ ifeq ($(BENCH_F16),0)
 BENCH_EXTRA += -DSIMD_ACT_DISABLE_F16
 endif
 
+# MATCHTRUST and SPECIALIST (ported from trophy-v93, Dharmesh Patel) are
+# baseline -- FX2_MATCHTRUST and FX2_SPECIALIST both default to 1 in their
+# own headers. BENCH_MATCHTRUST=0 / BENCH_SPECIALIST=0 are the ablations,
+# same shape as BENCH_F16=0. FDIGIT, trophy-v93's third candidate, was
+# measured and rejected there (regressed at both 1 MB and 4 MB) and was
+# never ported.
+ifeq ($(BENCH_MATCHTRUST),0)
+BENCH_EXTRA += -DFX2_MATCHTRUST=0
+endif
+ifeq ($(BENCH_SPECIALIST),0)
+BENCH_EXTRA += -DFX2_SPECIALIST=0
+endif
+
 # The production flags are computed with := before this file is read, so they
 # have to be filtered rather than redefined.
 BENCH_STRIP := -flto=thin -Wno-profile-instr-out-of-date

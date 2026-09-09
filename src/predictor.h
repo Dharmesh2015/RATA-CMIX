@@ -35,6 +35,7 @@
 
 #include "../cpp_infer/src/opt/model_opt.h"
 
+#include <array>
 #include <vector>
 #include <set>
 #include <memory>
@@ -149,6 +150,14 @@
 // t2edg_stat ablation.
 #ifndef FX2_GRAMMAR_MATCH
 #define FX2_GRAMMAR_MATCH 1
+#endif
+
+// FX2_SPECIALIST: ported from trophy-v93 (Dharmesh Patel), itself ported
+// there from an earlier fx4-cmix tree, GPL. A tiny context-gated corrector
+// applied after the SSE chain. Baseline. See PredictSpecialist() in
+// predictor.cpp for the mechanism.
+#ifndef FX2_SPECIALIST
+#define FX2_SPECIALIST 1
 #endif
 
 // FX2_GRAMMAR_MIXER is fx4-cmix's Stage-4 amplifier: a layer-0 mixer keyed
@@ -293,6 +302,34 @@ class Predictor {
 // the earlier overlapping conditions were one -D away from either a
 // redefinition or an undeclared identifier.
   size_t auxiliary_size_ = 2; // 0 -> fxcm, 1 -> byte_mixer
+#if FX2_SPECIALIST
+  // SPECIALIST (ported from trophy-v93, Dharmesh Patel, itself ported
+  // there from an earlier fx4-cmix tree, GPL): a tiny context-gated
+  // corrector applied after the SSE chain, trained on its own error.
+  // Five features: bias plus bounded logit deltas of the ppmd,
+  // byte-mixer (transformer/LSTM) and FXCM predictions against the
+  // mixed output, plus their mutual difference. Gated by a 1024-entry
+  // fine context (stream class x bit position x model disagreement x
+  // confidence) with a 64-entry coarse fallback; updates split 0.75
+  // fine / 0.25 coarse. Learning rate scales with the context's own
+  // recent error.
+  unsigned int SpecialistStreamClass() const;
+  float PredictSpecialist(float base_probability,
+      float ppmd_logit, float lstm_logit, float fxcm_logit);
+  void PerceiveSpecialist(int bit);
+  static constexpr unsigned int kSpecialistCoarseContexts = 64;
+  static constexpr unsigned int kSpecialistContexts = 1024;
+  static constexpr unsigned int kSpecialistFeatures = 5;
+  std::array<std::array<float, kSpecialistFeatures>,
+      kSpecialistContexts> specialist_weights_{};
+  std::array<std::array<float, kSpecialistFeatures>,
+      kSpecialistCoarseContexts> specialist_coarse_weights_{};
+  std::array<float, kSpecialistContexts> specialist_error_{};
+  std::array<float, kSpecialistFeatures> specialist_inputs_{};
+  unsigned int specialist_coarse_context_ = 0;
+  unsigned int specialist_context_ = 0;
+  float specialist_probability_ = 0.5f;
+#endif
   SSE sse_;
   llvm::SmallVector<MixerInput,2> layers_;
   llvm::SmallVector<Mixer, 23> mixer_0_;

@@ -54,6 +54,9 @@ struct ContextManager {
   }
 
   void UpdateContexts(int bit);
+#if FX2_SPECIALIST
+  void UpdateLineState(unsigned char c);
+#endif
   void UpdateHistory();
   void UpdateWords();
   void UpdateRecentBytes();
@@ -66,6 +69,9 @@ struct ContextManager {
       scr2_state_ = 0,      // Scr2Match pattern bucket x matched length
       morphology_state_ = 0,  // literal suffix family x confidence
       causal_donor_state_ = 0,
+      line_class_ = 0, line_prefix_hash_ = 0,  // SPECIALIST: line-type
+                       // state, ported from trophy-v93; dormant unless
+                       // FX2_SPECIALIST is compiled in
       wrt_context_ = 0,
       b2stream=0,b2streamcxt=0, o2bState=0, n2bState=0, stream2bR=0,
       b3stream=0,b3streamcxt=0,o3bState=0, n3bState=0, stream3bR=0,

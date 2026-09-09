@@ -179,6 +179,12 @@ void ResetPredictions() {
 #define FXCM_V22PP592_VERSION 1
 #define FXCM_V22PP592_NAME "fxcm_v22++592 (fx4-cmix)"
 
+// MATCHTRUST: ported from trophy-v93 (Dharmesh Patel), original work there.
+// Baseline. See MatchModel2mix() for the mechanism.
+#ifndef FX2_MATCHTRUST
+#define FX2_MATCHTRUST 1
+#endif
+
 #include <stdio.h>
 #include <time.h>
 
@@ -3401,7 +3407,8 @@ int utf8left=0;
 
 int pr; // Our most important variable - final prediction
 
-StateMap1 smA[3];
+StateMap1 smA[4];   // [3] MATCHTRUST -- ported from trophy-v93 (Dharmesh Patel),
+                     // original work there, not present in fx4-cmix before this
 SmallStationaryContextMap scmA[7];   // 1x7 inputs fp
 Mixer1 mxA[12]; 
 // Predictors are:
@@ -3442,6 +3449,9 @@ void PredictorInit() {
     smA[0].Init(1<<9,1023);
     smA[1].Init(1<<19,1023);
     smA[2].Init(1<<16,1023);
+#if FX2_MATCHTRUST
+    smA[3].Init(1<<18,1023);
+#endif
 
     scmA[0].Init(8); 
     scmA[1].Init(8); 
@@ -3669,7 +3679,21 @@ MatchInfo matchCandidates[matchN];
 U32 numberOfActiveCandidates=0;
 HashElementForMatchPositions *mhashtable,*mhptr;
 U32 mhashtablemask;
+#if FX2_MATCHTRUST
+// MATCHTRUST: recent match-outcome history. MatchModel2 deletes a
+// mispredicting candidate -- destroying the evidence that the match model
+// just failed in this region, so a fresh match becomes indistinguishable
+// from one mid-clean-run to every mixer input. This 8-bit shift register
+// (1 bit per match-ACTIVE byte: was expectedByte right?) restores that as
+// a 4th StateMap context. Pure function of already-decoded bytes and
+// candidate state -- decode-symmetric by construction.
+const int nST=4;
+U8 mtHist=0;          // shift register of per-byte match outcomes
+U8 mtPrevExpected=0;  // best candidate's expectedByte captured at byte start
+U8 mtPrevActive=0;    // non-delta match was active at byte start
+#else
 const int nST=3;
+#endif
 U32 ctx[nST];
 
 bool isMMatch(const U32 pos, const int MINLEN) {
@@ -3770,6 +3794,18 @@ int MatchModel2mix() {
   const U8 expectedByte = matchCandidates[bestCandidateIdx].expectedByte;
   const bool isInDeltaMode = matchCandidates[bestCandidateIdx].delta;
   const int expectedBit = length != 0 ? (expectedByte >> (7 - x.bpos)) & 1 : 0;
+
+#if FX2_MATCHTRUST
+  if (x.bpos == 0) {
+    // resolve the PREVIOUS byte's outcome first (c1 = the byte just
+    // completed), then capture what this byte's mixer input will consume --
+    // record what prediction was used, never a post-advance recomputation.
+    if (mtPrevActive) mtHist = (U8)((mtHist << 1) | (mtPrevExpected == (U8)c1 ? 1u : 0u));
+    mtPrevActive = (length != 0 && !isInDeltaMode) ? 1 : 0;
+    mtPrevExpected = expectedByte;
+  }
+  ctx[3] = length != 0 ? (((((U32)mtHist << 1) | (U32)expectedBit) << 8) | (U32)c1) + 1 : 0;
+#endif
 
   U32 denselength = 0; // 0..27
   if (length != 0) {
