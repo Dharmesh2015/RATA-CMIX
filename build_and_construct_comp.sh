@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 readonly DICTIONARY="$ROOT_DIR/dictionary/english.dic"
 readonly ARTICLE_ORDER="$ROOT_DIR/src/readalike_prepr/data/new_article_order"
-readonly TRANSFORMER="$ROOT_DIR/models/transformer6m/6m-q4-fp32.tfwc2"
+readonly TRANSFORMER="$ROOT_DIR/models/6m-q4-fp32.tfwc5"
 readonly CXX_BIN="${CXX:-clang++-17}"
 
 test -s "$DICTIONARY"
@@ -49,7 +49,6 @@ cp "$TRANSFORMER" run/transformer6m.weights
 chmod 0755 run/cmix_orig
 
 cd run
-export FX4_TRANSFORMER_WEIGHTS="$PWD/transformer6m.weights"
 rm -f comp_dict comp_order header.dat ppm.temp verify_dict verify_order
 
 ./cmix_orig -c "$DICTIONARY" comp_dict

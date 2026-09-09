@@ -1,53 +1,43 @@
 #include "encoder.h"
 
-Encoder::Encoder(std::ofstream* output, Predictor* predictor)
-    : output_(output), low_(0), high_(0xffffffff), predictor_(predictor) {
-  output_buffer_.reserve(FX4_IO_BUFFER_BYTES);
-}
+Encoder::Encoder(std::ofstream* os, Predictor* p) : os_(os), x1_(0),
+    x2_(0xffffffff), p_(p) {}
 
 void Encoder::WriteByte(unsigned int byte) {
-  output_buffer_.push_back(static_cast<char>(byte));
-  if (output_buffer_.size() == FX4_IO_BUFFER_BYTES) FlushBuffer();
+  out_.push_back(byte);
 }
 
-void Encoder::FlushBuffer() {
-  if (output_buffer_.empty()) return;
-  output_->write(output_buffer_.data(),
-      static_cast<std::streamsize>(output_buffer_.size()));
-  flushed_bytes_ += output_buffer_.size();
-  output_buffer_.clear();
-}
-
-unsigned int Encoder::Discretize(float probability) {
-  return 1 + static_cast<unsigned int>(65534 * probability);
+unsigned int Encoder::Discretize(float p) {
+  return 1 + 65534 * p;
 }
 
 void Encoder::Encode(int bit) {
-  const unsigned int probability = Discretize(predictor_->Predict());
-  const unsigned int midpoint =
-      low_ + ((high_ - low_) >> 16) * probability +
-      (((high_ - low_) & 0xffff) * probability >> 16);
+  const unsigned int p = Discretize(p_->Predict());
+  const unsigned int xmid = x1_ + ((x2_ - x1_) >> 16) * p +
+      (((x2_ - x1_) & 0xffff) * p >> 16);
   if (bit) {
-    high_ = midpoint;
+    x2_ = xmid;
   } else {
-    low_ = midpoint + 1;
+    x1_ = xmid + 1;
   }
-  predictor_->Perceive(bit);
+  p_->Perceive(bit);
 
-  while (((low_ ^ high_) & 0xff000000) == 0) {
-    WriteByte(high_ >> 24);
-    low_ <<= 8;
-    high_ = (high_ << 8) + 255;
+  while (((x1_^x2_) & 0xff000000) == 0) {
+    WriteByte(x2_ >> 24);
+    x1_ <<= 8;
+    x2_ = (x2_ << 8) + 255;
   }
 }
 
 void Encoder::Flush() {
-  while (((low_ ^ high_) & 0xff000000) == 0) {
-    WriteByte(high_ >> 24);
-    low_ <<= 8;
-    high_ = (high_ << 8) + 255;
+  while (((x1_^x2_) & 0xff000000) == 0) {
+    WriteByte(x2_ >> 24);
+    x1_ <<= 8;
+    x2_ = (x2_ << 8) + 255;
   }
-  WriteByte(high_ >> 24);
-  FlushBuffer();
-  output_->flush();
+  WriteByte(x2_ >> 24);
+
+  auto* data = reinterpret_cast<const char*>(out_.data());
+  os_->write(data, out_.size());
 }
+

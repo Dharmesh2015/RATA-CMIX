@@ -1,6 +1,5 @@
 #include "lstm.h"
 
-
 #include <numeric>
 #include <stdlib.h>
 #include <string.h>

@@ -1,33 +1,25 @@
 // ppmd is written by Dmitry Shkarin.
 // mod_ppmd is adapted from ppmd by Eugene Shelwien.
 // This file is adapted from mod_ppmd_v2: http://encode.su/threads/2515-mod_ppmd
-//
-// cmix-lex note: disk-backed mmap mode is output-neutral but needs careful RSS
-// control for Hutter's memory limit.  PPMD stores raw pointers inside
-// HeapStart, so the mapped address must remain stable.  The upstream fx2-cmix
-// style munmap()+mmap() cycle achieved eviction, but it destroyed the VMA,
-// relied on the kernel returning the same address, and left Linux free to do
-// useless readahead on a random-access PPM tree.
-//
-// cmix-lex keeps the mapping stable and controls residency with a deterministic
-// MADV_DONTNEED cadence.  This drops the file-backed PPM pages from VmRSS while
-// preserving pointer values and model bytes.  MADV_RANDOM is applied because
-// the PPM heap is pointer-chased, not sequential, and ppm.temp is opened with
-// O_NOATIME to avoid metadata writes from repeated page-fault reads.  This was
-// a small OS-aware change, but it removed most wasted read traffic and made the
-// completed WSL2/SATA run practical without changing compression decisions.
 
 #include "ppmd.h"
-#include "../fx4_config.h"
-#include "../utils/hugepage.h"
 #include <cstring>
 #include <sys/mman.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <fcntl.h>
+#include <cerrno>
 #include <cstdio>
+
+// O_NOATIME is a GNU extension. It is visible here only because
+// libstdc++ defines _GNU_SOURCE for us, which is not something to rely
+// on: defining it away to 0 keeps the open() flags valid everywhere and
+// costs nothing, since the fallback path below already handles a kernel
+// that refuses it.
+#ifndef O_NOATIME
+#define O_NOATIME 0
+#endif
 
 namespace PPMD {
 
@@ -41,42 +33,19 @@ typedef unsigned int uint;
 typedef unsigned char byte;
 typedef unsigned long long qword;
 
-// If mmap_to_disk is set to false (recommended setting), PPM will only use RAM
-// for memory.
-// If mmap_to_disk is set to true, PPM memory will be saved to disk using mmap.
-// This will reduce RAM usage, but will be slower as well. *Warning*: this will
-// write a *lot* of data to disk, so can reduce the lifespan of SSDs. Not
-// recommended for normal usage.
-bool mmap_to_disk = FX4_PPMD_MMAP_TO_DISK != 0;
+// Disk-backed PPM heap; see ppmd.h.
+//
+// THE MAPPING'S ADDRESS MUST NEVER MOVE. HeapStart is only the base: pText,
+// UnitsStart, LoUnit, HiUnit, every BList entry and every node pointer
+// inside the model are absolute addresses into this region. The previous
+// eviction strategy munmapped the region and re-mmapped it with a NULL
+// hint, which lets the kernel pick a DIFFERENT address; HeapStart was
+// updated and every other pointer was left dangling into unmapped space.
+// That is why this was off and marked not recommended. MADV_DONTNEED is
+// the correct primitive: it drops resident pages and keeps the address.
+bool mmap_to_disk = true;
 qword mmap_size;
 static constexpr char mmap_path[] = "ppm.temp";
-
-// Disk-backed PPM keeps the 14GB heap outside anonymous RAM, but pages still
-// count in RSS while resident.  Periodic MADV_DONTNEED calls drop that
-// residency without changing the file-backed model state.
-//
-// The interval is a *check* cadence, not a purge cadence: every
-// CMIX_PPMD_REMAP_INTERVAL input bytes we read the process RSS from
-// /proc/self/statm and purge only when it has reached the budget below.
-// Purge frequency has no effect on compression decisions (see
-// DropPpmHeapResidency), only on how much residency the OS may keep.
-#ifndef CMIX_PPMD_REMAP_INTERVAL
-#define CMIX_PPMD_REMAP_INTERVAL 5000ULL
-#endif
-static constexpr unsigned long long kMmapRemapIntervalBytes =
-    FX4_PPMD_REMAP_INTERVAL;
-
-// Total-VmRSS budget (MB) that triggers a purge, overridable at runtime via
-// the CMIX_PPM_RSS_MB env var.  The default keeps the Hutter 10 GB path: the
-// full enwik8 run peaks at ~9.0 GB RSS under the old always-purge policy, so
-// a 9216 MB trigger bounds RSS at ~budget + one check-window of PPM touches
-// (~40 MB at enwik8 rates) and degenerates to the old every-interval purge
-// once the non-PPM footprint alone fills the budget.  CMIX_PPM_RSS_MB=0
-// reproduces the old unconditional cadence exactly; a large value (e.g.
-// 120000 on a 128 GB box) disables purging for the whole run.
-#ifndef CMIX_PPMD_RSS_BUDGET_MB
-#define CMIX_PPMD_RSS_BUDGET_MB 9216ULL
-#endif
 
 const int ORealMAX=256;
 
@@ -186,30 +155,41 @@ int StartSubAllocator( qword SASize ) {
 
   if (mmap_to_disk) {
     mmap_size = t;
+    // O_NOATIME skips an inode timestamp write per access. It needs file
+    // ownership, which we have since we create it, but some filesystems
+    // refuse it anyway -- so fall back rather than fail.
     int fd = open(mmap_path, O_RDWR | O_CREAT | O_TRUNC | O_NOATIME,
-        (mode_t)0664);
-    if(fd < 0){
+                  (mode_t)0664);
+    if (fd < 0 && (errno == EPERM || errno == EINVAL)) {
+      fd = open(mmap_path, O_RDWR | O_CREAT | O_TRUNC, (mode_t)0664);
+    }
+    if (fd < 0) {
+      std::fprintf(stderr, "ppmd: cannot create %s\n", mmap_path);
       exit(EXIT_FAILURE);
     }
-      
-    if (ftruncate(fd, t) == -1) {
+    // ftruncate, not lseek + a one-byte write. Same result, one syscall,
+    // and it cannot leave a hole one byte short of the mapping.
+    if (ftruncate(fd, (off_t)t) != 0) {
+      std::fprintf(stderr, "ppmd: cannot size %s to %llu bytes\n",
+                   mmap_path, (unsigned long long)t);
       exit(EXIT_FAILURE);
     }
-    HeapStart = (byte*) mmap(
-        NULL, t, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    HeapStart = (byte*) mmap(NULL, t, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
     if(HeapStart == MAP_FAILED){
+      std::fprintf(stderr, "ppmd: cannot map %llu bytes\n",
+                   (unsigned long long)t);
       exit(EXIT_FAILURE);
     }
-    if (madvise(HeapStart, t, MADV_RANDOM) != 0) {
-      exit(EXIT_FAILURE);
-    }
+#ifdef MADV_RANDOM
+    // The single most valuable hint here. PPM walks its heap irregularly,
+    // and default readahead pulls in a run of neighbouring pages on every
+    // fault -- for random access that is a large multiple of the I/O
+    // actually needed. Advisory, so a failure is not an error.
+    (void)madvise(HeapStart, t, MADV_RANDOM);
+#endif
     close(fd);
   } else {
     HeapStart = new byte[t];
-    // RAM-backed heap only: hint 2 MB pages before PPM first touches it.
-    // The disk-backed mmap path stays 4 KB (file-backed pages get no anon
-    // THP, and MADV_DONTNEED purging works on 4 KB granularity anyway).
-    AdviseHugePages(HeapStart, t);
   }
 
   if( HeapStart==NULL ) return 0;
@@ -237,8 +217,16 @@ qword GetUsedMemory() {
 }
 
 void StopSubAllocator() {
-  if( SubAllocatorSize ) SubAllocatorSize=0, delete[] HeapStart;
-
+  if (!SubAllocatorSize) return;
+  // delete[] on an mmap'd pointer is undefined. This function's only call
+  // site is commented out today, so the hazard is dormant rather than
+  // live -- but it is a landmine for whoever re-enables it.
+  if (mmap_to_disk) {
+    munmap(HeapStart, SubAllocatorSize);
+  } else {
+    delete[] HeapStart;
+  }
+  SubAllocatorSize = 0;
 }
 
 void GlueFreeBlocks() {
@@ -817,7 +805,7 @@ PPM_CONTEXT* UpdateModel( PPM_CONTEXT* MinContext ) {
   byte Flag, FSymbol;
   uint ns1, ns, cf, sf, s0, FFreq;
   uint iSuccessor, iFSuccessor;
-  PPM_CONTEXT* pc = 0;  // determinism fix: was uninitialized when MinContext has no suffix; saved_pc=pc then stored garbage read by RestoreModelRare (MaxContext!=pc). Root cause of the enwik7 decode nondeterminism landmine.
+  PPM_CONTEXT* pc;
   STATE* p = NULL;
 
   FSymbol = FoundState->Symbol;
@@ -1218,23 +1206,15 @@ uint sqp[256];
 uint trF[256];
 uint trT[256];
 
-uint band_sqp[4][256];
-uint band_trF[4][256];
-uint band_trT[4][256];
-bool compute_order_bands = true;
-int effective_order;
-uint last_escape_depth = 0;
-uint escape_ema_q = 0;
-
 void ConvertSQ( void ) {
-  uint i,c,freq,total,prob,cnum;
+  uint i,c,j,b,freq,total,prob,cnum;
   uint cum = 0xFFFFFF00;
-  uint mass[512] = {};
 
   cnum=256;
   memset(sqp, 0, sizeof(sqp));
   memset(trF, 0, sizeof(trF));
   memset(trT, 0, sizeof(trT));
+  // for( i=0; i<256; i++ ) sqp[i]=0,trF[i]=0,trT[i]=0;
 
   for( i=0; i<SQ_ptr; i++ ) {
     c = SQ[i].sym; freq = SQ[i].freq; total = SQ[i].total;
@@ -1246,53 +1226,15 @@ void ConvertSQ( void ) {
     }
   }
 
-  // Same smoothed tree, built bottom-up with 511 contiguous additions.
-  for( c=0; c<256; ++c ) mass[256+c] = sqp[c] ? sqp[c] : 1U;
-  for( int node=255; node>=1; --node ) {
-    const uint left = mass[node<<1];
-    const uint right = mass[(node<<1)|1];
-    trF[node] = left;
-    trT[node] = left + right;
-    mass[node] = trT[node];
-  }
-}
-
-void ConvertShadowSQ(uint* output_sqp, uint* output_trF,
-    uint* output_trT, uint entry_count) {
-  uint cum = 0xFFFFFF00;
-  uint mass[512] = {};
-  uint unresolved = 256;
-  memset(output_sqp, 0, sizeof(uint) * 256);
-  memset(output_trF, 0, sizeof(uint) * 256);
-  memset(output_trT, 0, sizeof(uint) * 256);
-
-  for (uint i = 0; i < entry_count; ++i) {
-    const uint symbol = SQ[i].sym;
-    const uint probability =
-        qword(qword(cum) * SQ[i].freq) / SQ[i].total;
-    if (symbol < 256) {
-      if (output_sqp[symbol] == 0) {
-        output_sqp[symbol] = probability + 1;
-        --unresolved;
-      }
-    } else {
-      cum = probability;
+  for( c=0; c<256; c++ ) {
+    for( i=8; i!=0; i-- ) {
+      j = (256+c)>>i;
+      b = (c>>(i-1))&1;
+      trF[j]+= (b == 0) *sqp[c];
+      trT[j]+=sqp[c];
     }
   }
 
-  const uint fallback = unresolved == 0 ? 1 :
-      static_cast<uint>(qword(cum) / unresolved) + 1;
-  for (uint c = 0; c < 256; ++c) {
-    if (output_sqp[c] == 0) output_sqp[c] = fallback;
-    mass[256 + c] = output_sqp[c];
-  }
-  for (int node = 255; node >= 1; --node) {
-    const uint left = mass[node << 1];
-    const uint right = mass[(node << 1) | 1];
-    output_trF[node] = left;
-    output_trT[node] = left + right;
-    mass[node] = output_trT[node];
-  }
 }
 
 void processBinSymbol_T( PPM_CONTEXT& q, int ) {
@@ -1395,23 +1337,7 @@ void processSymbol2_T( PPM_CONTEXT& q, int ) {
   }
 
 void ppmd_PrepareByte( void ) {
-  effective_order = _MaxOrder - OrderFall;
-  if (effective_order < 0) effective_order = 0;
-  if (effective_order > _MaxOrder) effective_order = _MaxOrder;
-  static const int band_limit[4] = {3, 8, 16, 25};
-  uint band_end[4] = {};
-  int context_order = effective_order;
-  auto capture_bands = [&]() {
-    if (!compute_order_bands) return;
-    for (int band = 0; band < 4; ++band) {
-      if (band_end[band] == 0 && context_order <= band_limit[band]) {
-        band_end[band] = SQ_ptr;
-      }
-    }
-  };
-
-  SQ_ptr = 0;
-  NumMasked = 0;
+  SQ_ptr=0; NumMasked=0;
   int _OrderFall = OrderFall;
 
   PPM_CONTEXT* MinContext = MaxContext;
@@ -1420,40 +1346,24 @@ void ppmd_PrepareByte( void ) {
   } else {
     processBinSymbol_T( MinContext[0], 0 );
   }
-  capture_bands();
 
-  bool finished = false;
-  while (!finished) {
+  while(1) {
     do {
-      if (!MinContext->iSuffix) {
-        finished = true;
-        break;
-      }
+      if( !MinContext->iSuffix ) goto Break;
       OrderFall++;
-      if (context_order > 0) --context_order;
       MinContext = suff(MinContext);
-    } while (MinContext->NumStats == NumMasked);
-    if (!finished) {
-      processSymbol2_T(MinContext[0], 0);
-      capture_bands();
-    }
+    } while( MinContext->NumStats==NumMasked );
+    processSymbol2_T( MinContext[0], 0 );
   }
-  if (compute_order_bands) {
-    for (int band = 0; band < 4; ++band) {
-      if (band_end[band] == 0) band_end[band] = SQ_ptr;
-      ConvertShadowSQ(band_sqp[band], band_trF[band], band_trT[band],
-          band_end[band]);
-    }
-  }
-  EscCount++;
-  NumMasked = 0;
-  OrderFall = _OrderFall;
+
+  Break:
+  EscCount++; NumMasked=0; OrderFall=_OrderFall;
+
   ConvertSQ();
 }
 
 void ppmd_UpdateByte( uint c ) {
   PPM_CONTEXT* MinContext = MaxContext;
-  uint escape_depth = 0;
   if( MinContext->NumStats ) {
     processSymbol1<0>( MinContext[0], c );
   } else {
@@ -1466,14 +1376,8 @@ void ppmd_UpdateByte( uint c ) {
       OrderFall++;
       MinContext = suff(MinContext);
     } while( MinContext->NumStats==NumMasked );
-    ++escape_depth;
     processSymbol2<0>( MinContext[0], c );
   }
-  last_escape_depth = escape_depth;
-  const uint observation = std::min(escape_depth, 15U) * 4096U;
-  escape_ema_q =
-      static_cast<uint>((static_cast<qword>(escape_ema_q) * 255U +
-                         observation + 128U) >> 8);
 
   PPM_CONTEXT* p;
   if( (OrderFall!=0) || ((byte*)getSucc(FoundState)<UnitsStart) ) {
@@ -1485,6 +1389,7 @@ void ppmd_UpdateByte( uint c ) {
 
   if( p==0 ) {
     if( _CutOff ) {
+      printf("reset\n");
       RestoreModelRare();
     } else {
       StartModelRare();
@@ -1497,205 +1402,92 @@ void ppmd_UpdateByte( uint c ) {
 #pragma pack()
 
 unsigned long long counter_ = 0;
-unsigned long long last_mmap_remap_counter_ = 0;
+unsigned long long last_mmap_check_counter_ = 0;
+
+#ifndef FX4_PPMD_RSS_BUDGET_MB
+#define FX4_PPMD_RSS_BUDGET_MB 8704ULL
+#endif
 
 static unsigned long long PpmRssBudgetMb() {
-  static unsigned long long budget_mb = ~0ULL;
-  if (budget_mb == ~0ULL) {
-    budget_mb = CMIX_PPMD_RSS_BUDGET_MB;
+  static const unsigned long long budget_mb = [] {
     const char* env = getenv("CMIX_PPM_RSS_MB");
-    if (env != NULL && *env != '\0') {
-      char* end = NULL;
-      unsigned long long v = strtoull(env, &end, 10);
-      if (end != env && *end == '\0') budget_mb = v;
-    }
-  }
+    if (env == nullptr || *env == '\0') return FX4_PPMD_RSS_BUDGET_MB;
+    char* end = nullptr;
+    const unsigned long long value = strtoull(env, &end, 10);
+    return (end != env && *end == '\0') ? value : FX4_PPMD_RSS_BUDGET_MB;
+  }();
   return budget_mb;
 }
 
 static unsigned long long ReadSelfRssMb() {
 #if defined(__linux__)
-  // statm field 2 is VmRSS in pages; one short read per check interval
-  // (~20k reads across enwik8) is noise next to a single MADV_DONTNEED.
   FILE* f = fopen("/proc/self/statm", "r");
-  if (f == NULL) return ~0ULL;  // unknown RSS -> treat as over budget
-  unsigned long long size_pages = 0, rss_pages = 0;
-  int fields = fscanf(f, "%llu %llu", &size_pages, &rss_pages);
+  if (f == nullptr) return ~0ULL;
+  unsigned long long size_pages = 0;
+  unsigned long long rss_pages = 0;
+  const int fields = fscanf(f, "%llu %llu", &size_pages, &rss_pages);
   fclose(f);
   if (fields != 2) return ~0ULL;
   static const unsigned long long page_bytes =
-      (unsigned long long)sysconf(_SC_PAGESIZE);
+      static_cast<unsigned long long>(sysconf(_SC_PAGESIZE));
   return (rss_pages * page_bytes) >> 20;
 #else
-  // No portable RSS source (e.g. Windows port would use
-  // GetProcessMemoryInfo): fall back to the old purge-every-interval
-  // behavior by always reporting over-budget.
   return ~0ULL;
 #endif
 }
 
-static void DropPpmHeapResidency(ppmd_Model* ppmd_model) {
-  // Keep the file mapping at a stable address because the model stores raw
-  // pointers into it. MADV_DONTNEED evicts resident shared pages without
-  // changing model bytes or compression decisions.
-  if (madvise(ppmd_model->HeapStart, mmap_size, MADV_DONTNEED) != 0) {
-    exit(EXIT_FAILURE);
-  }
-}
-
 PPMD::PPMD(int order, int memory, const unsigned int& bit_context,
     const std::vector<bool>& vocab) : ByteModel(vocab), byte_(bit_context) {
-  tree_zero_.fill(0);
-  tree_total_.fill(0);
-  for (int band = 0; band < 4; ++band) {
-    band_tree_zero_[band].fill(0);
-    band_tree_total_[band].fill(0);
-  }
-  vocab_full_ = true;
-  for (int i = 0; i < 256; ++i) {
-    if (!vocab_[i]) {
-      disabled_bytes_.push_back(static_cast<unsigned char>(i));
-      vocab_full_ = false;
-    }
-  }
   ppmd_model_.reset(new ppmd_Model());
   ppmd_model_->Init(order,memory,1,0);
 }
 
 PPMD::~PPMD() {
   if (mmap_to_disk) {
+    // Release the mapping before dropping the name. remove() alone only
+    // unlinks: on Linux the inode and its blocks survive as long as the
+    // mapping does, so the file would keep its 14 GB until process exit.
+    if (ppmd_model_->HeapStart) {
+      munmap(ppmd_model_->HeapStart, mmap_size);
+      ppmd_model_->HeapStart = nullptr;
+    }
     remove(mmap_path);
   }
-}
-
-std::valarray<float>& PPMD::Predict() {
-  const unsigned int total = vocab_full_ ? ppmd_model_->trT[tree_context_]
-                                         : tree_total_[tree_context_];
-  if (total == 0) return ByteModel::Predict();
-  const unsigned int zero = vocab_full_ ? ppmd_model_->trF[tree_context_]
-                                        : tree_zero_[tree_context_];
-  outputs_[0] = static_cast<float>(total - zero) / static_cast<float>(total);
-  return outputs_;
-}
-
-const std::array<float, 4>& PPMD::PredictOrderBands() {
-  // Full-vocabulary streams need no filtered copy (the !vocab_full_ path's
-  // local band_tree_*_ arrays exist specifically to mask out disabled
-  // bytes, which cannot occur here). Read the already-built PPMd trees
-  // directly and skip copying 4*256 counters every byte -- same numeric
-  // values, one fewer array pass.
-  for (int band = 0; band < 4; ++band) {
-    const unsigned int total = vocab_full_
-        ? ppmd_model_->band_trT[band][tree_context_]
-        : band_tree_total_[band][tree_context_];
-    const unsigned int zero = vocab_full_
-        ? ppmd_model_->band_trF[band][tree_context_]
-        : band_tree_zero_[band][tree_context_];
-    band_outputs_[band] = total == 0 ? 0.5f :
-        static_cast<float>(total - zero) / static_cast<float>(total);
-  }
-  return band_outputs_;
-}
-
-float PPMD::ByteProbability(unsigned int byte) const {
-  return byte < 256u ? probs_[byte] : 0.0f;
-}
-
-void PPMD::SetOrderBandsNeeded(bool needed) {
-  ppmd_model_->compute_order_bands = needed;
-}
-
-unsigned int PPMD::EffectiveOrder() const {
-  return ppmd_model_->effective_order < 0 ? 0 :
-      static_cast<unsigned int>(ppmd_model_->effective_order);
-}
-
-unsigned int PPMD::LastEscapeDepth() const {
-  return ppmd_model_->last_escape_depth;
-}
-
-float PPMD::RecentEscapeRate() const {
-  return std::min(ppmd_model_->escape_ema_q, 61440U) *
-      (1.0f / 61440.0f);
-}
-
-void PPMD::Perceive(int bit) {
-  ByteModel::Perceive(bit);
-  tree_context_ = (tree_context_ << 1) | static_cast<unsigned int>(bit);
 }
 
 void PPMD::ByteUpdate() {
   ++counter_;
   ppmd_model_->ppmd_UpdateByte(byte_);
   ppmd_model_->ppmd_PrepareByte();
-  if (!vocab_full_) {
-    for (int i = 0; i < 256; ++i) {
-      tree_zero_[i] = ppmd_model_->trF[i];
-      tree_total_[i] = ppmd_model_->trT[i];
-    }
-    if (ppmd_model_->compute_order_bands) {
-      for (int band = 0; band < 4; ++band) {
-        for (int i = 0; i < 256; ++i) {
-          band_tree_zero_[band][i] = ppmd_model_->band_trF[band][i];
-          band_tree_total_[band][i] = ppmd_model_->band_trT[band][i];
-        }
-      }
-    }
-    for (unsigned char c : disabled_bytes_) {
-      const unsigned int mass = ppmd_model_->sqp[c] ? ppmd_model_->sqp[c] : 1U;
-      for (int bit_index = 8; bit_index != 0; --bit_index) {
-        const unsigned int node = (256U + c) >> bit_index;
-        const unsigned int bit = (c >> (bit_index - 1)) & 1U;
-        if (tree_total_[node] >= mass) tree_total_[node] -= mass;
-        else tree_total_[node] = 0;
-        if (bit == 0) {
-          if (tree_zero_[node] >= mass) tree_zero_[node] -= mass;
-          else tree_zero_[node] = 0;
-        }
-      }
-      if (ppmd_model_->compute_order_bands) {
-        for (int band = 0; band < 4; ++band) {
-          const unsigned int band_mass =
-              ppmd_model_->band_sqp[band][c] ?
-              ppmd_model_->band_sqp[band][c] : 1U;
-          for (int bit_index = 8; bit_index != 0; --bit_index) {
-            const unsigned int node = (256U + c) >> bit_index;
-            const unsigned int bit = (c >> (bit_index - 1)) & 1U;
-            if (band_tree_total_[band][node] >= band_mass) {
-              band_tree_total_[band][node] -= band_mass;
-            } else {
-              band_tree_total_[band][node] = 0;
-            }
-            if (bit == 0) {
-              if (band_tree_zero_[band][node] >= band_mass) {
-                band_tree_zero_[band][node] -= band_mass;
-              } else {
-                band_tree_zero_[band][node] = 0;
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-  // vocab_full_ case: no copy needed here at all -- PredictOrderBands()
-  // (and PPMD::Predict()/tree_zero_/tree_total_'s own vocab_full_ branch,
-  // unchanged above) read straight from ppmd_model_'s trees.
   for (int i = 0; i < 256; ++i) {
     probs_[i] = ppmd_model_->sqp[i];
     if (probs_[i] < 1) probs_[i] = 1;
   }
   ByteModel::ByteUpdate();
   probs_ /= probs_.sum();
-  tree_context_ = 1;
-  if (mmap_to_disk) {
-    if (counter_ - last_mmap_remap_counter_ >= kMmapRemapIntervalBytes) {
-      last_mmap_remap_counter_ = counter_;
-      if (ReadSelfRssMb() >= PpmRssBudgetMb()) {
-        DropPpmHeapResidency(ppmd_model_.get());
-      }
+  if (mmap_to_disk &&
+      counter_ - last_mmap_check_counter_ >= FX2_PPMD_MMAP_DROP_BYTES) {
+    last_mmap_check_counter_ = counter_;
+    // Was: munmap the whole region and re-mmap it with a NULL hint. That
+    // let the kernel choose a new address while pText, UnitsStart, LoUnit,
+    // HiUnit, BList and every node pointer still referred to the old one --
+    // dangling on the very next access. It also tore down and rebuilt page
+    // tables for the entire allocator, discarding hot pages with cold ones.
+    //
+    // MADV_DONTNEED clears present PTEs for the shared file mapping and
+    // drops them from VmRSS. Later faults reload the same bytes from
+    // ppm.temp or page cache, so the model's decisions are unchanged --
+    // which is what makes this output-neutral rather than a trade.
+    // The old path dropped all 14 GB on every check, even with ample RSS
+    // headroom. That needlessly discarded hot PPM nodes and caused major
+    // faults on their immediate reuse. Check total process RSS at the same
+    // cadence and evict only near the memory limit. CMIX_PPM_RSS_MB=0
+    // reproduces the old always-evict behavior for constrained machines.
+    if (ReadSelfRssMb() >= PpmRssBudgetMb()) {
+      (void)madvise(ppmd_model_->HeapStart, mmap_size, MADV_DONTNEED);
     }
   }
 }
 
 } // namespace PPMD
+

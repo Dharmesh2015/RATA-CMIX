@@ -3,18 +3,6 @@
 #include <stdio.h>  // GM-CENSUS fprintf (transitively present on libc++, NOT libstdc++)
 
 namespace {
-#ifdef GM_REVTS
-// Non-negative decimal image (no leading zeros), returns digit count.
-int GmDecEnc(long long v, char* buf) {
-  if (v < 0) v = 0;
-  if (v == 0) { buf[0] = '0'; return 1; }
-  char tmp[24];
-  int n = 0;
-  while (v > 0 && n < 20) { tmp[n++] = (char)('0' + (int)(v % 10)); v /= 10; }
-  for (int i = 0; i < n; ++i) buf[i] = tmp[n - 1 - i];
-  return n;
-}
-#endif
 }  // namespace
 
 GrammarMatch::GrammarMatch(const unsigned int& bit_context, int limit,
@@ -118,12 +106,6 @@ void GrammarMatch::ParseByte(unsigned char c) {
 
   BracketAdvance(c);
   if (!in_title_ && title_len_ > 0) EchoAdvance(c);
-#ifdef GM_REVTS
-  ++pos_;
-#endif
-#ifdef GM_REVTS
-  RevTsAdvance(c);
-#endif
   ExportExpectation();
 }
 
@@ -239,110 +221,5 @@ void GrammarMatch::ExportExpectation() {
   // stream; the tail families are regime-disjoint from it). Each is behind
   // its own gate, so with the gates off this whole block vanishes and the
   // object is identical to Stage 3.
-#ifdef GM_REVTS
-  if (!have_expectation_ && rev_phase_ != 0 && rev_can_pred_) {
-    if (rev_phase_ == 1) {                 // YY (always 2 digits)
-      if (rev_dpos_ < 2) {
-        expected_byte_ = (unsigned char)rev_pred_yy_[rev_dpos_];
-        state_ = kStateRevTs + rev_dpos_;
-        have_expectation_ = true;
-      }
-    } else if (rev_phase_ == 2) {          // DDD (variable) then 'J'
-      if (rev_dpos_ < rev_pred_ddd_len_) {
-        expected_byte_ = (unsigned char)rev_pred_ddd_[rev_dpos_];
-        state_ = kStateRevTs + 2 + (rev_dpos_ < 2 ? rev_dpos_ : 2);
-        have_expectation_ = true;
-      } else {
-        expected_byte_ = 'J';
-        state_ = kStateRevTs + 5;
-        have_expectation_ = true;
-      }
-    } else {                               // SEC (variable) then '\n'
-      if (rev_dpos_ < rev_pred_sec_len_) {
-        expected_byte_ = (unsigned char)rev_pred_sec_[rev_dpos_];
-        state_ = kStateRevTs + 6 + (rev_dpos_ < 4 ? rev_dpos_ : 4);
-        have_expectation_ = true;
-      } else {
-        expected_byte_ = '\n';
-        state_ = kStateRevTs + 11;
-        have_expectation_ = true;
-      }
-    }
-  }
-#endif
 }
-
-
-
-#ifdef GM_REVTS
-// REVTS: regime-1 revision timestamps. Anchor 0xDF 0xCD 0x4E ("timestamp>"),
-// then the phda9 image YY DDD 'J' seconds '\n' (phda9_preprocess.h:804). YY
-// and DDD are copied from the previous block (run locality); seconds run
-// through a deterministic fixed-point affine tracker keyed on the rev-id
-// delta (the digit run that precedes the anchor). Per-position confidence
-// carries the (high) seconds uncertainty.
-void GrammarMatch::RevTsAdvance(unsigned char c) {
-  // rev-id capture: value of the most recent complete ASCII digit run.
-  if (c >= '0' && c <= '9') {
-    if (!in_digits_) { in_digits_ = true; last_int_ = 0; }
-    if (last_int_ < 100000000000LL) last_int_ = last_int_ * 10 + (c - '0');
-  } else {
-    in_digits_ = false;
-  }
-
-  if (rev_phase_ == 0) {
-    const bool in_window = (pos_ >= revts_lo_ && pos_ <= revts_hi_);
-    if (in_window && (recent_ & 0xFFFFFFULL) == 0xDFCD4EULL) {
-      rev_revid_ = last_int_;
-      rev_phase_ = 1; rev_dpos_ = 0;
-      rev_act_yy_ = rev_act_ddd_ = rev_act_sec_ = 0;
-      rev_can_pred_ = have_prev_rev_;
-      if (rev_can_pred_) {
-        rev_pred_yy_[0] = (char)('0' + (int)((prev_yy_ / 10) % 10));
-        rev_pred_yy_[1] = (char)('0' + (int)(prev_yy_ % 10));
-        rev_pred_ddd_len_ = GmDecEnc(prev_ddd_, rev_pred_ddd_);
-        const long long drev = rev_revid_ - prev_revid_;
-        long long psec = prev_sec_ + ((alpha_q16_ * drev) >> 16);
-        if (psec < 0) psec = 0; else if (psec > 86399) psec = 86399;
-        rev_pred_sec_len_ = GmDecEnc(psec, rev_pred_sec_);
-      }
-    }
-    return;
-  }
-
-  if (c == '\n') {  // block complete: commit + update the affine tracker
-    const long long drev = rev_revid_ - prev_revid_;
-    if (have_prev_rev_ && drev != 0) {
-      const long long obs = ((rev_act_sec_ - prev_sec_) << 16) / drev;
-      if (obs >= 0 && obs <= (8LL << 16)) {
-        alpha_q16_ += (obs - alpha_q16_) >> 5;  // EMA, lr 1/32
-        if (alpha_q16_ < 0) alpha_q16_ = 0;
-        else if (alpha_q16_ > (8LL << 16)) alpha_q16_ = 8LL << 16;
-      }
-    }
-    prev_yy_ = rev_act_yy_; prev_ddd_ = rev_act_ddd_;
-    prev_sec_ = rev_act_sec_; prev_revid_ = rev_revid_;
-    have_prev_rev_ = true;
-    rev_phase_ = 0; rev_can_pred_ = false;
-    return;
-  }
-  if (c >= '0' && c <= '9') {
-    const int d = c - '0';
-    if (rev_phase_ == 1) {
-      rev_act_yy_ = rev_act_yy_ * 10 + d;
-      if (++rev_dpos_ >= 2) { rev_phase_ = 2; rev_dpos_ = 0; }
-    } else if (rev_phase_ == 2) {
-      // caps keep the decimal image within rev_pred_ddd_/sec_ (12 bytes)
-      // even if a false-fire lands on a pathological digit run.
-      if (rev_act_ddd_ < 100000000LL) rev_act_ddd_ = rev_act_ddd_ * 10 + d;
-      ++rev_dpos_;
-    } else {
-      if (rev_act_sec_ < 100000000LL) rev_act_sec_ = rev_act_sec_ * 10 + d;
-      ++rev_dpos_;
-    }
-  } else if (c == 'J' && rev_phase_ == 2) {
-    rev_phase_ = 3; rev_dpos_ = 0;  // DDD -> seconds delimiter
-  }
-}
-#endif
 

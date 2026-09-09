@@ -1,7 +1,10 @@
 // weights_io_compressed: decoder for the losslessly compressed weights files
 // written by pysrc/weights_compress.py (must stay in exact sync with it).
 //
-// format v1, magic FX2TFWC1: same container as FX2TFW01 but every DT_I8
+// NOTE: only FX2TFWC5 is readable. The v1 and v2 readers were removed;
+// convert any older file with pysrc/weights_compress.py compress5.
+//
+// format v1, magic FX2TFWC1 (REMOVED): same container as FX2TFW01, every DT_I8
 // payload (quantized weights, 15 possible values in [-7, 7]) is range-coded
 // with a uniform 1/15 model, i.e. log2(15) = 3.907 bits per weight; all other
 // payloads and the metadata are raw.
@@ -12,6 +15,11 @@
 // __nv_sinf/__nv_cosf; DT_I8 uses an adaptive 15-symbol tree, DT_BF16 hi/lo
 // byte models, DT_F32/DT_I32 per-byte-plane models, names an order-2
 // character model and metadata an order-1 byte model.
+//
+// format v5 adds per-tensor Q4 histograms, optional causal column-local counts,
+// and a whole-file CRC32. Column state is reconstructed from tensor shape and
+// prior symbols; no side table is stored. All tensor values, scales and RoPE
+// reconstruction remain unchanged.
 
 #include "weights_io.h"
 
@@ -106,12 +114,6 @@ struct RangeDecoder {
   }
 };
 
-void decode_i8_uniform15(const uint8_t* stream, size_t stream_len, int8_t* out,
-                         size_t count) {
-  RangeDecoder rd(stream, stream_len);
-  for (size_t i = 0; i < count; i++)
-    out[i] = int8_t(int(rd.decode_uniform(15)) - 7);
-}
 
 // ---------------------------------------------------------------------------
 // format v2
@@ -125,6 +127,8 @@ enum : uint8_t {
   ENC_PLANE4 = 3,
   ENC_ROPE_SIN = 4,
   ENC_ROPE_COS = 5,
+  ENC_INT4_HIST = 6,
+  ENC_INT4_COLUMN = 7,
 };
 
 // --- bit-exact host port of CUDA libdevice __nv_sinf/__nv_cosf --------------
@@ -224,12 +228,19 @@ struct BinDecoder {
   const uint8_t* end;
   uint32_t range = 0xFFFFFFFFu;
   uint32_t code = 0;
+  bool strict;
 
-  BinDecoder(const uint8_t* data, size_t len) : p(data), end(data + len) {
+  BinDecoder(const uint8_t* data, size_t len, bool strict_ = false)
+      : p(data), end(data + len), strict(strict_) {
+    if (strict && (len < 5 || data[0] != 0)) die("invalid range stream header");
     p++;  // the first byte is the encoder's initial zero cache
     for (int i = 0; i < 4; i++) code = (code << 8) | byte();
   }
-  uint8_t byte() { return p < end ? *p++ : 0; }
+  uint8_t byte() {
+    if (p < end) return *p++;
+    if (strict) die("truncated range stream");
+    return 0;
+  }
   int decode_bit(uint16_t* prob) {
     uint32_t bound = (range >> 11) * *prob;
     int bit;
@@ -255,6 +266,38 @@ struct BinDecoder {
     for (int k = 0; k < nbits; k++) node = (node << 1) | decode_bit(&probs[node]);
     return node - (1u << nbits);
   }
+  uint32_t decode_hist(const uint32_t* cumulative) {
+    const uint32_t unit = range / 32768;
+    const uint32_t slot = code / unit;
+    if (slot >= 32768) die("invalid histogram range code");
+    uint32_t symbol = 0;
+    while (slot >= cumulative[symbol + 1]) ++symbol;
+    code -= unit * cumulative[symbol];
+    range = unit * (cumulative[symbol + 1] - cumulative[symbol]);
+    while (range < (1u << 24)) {
+      code = (code << 8) | byte();
+      range <<= 8;
+    }
+    return symbol;
+  }
+  uint32_t decode_counts(const uint16_t* counts, uint32_t total) {
+    const uint32_t unit = range / total;
+    const uint32_t slot = code / unit;
+    if (slot >= total) die("invalid adaptive range code");
+    uint32_t cumulative = 0;
+    uint32_t symbol = 0;
+    while (slot >= cumulative + counts[symbol]) {
+      cumulative += counts[symbol];
+      ++symbol;
+    }
+    code -= unit * cumulative;
+    range = unit * counts[symbol];
+    while (range < (1u << 24)) {
+      code = (code << 8) | byte();
+      range <<= 8;
+    }
+    return symbol;
+  }
 };
 
 // the adaptive model set of the v2 stream (pysrc/weights_compress.py _Models)
@@ -278,9 +321,10 @@ struct ModelsV2 {
         plane(4 * 256, 1024) {}
 };
 
-WeightsFile load_v2(Reader& r, const char* path) {
+WeightsFile load_v2(Reader& r, const char* path, bool compact = false) {
   uint32_t n_tensors = r.u32();
-  BinDecoder dec(r.p, r.left);
+  if (compact && n_tensors > 16384) die("%s: too many tensors", path);
+  BinDecoder dec(r.p, r.left, compact);
   ModelsV2 m;
 
   auto get_meta = [&]() -> uint8_t {
@@ -290,6 +334,7 @@ WeightsFile load_v2(Reader& r, const char* path) {
   };
 
   WeightsFile wf;
+  uint64_t total_bytes = 0;
   wf.tensors.reserve(n_tensors);
   for (uint32_t i = 0; i < n_tensors; i++) {
     uint32_t name_len = get_meta();
@@ -313,14 +358,61 @@ WeightsFile load_v2(Reader& r, const char* path) {
       uint32_t v = 0;
       for (int k = 0; k < 4; k++) v |= uint32_t(get_meta()) << (8 * k);
       t.shape[d] = v;
+      if (compact && v && numel > (uint64_t(1) << 30) / v)
+        die("%s: tensor allocation limit exceeded", path);
       numel *= v;
     }
     t.numel = numel;
     size_t bytes = numel * dtype_size(t.dtype);
+    total_bytes += bytes;
+    if (compact && (bytes > (uint64_t(1) << 30) || total_bytes > (uint64_t(2) << 30)))
+      die("%s: tensor allocation limit exceeded", path);
     t.data.resize(bytes);
     uint8_t encoding = get_meta();
 
     switch (encoding) {
+      case ENC_INT4_HIST:
+      case ENC_INT4_COLUMN: {
+        if (!compact || t.dtype != DT_I8) die("%s: invalid histogram tensor", path);
+        uint32_t cumulative[16] = {};
+        for (size_t k = 0; k < 14; ++k) {
+          uint32_t freq = get_meta();
+          freq |= uint32_t(get_meta()) << 8;
+          if (!freq || cumulative[k] + freq >= 32768)
+            die("%s: invalid Q4 histogram", path);
+          cumulative[k + 1] = cumulative[k] + freq;
+        }
+        cumulative[15] = 32768;
+        if (encoding == ENC_INT4_HIST) {
+          for (size_t k = 0; k < numel; ++k)
+            t.data[k] = uint8_t(int(dec.decode_hist(cumulative)) - 7);
+          break;
+        }
+
+        uint16_t prior[15];
+        uint32_t prior_total = 0;
+        for (size_t k = 0; k < 15; ++k) {
+          const uint32_t frequency = cumulative[k + 1] - cumulative[k];
+          const uint32_t scaled = (frequency * 1024u + 16384u) / 32768u;
+          prior[k] = uint16_t(scaled ? scaled : 1u);
+          prior_total += prior[k];
+        }
+        const size_t width = ndim >= 2 ? t.shape.back() : numel;
+        if (!width && numel) die("%s: invalid local Q4 width", path);
+
+        std::vector<uint16_t> counts(width * 15);
+        for (size_t column = 0; column < width; ++column)
+          std::memcpy(&counts[column * 15], prior, sizeof(prior));
+        for (size_t k = 0; k < numel; ++k) {
+          const size_t column = k % width;
+          uint16_t* state = &counts[column * 15];
+          const uint32_t symbol =
+              dec.decode_counts(state, prior_total + uint32_t(k / width));
+          ++state[symbol];
+          t.data[k] = uint8_t(int(symbol) - 7);
+        }
+        break;
+      }
       case ENC_INT4: {
         if (t.dtype != DT_I8) die("%s: %s: ENC_INT4 on dtype %u", path,
                                   name.c_str(), unsigned(t.dtype));
@@ -399,51 +491,31 @@ WeightsFile WeightsFile::load_compressed(const char* path) {
   Reader r{buf.data(), buf.size(), path};
   char magic[8];
   r.read(magic, 8);
-  if (std::memcmp(magic, "FX2TFWC2", 8) == 0) return load_v2(r, path);
-  if (std::memcmp(magic, "FX2TFWC1", 8) != 0) die("%s: bad magic", path);
-
-  uint32_t n_tensors = r.u32();
-  WeightsFile wf;
-  wf.tensors.reserve(n_tensors);
-  for (uint32_t i = 0; i < n_tensors; i++) {
-    uint32_t name_len = r.u32();
-    if (name_len > 4096) die("%s: absurd name length %u", path, name_len);
-    std::string name(name_len, '\0');
-    r.read(&name[0], name_len);
-
-    WTensor t;
-    t.dtype = r.u8();
-    dtype_size(t.dtype);  // validates the code
-    uint32_t ndim = r.u32();
-    if (ndim > 8) die("%s: %s: absurd ndim %u", path, name.c_str(), ndim);
-    t.shape.resize(ndim);
-    size_t numel = 1;
-    for (uint32_t d = 0; d < ndim; d++) {
-      t.shape[d] = r.u32();
-      numel *= t.shape[d];
-    }
-    t.numel = numel;
-    size_t bytes = numel * dtype_size(t.dtype);
-    t.data.resize(bytes);
-    if (t.dtype == DT_I8) {
-      uint32_t stream_len = r.u32();
-      r.need(stream_len);
-      decode_i8_uniform15(r.p, stream_len,
-                          reinterpret_cast<int8_t*>(t.data.data()), numel);
-      r.p += stream_len;
-      r.left -= stream_len;
-    } else {
-      r.read(t.data.data(), bytes);
-    }
-
-    if (!wf.tensors.emplace(name, std::move(t)).second)
-      die("%s: duplicate tensor %s", path, name.c_str());
+  // v5 only. The FX2TFWC1 and FX2TFWC2 readers were removed: every weight
+  // file is converted to v5 before use, so carrying two more container
+  // formats only costs decoder bytes, which count against the Hutter total.
+  // Convert with:  python -m pysrc.weights_compress compress5 <raw> <out>
+  if (std::memcmp(magic, "FX2TFWC5", 8) != 0)
+    die("%s: not an FX2TFWC5 file (v1/v2 readers removed)", path);
+  if (buf.size() < 21) die("%s: truncated v5 file", path);
+  uint32_t crc = 0xFFFFFFFFu;
+  for (size_t i = 0; i < buf.size() - 4; ++i) {
+    crc ^= buf[i];
+    for (int bit = 0; bit < 8; ++bit)
+      crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
   }
-  if (r.left != 0)
-    die("%s: %zu trailing bytes after last tensor", path, r.left);
-  return wf;
+  uint32_t stored = 0;
+  for (int k = 0; k < 4; ++k)
+    stored |= uint32_t(buf[buf.size() - 4 + k]) << (8 * k);
+  if ((crc ^ 0xFFFFFFFFu) != stored) die("%s: v5 checksum mismatch", path);
+  r.left -= 4;
+  return load_v2(r, path, true);
 }
 
+// Release builds do not compile weights_io.cpp: the uncompressed reader is
+// dead weight in a binary that only ever loads the .tfwc5 container, and
+// the compressor's size is scored. These two accessors are the only part
+// of it the rest of the code needs, so they live here instead.
 #if defined(FX2_TRANSFORMER_COMPRESSED_ONLY)
 // The record build never reads the much larger uncompressed training format.
 // Keep the shared tensor accessors here so weights_io.cpp is not linked into

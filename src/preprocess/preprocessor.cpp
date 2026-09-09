@@ -6,7 +6,6 @@
 
 #include "preprocessor.h"
 #include "dictionary.h"
-#include "../fx4_config.h"
 
 namespace preprocessor {
 
@@ -39,19 +38,11 @@ void Pretrain(Predictor* p, FILE* dictionary) {
   for (unsigned int i = 0; i < len; ++i) {
     unsigned char c = getc(dictionary);
     if (c == '\n') c = ' ';
-    #if FX4_STDERR_PROGRESS
-
     if (i % percent == 0) {
-
       double frac = 100.0 * i / len;
-
       fprintf(stderr, "\rpretraining: %.2f%%", frac);
-
       fflush(stderr);
-
     }
-
-    #endif
     for (int j = 7; j >= 0; --j) {
       p->Pretrain((c>>j)&1);
     }

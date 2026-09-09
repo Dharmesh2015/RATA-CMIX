@@ -28,9 +28,9 @@ fi
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
 source_dir="$stage/fx4-cmix-source"
-mkdir -p "$source_dir/src/third_party/fx2_transformer/opt"
+mkdir -p "$source_dir/cpp_infer/src/opt"
 mkdir -p "$source_dir/src/readalike_prepr/data"
-mkdir -p "$source_dir/models/transformer6m"
+mkdir -p "$source_dir/models"
 mkdir -p "$source_dir/docs"
 
 for file in LICENSE README.md THIRD_PARTY_NOTICES.txt makefile \
@@ -39,8 +39,8 @@ for file in LICENSE README.md THIRD_PARTY_NOTICES.txt makefile \
 done
 cp -a "$root/docs/." "$source_dir/docs/"
 cp -a "$root/dictionary" "$source_dir/dictionary"
-cp -a "$root/models/transformer6m/6m-q4-fp32.tfwc2" \
-  "$source_dir/models/transformer6m/"
+cp -a "$root/models/6m-q4-fp32.tfwc5" \
+  "$source_dir/models/"
 if [[ -s "$root/pgo/default.profdata" ]]; then
   mkdir -p "$source_dir/pgo"
   cp -a "$root/pgo/default.profdata" "$source_dir/pgo/"
@@ -53,8 +53,7 @@ for dir in coder contexts ds mixer models preprocess states utils; do
   cp -a "$root/src/$dir" "$source_dir/src/$dir"
 done
 for file in context-manager.cpp context-manager.h fx4_config.h \
-    predictor.cpp predictor.h r1_reorder_transform.cpp \
-    r1_reorder_transform.h runner.cpp; do
+    predictor.cpp predictor.h runner.cpp; do
   cp -a "$root/src/$file" "$source_dir/src/$file"
 done
 for file in article_reorder.h misc.h phda9_preprocess.h self_extract.h; do
@@ -64,16 +63,16 @@ done
 cp -a "$root/src/readalike_prepr/data/new_article_order" \
   "$source_dir/src/readalike_prepr/data/"
 
-tf_root="$root/src/third_party/fx2_transformer"
+tf_root="$root/cpp_infer/src"
 cp -a "$tf_root/LICENSE" "$tf_root/kernels.h" "$tf_root/weights_io.h" \
   "$tf_root/weights_io_compressed.cpp" \
-  "$source_dir/src/third_party/fx2_transformer/"
+  "$source_dir/cpp_infer/src/"
 find "$tf_root/opt" -maxdepth 1 -type f -name '*.h' -exec \
-  cp -a {} "$source_dir/src/third_party/fx2_transformer/opt/" \;
+  cp -a {} "$source_dir/cpp_infer/src/opt/" \;
 for file in arena_build.cpp attn.cpp glue.cpp kda.cpp model_opt.cpp \
     qmat_dense.cpp qmat_sparse.cpp; do
   cp -a "$tf_root/opt/$file" \
-    "$source_dir/src/third_party/fx2_transformer/opt/$file"
+    "$source_dir/cpp_infer/src/opt/$file"
 done
 
 chmod 0555 "$source_dir/install.sh" "$source_dir/build.sh" \

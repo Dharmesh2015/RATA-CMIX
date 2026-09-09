@@ -259,7 +259,21 @@ inline void Tanh(float* p, size_t n) { Tanh(p, p, n); }
 // All row lengths passed in are padded strides (multiples of 16 floats)
 // whose padding lanes are zero in both the master and the shadow.
 
-#if (defined(__AVX512F__) && !defined(SIMD_ACT_FORCE_AVX2)) || \
+// SIMD_ACT_DISABLE_F16 forces the fp32 path even where F16C exists.
+//
+// The fp16 shadow weights are the one part of the LSTM rework that is
+// NOT bit-exact by construction: a dot product taken at half precision
+// cannot reproduce the fp32 result, so the archive moves. Whether it
+// moves by 2 bytes or 200 is a question about this stream, and without
+// a switch there is no way to ask it -- the path turns itself on
+// wherever the ISA allows, which is every build that matters.
+//
+// Off is not the default. The measured deltas are small and in the
+// favourable direction, and the speedup is large. This exists so the
+// trade can be quantified rather than assumed.
+#if defined(SIMD_ACT_DISABLE_F16)
+#define SIMD_ACT_F16 0
+#elif (defined(__AVX512F__) && !defined(SIMD_ACT_FORCE_AVX2)) || \
     (defined(__AVX2__) && defined(__FMA__) && defined(__F16C__))
 #define SIMD_ACT_F16 1
 #else

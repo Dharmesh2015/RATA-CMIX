@@ -15,56 +15,6 @@ U64 curpos(FILE *file) { return ftello(file); }
 U64 blockread(FILE *file,U8 *ptr, U64 count) {return fread(ptr,1,count,file);}
 U64 blockwrite(FILE *file,U8 *ptr, U64 count) {return fwrite(ptr,1,count,file);}
 
-int phda9_line_len(const char *p, const char *end) {
-    const char *q = (const char*)memchr(p, '\n', end - p);
-    return q ? int(q + 1 - p) : int(end - p);
-}
-
-int phda9_is_contributor_end_line(const char *p, int len) {
-    return (len >= 13 && memcmp(p, "/contributor>", 13) == 0) ||
-           (len >= 16 && memcmp(p, "contributor dele", 16) == 0);
-}
-
-char *phda9_rebuild_header_with_id_blob(char *header, int header_len,
-                                        char *id_blob, int id_blob_len,
-                                        int *rebuilt_len) {
-    char *rebuilt = (char*)calloc(header_len + id_blob_len + 1, 1);
-    if (!rebuilt) return 0;
-    char *out = rebuilt;
-    char *hp = header;
-    char *hend = header + header_len;
-    char *ip = id_blob;
-    char *iend = id_blob + id_blob_len;
-    int need_id = 1;
-
-    while (hp < hend) {
-        int hlen = phda9_line_len(hp, hend);
-        if (need_id) {
-            if (ip >= iend) {
-                free(rebuilt);
-                return 0;
-            }
-            int ilen = phda9_line_len(ip, iend);
-            memcpy(out, ip, ilen);
-            out += ilen;
-            ip += ilen;
-            need_id = 0;
-        }
-        memcpy(out, hp, hlen);
-        out += hlen;
-        if (phda9_is_contributor_end_line(hp, hlen)) need_id = 1;
-        hp += hlen;
-    }
-
-    if (ip != iend) {
-        free(rebuilt);
-        return 0;
-    }
-    *rebuilt_len = int(out - rebuilt);
-    rebuilt[*rebuilt_len] = 0;
-    return rebuilt;
-}
-
 FILE* tmpfile2(void){
     FILE *f;
 #ifdef WINDOWS  
@@ -591,35 +541,6 @@ void decode_txt_wit(FILE*in,  FILE*out1,U64 size){
  
     if(headerlenght)  blockread(in,(U8*)h1,U64(headerlenght));  //read header
     if(langlenght)    blockread(in,(U8*)p1,U64(langlenght));  //read lang
-    if (curpos(in) > size) {
-        fprintf(stderr, "phda9 restore: invalid tail layout\n");
-        exit(1);
-    }
-    U64 id_blob_len64 = size - curpos(in);
-    if (id_blob_len64) {
-        if (id_blob_len64 > 0x7fffffffULL) {
-            fprintf(stderr, "phda9 restore: id blob too large\n");
-            exit(1);
-        }
-        char *id_blob = (char*)calloc(id_blob_len64 + 1, 1);
-        if (!id_blob) {
-            fprintf(stderr, "phda9 restore: id blob allocation failed\n");
-            exit(1);
-        }
-        blockread(in, (U8*)id_blob, id_blob_len64);
-        int rebuilt_len = 0;
-        char *rebuilt = phda9_rebuild_header_with_id_blob(
-            h1, headerlenght, id_blob, int(id_blob_len64), &rebuilt_len);
-        if (!rebuilt) {
-            fprintf(stderr, "phda9 restore: id blob/header mismatch\n");
-            exit(1);
-        }
-        free(h1);
-        h1 = rebuilt;
-        h1p = h1;
-        headerlenght = rebuilt_len;
-        free(id_blob);
-    }
     
     setpos(in,insize+1);
     int header=0;

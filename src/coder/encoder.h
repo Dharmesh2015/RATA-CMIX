@@ -8,24 +8,17 @@
 
 class Encoder {
  public:
-  Encoder(std::ofstream* output, Predictor* predictor);
+  Encoder(std::ofstream* os, Predictor* p);
   void Encode(int bit);
   void Flush();
-  size_t OutputSize() const {
-    return flushed_bytes_ + output_buffer_.size();
-  }
-
+  size_t OutputSize() { return out_.size();}
  private:
   void WriteByte(unsigned int byte);
-  void FlushBuffer();
-  unsigned int Discretize(float probability);
+  unsigned int Discretize(float p);
 
-  std::vector<char> output_buffer_;
-  size_t flushed_bytes_ = 0;
-  std::ofstream* output_;
-  unsigned int low_;
-  unsigned int high_;
-  Predictor* predictor_;
+  std::vector<char> out_;
+  std::ofstream* os_;
+  unsigned int x1_, x2_;
+  Predictor* p_;
 };
-
 #endif

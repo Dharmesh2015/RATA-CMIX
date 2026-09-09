@@ -1,5 +1,8 @@
 # Production Architecture
 
+This describes the checked-in configuration of this branch, which builds on
+fx2-cmix-transformer (Vladimer Ivanov, Kaido Orav, Byron Knoll).
+
 ## S1 Layout
 
 The cmix compressor is a UPX-packed executable with an appended overlay:
@@ -32,21 +35,26 @@ cmix -e enwik9 archive9 performs:
    predictor.
 3. Split enwik9 and apply the embedded article order.
 4. Apply PHDA9 and WRT.
-5. Apply the cmix-lex payload_lex/R1 tail reorder.
-6. Require the canonical 587,138,826-byte, 205-symbol transformer stream.
+5. Require the 586,459,321-byte, 205-symbol post-WRT transformer stream.
+   There is no R1 tail reorder.
 7. Encode each bit using the connected production predictor.
 8. Construct executable archive9.
 
 The connected predictor contains:
 
-- FXCM v26 contexts and final aggregate probability.
+- FXCM contexts and final aggregate probability, plus a stationary state
+  bank.
 - Full FXCM internal LSTM bridge plus the accepted half-strength middle input.
 - PPMd order 25 with a 14,000 MiB logical heap.
 - Frozen 12-layer, width-192, approximately 6M-parameter CPU transformer.
 - Direct, indirect, bracket, word, byte and match models.
-- GrammarMatch and DeepMix contexts.
-- ESN/NLMS correction.
-- Contextual specialist, SSE and arithmetic coding.
+- GrammarMatch, exported both as a mixer channel and as its own layer-0
+  mixer context keyed on which grammar family fired, ECHO arming on.
+- A 2x200 online LSTM expert with BPTT horizon 128, contributing its own
+  probability, an expected-byte hint, a disagreement channel against the
+  transformer, and a gate on transformer uncertainty. Additive: it does
+  not rewrite the mixed prediction.
+- SSE and arithmetic coding.
 
 The transformer replaces the online byte LSTM only on the canonical main
 stream. Small embedded helper streams use the optimized online 200-cell LSTM
@@ -57,10 +65,14 @@ because their vocabularies are incompatible with the frozen 205-symbol model.
 The PPM allocator uses a stable 14,000 MiB ppm.temp mapping:
 
 - ftruncate creates the logical heap once.
-- MAP_SHARED preserves the pointer-stable cmix-lex layout.
+- MAP_SHARED keeps the heap pointer-stable. PPMD stores raw pointers into
+  its own heap, so the mapping's address must never move.
 - O_NOATIME avoids access-time writes.
 - MADV_RANDOM suppresses unhelpful sequential readahead.
-- RSS checks trigger MADV_DONTNEED at the compiled 8,704 MiB budget.
+- MADV_DONTNEED runs on a fixed byte cadence, on a mapping whose address
+  never moves. PPMD stores raw pointers inside its own heap, so eviction
+  must not remap; dropping page-table entries on a MAP_SHARED mapping is
+  output-neutral.
 
 Dropping resident pages does not alter PPM probabilities or the file-backed
 state. The actual judge report must still confirm peak process-tree RSS below

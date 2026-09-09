@@ -1,6 +1,5 @@
 #include "context-manager.h"
 #include "utils/hugepage.h"
-
 extern unsigned long long wrtcxt;
 
 extern const unsigned char wrt_2b[256];
@@ -57,45 +56,30 @@ const unsigned char wrt_4b[256]={
 #define VERTICALBAR   'Q' // |
 #define CURLYCLOSE    'R' // }
 
-ContextManager::ContextManager() : history_(60000000, 0),
-    words_(8, 0), recent_bytes_(8, 0) {
-    // shared_map_ and the big hashes_ind tables are randomly accessed
-    // 100-256 MB arrays: reserve, flag for transparent huge pages, THEN
-    // fill, so the zero-fill first touch faults in 2 MB pages.
+ContextManager::ContextManager() : words_(8, 0), recent_bytes_(8, 0) {
+    // Reserve and advise before first touch so Linux can fault these large,
+    // hot tables through transparent huge pages instead of millions of 4 KiB
+    // mappings. The hint is a no-op on unsupported systems.
+    history_.reserve(60000000);
+    AdviseHugePages(history_.data(), (size_t)60000000);
+    history_.resize(60000000, 0);
     shared_map_.reserve(256*400000);
     AdviseHugePages(shared_map_.data(), (size_t)256*400000);
     shared_map_.resize(256*400000, 0);
     hashes_ind1.reserve(0x1000000);
-    AdviseHugePages(hashes_ind1.data(), (size_t)0x1000000*sizeof(unsigned long long));
+    AdviseHugePages(hashes_ind1.data(),
+        (size_t)0x1000000*sizeof(unsigned long long));
     hashes_ind1.resize(0x1000000, 0);
     hashes_ind2.reserve(0x1000000);
-    AdviseHugePages(hashes_ind2.data(), (size_t)0x1000000*sizeof(unsigned long long));
+    AdviseHugePages(hashes_ind2.data(),
+        (size_t)0x1000000*sizeof(unsigned long long));
     hashes_ind2.resize(0x1000000, 0);
     hashes_ind3.reserve(0x2000000);
-    AdviseHugePages(hashes_ind3.data(), (size_t)0x2000000*sizeof(unsigned long long));
+    AdviseHugePages(hashes_ind3.data(),
+        (size_t)0x2000000*sizeof(unsigned long long));
     hashes_ind3.resize(0x2000000, 0);
     hashes_ind4.resize(0x100, 0);
     hashes_ind5.resize(0x100, 0);
-}
-
-void ContextManager::UpdateLineState(unsigned char c) {
-  if (c == '\n') {
-    line_class_ = 0;
-    line_prefix_hash_ = 0;
-    return;
-  }
-  if (line_break_ <= 8) {
-    line_prefix_hash_ = (line_prefix_hash_ * 131U + c) & 0xffU;
-  }
-  if (line_class_ != 0 || c == ' ' || c == '\t' || c == '\r') return;
-  if (c == '#') line_class_ = 1;
-  else if (c == '@') line_class_ = 2;
-  else if ((c >= '0' && c <= '9') || c == 'N' || c == '-') line_class_ = 3;
-  else if (c >= 0x80) line_class_ = 4;
-  else if (c == '[') line_class_ = 5;
-  else if (c == '*' || c == 'P' || c == 'Q' || c == 'R' || c == 'L' ||
-      c == 'M' || c == '|') line_class_ = 6;
-  else line_class_ = 7;
 }
 
 void ContextManager::UpdateHistory() {
@@ -106,13 +90,12 @@ void ContextManager::UpdateHistory() {
 
 void ContextManager::UpdateWords() {
   unsigned char c = bit_context_;
-  // The big-table slots read at the bottom of this function are pure
-  // functions of the old indices and c; prefetch them now (rw=1: the same
-  // slot is written on the next byte) so the three random-access misses
-  // overlap the bookkeeping below instead of serializing at the reads.
-  const unsigned long long next_ind1 = (context1_ind  * (1 << 8) + c) & (0x1000000-1);
-  const unsigned long long next_ind2 = (context1_ind2 * (1 << 6) + c) & (0x1000000-1);
-  const unsigned long long next_ind3 = (context1_ind3 * (1 << 5) + c) & (0x2000000-1);
+  const unsigned long long next_ind1 =
+      (context1_ind * (1 << 8) + c) & (0x1000000-1);
+  const unsigned long long next_ind2 =
+      (context1_ind2 * (1 << 6) + c) & (0x1000000-1);
+  const unsigned long long next_ind3 =
+      (context1_ind3 * (1 << 5) + c) & (0x2000000-1);
   __builtin_prefetch(&hashes_ind1[next_ind1], 1, 3);
   __builtin_prefetch(&hashes_ind2[next_ind2], 1, 3);
   __builtin_prefetch(&hashes_ind3[next_ind3], 1, 3);
@@ -178,11 +161,11 @@ void ContextManager::UpdateWords() {
    hashes_ind1[context1_ind] = (ind1 * (1 << 8) + c) & (0x100-1);
    context1_ind = next_ind1;
    ind1 = hashes_ind1[context1_ind];
-
+  
     hashes_ind2[context1_ind2] = (ind2 * (1 << 8) + c) & (0x100000000-1);
    context1_ind2 = next_ind2;
    ind2 = hashes_ind2[context1_ind2];
-
+ 
   hashes_ind3[context1_ind3] = (ind3 * (1 << 5) + c) & (0x2000000-1);
   context1_ind3 = next_ind3;
   ind3 = hashes_ind3[context1_ind3];
@@ -224,7 +207,6 @@ void ContextManager::UpdateContexts(int bit) {
     } else if (line_break_ < 99) {
       ++line_break_;
     }
-    UpdateLineState(static_cast<unsigned char>(bit_context_));
 
     UpdateHistory();
     UpdateWords();
@@ -255,11 +237,12 @@ void ContextManager::UpdateContexts(int bit) {
   mx13=long_bit_context_;
   mx16=(recent_bytes_[1])*256+long_bit_context_;
   mx17=(b3stream&0x3f)*256+long_bit_context_;// 7f or 3f
-
-  if (bpos==0)  mxx=(stream2bR&63)*8 + (b3stream&7);
-  else if (bpos>3) {
-      mxx=((b2stream<<2)&63)+wrt_2b[(long_bit_context_<<(8-bpos))&255]*8+(b3stream&7);
-  } else
-      mxx=(stream2bR&63)*8 +(b3stream&7);
+  
+      if (bpos==0)  mxx=(stream2bR&63)*8 + (b3stream&7);
+    else if (bpos>3) {
+        mxx=((b2stream<<2)&63)+wrt_2b[(long_bit_context_<<(8-bpos))&255]*8+(b3stream&7);
+    } else    
+        mxx=(stream2bR&63)*8 +(b3stream&7);
         
 }
+

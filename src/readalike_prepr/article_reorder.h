@@ -8,7 +8,6 @@
 #include <cstdio>
 #include <unordered_map>
 #include <fstream>
-#include <algorithm>
 
 #define NUM_OF_ARTICLES 243425
 
@@ -92,9 +91,9 @@ void loadFile(const char *fname) {
 }
 void reorder() {
     std::vector<int> positions;
+    std::vector<int> used(NUM_OF_ARTICLES, 0);
     
     loadFile(".main");
-    std::vector<int> used(vec.size(), 0);
 
     // Article numbers need to be remapped (see article_remap.cpp).
     // Here we read enwik9 in order to generate the article number mapping.
@@ -128,17 +127,13 @@ void reorder() {
 
     std::ifstream infile2(".new_article_order");
     while (getline(infile2, line)) {
-      auto it = remap.find(stoi(line));
-      if (it != remap.end()) {
-        int res = it->second;
-        if (res < 0 || res >= (int)used.size()) continue;
-        positions.push_back(res);
-        used[res] = 1;
-      }
+      int res = remap[stoi(line)];  // Article numbers get remapped.
+      positions.push_back(res);
+      used[res] = 1;
     }
   
-    if (positions.size() < (int)vec.size()) {
-        for (int i = 0; i < (int)vec.size(); i++) {
+    if (positions.size() < NUM_OF_ARTICLES) {
+        for (int i = 0; i < NUM_OF_ARTICLES; i++) {
             if (used[i] == 0) {
                 positions.push_back(i);
             }
@@ -149,23 +144,15 @@ void reorder() {
   std::string so;
   for(int i = 0; i < positions.size(); i++) {
     int pos = positions[i];
-    if (pos < 0 || pos >= (int)vec.size()) continue;
      #ifdef DUMPARTICLE
      printf("%d\t%d\t%d\t%d\t%s\t%s\t%s\n",pos,vec[pos].id,vec[pos].start,vec[pos].end,vec[pos].title.c_str(),vec[pos].infobox.c_str(),vec[pos].redirect.c_str());
      #else
-    int j_start = std::max(0, vec[pos].start);
-    int j_end = std::min(vec[pos].end, (int)lines.size() - 1);
-    for(int j = j_start; j <= j_end; j++) {
+    for(int j = vec[pos].start; j <= vec[pos].end; j++) {
       so=lines[j];
       wfputs(so.c_str(),out);
     }
     #endif
   } 
-  if (!vec.empty()) {
-    for (int j = vec.back().end + 1; j < (int)lines.size(); j++) {
-      wfputs(lines[j].c_str(), out);
-    }
-  }
   #ifdef DUMPARTICLE
   exit(0);
   #endif
@@ -187,15 +174,6 @@ void sort() {
     for(int j = vec[i].start; j <= vec[i].end; j++) {
       so=lines[j];
       wfputs(so.c_str(),out);
-    }
-  }
-  if (!vec.empty()) {
-    int tail_start = 0;
-    for (int i = 0; i < (int)vec.size(); i++) {
-      if (vec[i].end + 1 > tail_start) tail_start = vec[i].end + 1;
-    }
-    for (int j = tail_start; j < (int)lines.size(); j++) {
-      wfputs(lines[j].c_str(), out);
     }
   }
   

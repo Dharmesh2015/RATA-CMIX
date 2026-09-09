@@ -17,7 +17,7 @@ float Sigmoid::Logit(float p) const {
 }
 
 float Sigmoid::Logistic(float p) {
-  return 1.0f / (1.0f + expf(-p));
+  return 1 / (1 + exp(-p));
 }
 
 float Sigmoid::FastLogistic(float p) {

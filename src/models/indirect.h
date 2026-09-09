@@ -61,10 +61,9 @@ void Indirect<StateType>::Perceive(int bit) {
 template<typename StateType>
 void Indirect<StateType>::ByteUpdate() {
   map_index_ = (257 * byte_context_ + map_offset_) % (map_.size() - 257);
-  // Predict()/Perceive() touch map_[map_index_ + bit_context_] with
-  // bit_context_ in [1,255] over the coming byte, and the first access is
-  // far away (LSTM + fxcm byte-boundary work); prefetch the whole window
-  // now. rw=1 because every touched line is also written by Perceive().
+  // The next eight Predict/Perceive pairs touch this 256-byte window in a
+  // known pattern. Start the random-memory fetch at the byte boundary while
+  // the LSTM/FXCM work still has time to overlap it.
   const char* base = reinterpret_cast<const char*>(&map_[map_index_]);
   __builtin_prefetch(base + 1, 1, 3);
   __builtin_prefetch(base + 65, 1, 3);

@@ -9,7 +9,7 @@ build_root=/work/fx4-build
 test -r "$source_root/makefile"
 test -r "$source_root/dictionary/english.dic"
 test -r "$source_root/src/readalike_prepr/data/new_article_order"
-test -r "$source_root/models/transformer6m/6m-q4-fp32.tfwc2"
+test -r "$source_root/models/6m-q4-fp32.tfwc5"
 test ! -e "$build_root"
 mkdir -p "$build_root"
 

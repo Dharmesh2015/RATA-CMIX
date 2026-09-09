@@ -1,225 +1,144 @@
-#ifndef SELF_EXTRACT_H
-#define SELF_EXTRACT_H
+#ifndef SELF_EXTRACT_H 
+#define SELF_EXTRACT_H 
 
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <stdlib.h>
 #include <malloc.h>
+
 #include <string>
 
-// Native little-endian x86-64 trailer shared by S1 and archive9.
 struct HeaderInfo {
   int dict_size;
   int new_article_order_size;
   int decomp_input_size;
-  int transformer6m_weights_size;
+  // Size of the compressed transformer weights (FX2TFWC2 format, appended
+  // as-is and loaded directly — never run through cmix itself).
+  int tf_weights_size;
 };
 
-inline bool write(const std::string& file_name, const HeaderInfo& data) {
-  FILE* output = std::fopen(file_name.c_str(), "wb");
-  if (!output) return false;
-  const bool wrote = std::fwrite(&data, sizeof(data), 1, output) == 1;
-  const bool closed = std::fclose(output) == 0;
-  return wrote && closed;
+void write(const std::string& file_name, HeaderInfo& data) {
+  FILE *out = fopen(file_name.c_str() , "wb" );
+  fwrite(&data , 1 , sizeof(HeaderInfo) , out );
+  fclose(out);
 }
 
-inline bool read(const std::string& file_name, HeaderInfo& data) {
-  FILE* input = std::fopen(file_name.c_str(), "rb");
-  if (!input) return false;
-  const bool loaded = std::fread(&data, sizeof(data), 1, input) == 1;
-  const bool closed = std::fclose(input) == 0;
-  return loaded && closed;
+void read(const std::string& file_name, HeaderInfo& data) {
+  FILE *in = fopen(file_name.c_str() , "rb" );
+  fread(&data , 1 , sizeof(HeaderInfo) , in );
+  fclose(in);
 }
 
-namespace self_extract_internal {
 
-inline bool WriteSlice(const char* path, const unsigned char* data,
-    size_t size) {
-  FILE* output = std::fopen(path, "wb");
-  if (!output) return false;
-  const bool wrote =
-      size == 0 || std::fwrite(data, size, 1, output) == 1;
-  const bool closed = std::fclose(output) == 0;
-  return wrote && closed;
-}
+// This function splits the ./cmix binary file into 4 parts:
+// 1) actual compressor/decompressor binary
+// 2) dictionary (get's it in compressed form and decompresses it)
+// 3) new order of articles (get's it in compressed form and decompresses it)
+// 4) transformer weights (compressed FX2TFWC2 file, used as extracted)
+int selfextract_comp() {
+  HeaderInfo header;
 
-inline unsigned char* ReadWholeFile(const char* path, size_t* size) {
-  *size = 0;
-  FILE* input = std::fopen(path, "rb");
-  if (!input) return nullptr;
-  if (std::fseek(input, 0, SEEK_END) != 0) {
-    std::fclose(input);
-    return nullptr;
-  }
-  const long measured = std::ftell(input);
-  if (measured < 0 || std::fseek(input, 0, SEEK_SET) != 0) {
-    std::fclose(input);
-    return nullptr;
-  }
-  *size = static_cast<size_t>(measured);
-  unsigned char* data =
-      static_cast<unsigned char*>(std::malloc(*size == 0 ? 1 : *size));
-  if (!data) {
-    std::fclose(input);
-    return nullptr;
-  }
-  const bool loaded =
-      *size == 0 || std::fread(data, *size, 1, input) == 1;
-  const bool closed = std::fclose(input) == 0;
-  const bool ok = loaded && closed;
-  if (!ok) {
-    std::free(data);
-    return nullptr;
-  }
-  return data;
-}
+// open itslef to read auxilary data (dictionary and neworder)
+  FILE *f = NULL, *fo = NULL;
+  f = fopen("cmix", "rb");
 
-inline bool ValidNonnegative(const HeaderInfo& header) {
-  return header.dict_size >= 0 &&
-      header.new_article_order_size >= 0 &&
-      header.decomp_input_size >= 0 &&
-      header.transformer6m_weights_size > 0;
-}
+  // get the size of the whole binary
+  fseek(f, 0, SEEK_END);
+  size_t fsize = ftell(f);
+  fseek(f, 0, SEEK_SET);
 
-}  // namespace self_extract_internal
+  unsigned char *p1 = (unsigned char *)malloc(fsize);
+  // read the whole binary to memory
+  fread(p1, fsize, 1, f);
+  fclose(f);
 
-// Split S1 into the executable core, dictionary, article order and frozen
-// transformer. The helper streams deliberately use the classical fallback
-// predictor; the transformer is enabled only for the canonical post-R1 stream.
-inline int selfextract_comp() {
-  size_t file_size = 0;
-  unsigned char* data =
-      self_extract_internal::ReadWholeFile("cmix", &file_size);
-  if (!data || file_size < sizeof(HeaderInfo)) {
-    std::fprintf(stderr, "selfextract failed to read ./cmix\n");
-    std::free(data);
-    return 1;
-  }
+  // read header info
+  fo = fopen("test.dat", "wb");
+  memcpy(&header, p1 + fsize - sizeof(HeaderInfo), sizeof(HeaderInfo));
+  fwrite(p1 + fsize - sizeof(HeaderInfo), sizeof(HeaderInfo), 1, fo);
+  fclose(fo);
 
-  HeaderInfo header = {};
-  std::memcpy(&header, data + file_size - sizeof(header), sizeof(header));
-  if (!self_extract_internal::ValidNonnegative(header)) {
-    std::fprintf(stderr, "selfextract found an invalid S1 trailer\n");
-    std::free(data);
-    return 1;
-  }
-  const size_t dictionary_size = static_cast<size_t>(header.dict_size);
-  const size_t order_size =
-      static_cast<size_t>(header.new_article_order_size);
-  const size_t transformer_size =
-      static_cast<size_t>(header.transformer6m_weights_size);
-  const size_t trailer_and_assets =
-      sizeof(header) + dictionary_size + order_size + transformer_size;
-  if (trailer_and_assets > file_size) {
-    std::fprintf(stderr, "selfextract S1 assets exceed file size\n");
-    std::free(data);
-    return 1;
-  }
-  const size_t core_size = file_size - trailer_and_assets;
-  const size_t dictionary_offset = core_size;
-  const size_t order_offset = dictionary_offset + dictionary_size;
-  const size_t transformer_offset = order_offset + order_size;
+  //Remove dictionary if present
+  remove(".dict");
+  
+  size_t decmpressor_binary_size = fsize - header.dict_size - header.new_article_order_size - header.tf_weights_size - sizeof(HeaderInfo);
 
-  std::remove(".dict");
-  const bool extracted =
-      write("test.dat", header) &&
-      self_extract_internal::WriteSlice(
-          ".decomp_bin", data, core_size) &&
-      self_extract_internal::WriteSlice(
-          ".dict.comp", data + dictionary_offset, dictionary_size) &&
-      self_extract_internal::WriteSlice(
-          ".new_article_order.comp", data + order_offset, order_size) &&
-      self_extract_internal::WriteSlice(
-          ".tfweights", data + transformer_offset, transformer_size);
-  std::free(data);
-  if (!extracted) {
-    std::fprintf(stderr, "selfextract failed to write S1 assets\n");
-    return 1;
-  }
+// produce actual decompressor binary
+  fo = fopen(".decomp_bin", "wb");
+  fwrite(p1, decmpressor_binary_size, 1, fo);
+  fclose(fo);
 
-  int status =
-      std::system("./cmix -d .new_article_order.comp .new_article_order");
-  if (status != 0) {
-    std::fprintf(stderr,
-        "selfextract failed: article order decode status=%d\n", status);
-    return 1;
-  }
-  status = std::system("./cmix -d .dict.comp .dict");
-  if (status != 0) {
-    std::fprintf(stderr,
-        "selfextract failed: dictionary decode status=%d\n", status);
-    return 1;
-  }
+// produce dictionary and decompress it
+  fo = fopen(".dict.comp", "wb");
+  fwrite(p1 + decmpressor_binary_size, header.dict_size, 1, fo);
+  fclose(fo);
+
+
+// produce article order and decompress it
+  fo = fopen(".new_article_order.comp", "wb");
+  fwrite(p1 + decmpressor_binary_size + header.dict_size, header.new_article_order_size, 1, fo);
+  fclose(fo);
+
+// produce the transformer weights (already in their loadable compressed
+// format, so no decompression subprocess is run on them)
+  fo = fopen(".tfweights", "wb");
+  fwrite(p1 + decmpressor_binary_size + header.dict_size + header.new_article_order_size, header.tf_weights_size, 1, fo);
+  fclose(fo);
+//  std::cout << "Decompressing the file with the new article order..." << std::endl;
+  system("./cmix -d .new_article_order.comp .new_article_order");
+
+//  std::cout << "Decompressing dictionary..." << std::endl;
+  system("./cmix -d .dict.comp .dict");
+  free(p1);
   malloc_trim(0);
   return 0;
 }
 
-// Split archive9 into the decoder core, dictionary, frozen transformer and
-// entropy payload. archive9 itself is the only executable needed to restore
-// enwik9.
-inline int selfextract_decomp() {
-  size_t file_size = 0;
-  unsigned char* data =
-      self_extract_internal::ReadWholeFile("archive9", &file_size);
-  if (!data || file_size < sizeof(HeaderInfo)) {
-    std::fprintf(stderr, "selfextract failed to read ./archive9\n");
-    std::free(data);
-    return 1;
-  }
+// Same as previous function, but used in decompressor
+// This function splits the ./archive9 binary file into 4 parts:
+// 1) actual decompressor binary
+// 2) dictionary (get's it in compressed form and decompresses it)
+// 3) transformer weights (compressed FX2TFWC2 file, used as extracted)
+// 4) the cmix-compressed enwik9 payload
+int selfextract_decomp() {
+  HeaderInfo header;
+  FILE *f = NULL, *fo = NULL;
+  f = fopen("archive9", "rb");
 
-  HeaderInfo header = {};
-  std::memcpy(&header, data + file_size - sizeof(header), sizeof(header));
-  if (!self_extract_internal::ValidNonnegative(header)) {
-    std::fprintf(stderr, "selfextract found an invalid archive trailer\n");
-    std::free(data);
-    return 1;
-  }
-  const size_t dictionary_size = static_cast<size_t>(header.dict_size);
-  const size_t transformer_size =
-      static_cast<size_t>(header.transformer6m_weights_size);
-  const size_t payload_size = static_cast<size_t>(header.decomp_input_size);
-  const size_t trailer_and_assets =
-      sizeof(header) + dictionary_size + transformer_size + payload_size;
-  if (trailer_and_assets > file_size) {
-    std::fprintf(stderr, "selfextract archive assets exceed file size\n");
-    std::free(data);
-    return 1;
-  }
-  const size_t core_size = file_size - trailer_and_assets;
-  const size_t dictionary_offset = core_size;
-  const size_t transformer_offset = dictionary_offset + dictionary_size;
-  const size_t payload_offset = transformer_offset + transformer_size;
+  fseek(f, 0, SEEK_END);
+  size_t fsize = ftell(f);
+  fseek(f, 0, SEEK_SET);
 
-  std::remove(".dict");
-  const bool extracted =
-      write("test.dat", header) &&
-      self_extract_internal::WriteSlice(
-          ".tfweights", data + transformer_offset, transformer_size) &&
-      self_extract_internal::WriteSlice(
-          ".dict.comp_decomp", data + dictionary_offset, dictionary_size);
-  if (!extracted) {
-    std::fprintf(stderr, "selfextract failed to write archive assets\n");
-    std::free(data);
-    return 1;
-  }
+  unsigned char *p1 = (unsigned char *)malloc(fsize);
+  fread(p1, fsize, 1, f);
+  fclose(f);
 
-  const int status =
-      std::system("./archive9 -d .dict.comp_decomp .dict");
-  if (status != 0) {
-    std::fprintf(stderr,
-        "selfextract failed: dictionary decode status=%d\n", status);
-    std::free(data);
-    return 1;
-  }
-  const bool payload_ok = self_extract_internal::WriteSlice(
-      ".ready4cmix_decomp", data + payload_offset, payload_size);
-  std::free(data);
-  if (!payload_ok) {
-    std::fprintf(stderr, "selfextract failed to write entropy payload\n");
-    return 1;
-  }
+  // read header info
+  fo = fopen("test.dat", "wb");
+  fwrite(p1 + fsize - sizeof(HeaderInfo), sizeof(HeaderInfo), 1, fo);
+  fclose(fo);
+  read("test.dat", header);
+
+  //Remove dictionary if present
+  remove(".dict");
+  
+  size_t decmpressor_binary_size = fsize - header.dict_size - header.tf_weights_size - header.decomp_input_size - sizeof(HeaderInfo);
+
+  fo = fopen(".dict.comp_decomp", "wb");
+  fwrite(p1 + decmpressor_binary_size, header.dict_size, 1, fo);
+  fclose(fo);
+
+  system("./archive9 -d .dict.comp_decomp .dict");//_decomp
+
+  fo = fopen(".tfweights", "wb");
+  fwrite(p1 + decmpressor_binary_size + header.dict_size, header.tf_weights_size, 1, fo);
+  fclose(fo);
+
+  fo = fopen(".ready4cmix_decomp", "wb");
+  fwrite(p1 + decmpressor_binary_size + header.dict_size + header.tf_weights_size, header.decomp_input_size, 1, fo);
+  fclose(fo);
+
+  free(p1);
   malloc_trim(0);
   return 0;
 }
 
-#endif  // SELF_EXTRACT_H
+#endif // PREPR_H

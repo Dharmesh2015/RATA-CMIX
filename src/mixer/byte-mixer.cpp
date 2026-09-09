@@ -1,9 +1,11 @@
 #include "byte-mixer.h"
 
+
 ByteMixer::ByteMixer(unsigned int num_models, const unsigned int& bit_context,
     const std::vector<bool>& vocab, unsigned int vocab_size, Lstm* lstm) :
     ByteModel(vocab), lstm_(lstm), byte_(bit_context), byte_map_(0, 256),
-    inputs_(0.0, vocab_size), num_models_(num_models), vocab_size_(vocab_size),
+    inputs_(0.0, vocab_size),
+    num_models_(num_models), vocab_size_(vocab_size),
     offset_(0) {
   for (int i = 0; i < 256; ++i) {
     byte_map_[i] = offset_;
@@ -23,13 +25,15 @@ void ByteMixer::SetProbs(const float* vocab_probs) {
   unsigned int k = 0;
   for (int i = 0; i < 256; ++i) {
     if (vocab_[i]) {
-      probs_[i] = vocab_probs[k++];
+      probs_[i] = vocab_probs[k];
+      ++k;
     } else {
-      probs_[i] = 0.0f;
+      probs_[i] = 0;
     }
   }
   ByteModel::ByteUpdate();
 }
+
 
 void ByteMixer::ByteUpdate() {
   inputs_ *= 2 / num_models_;
@@ -48,4 +52,3 @@ void ByteMixer::ByteUpdate() {
   offset_ = 0;
   ByteModel::ByteUpdate();
 }
-

@@ -12,10 +12,10 @@ class ByteMixer : public ByteModel {
   ByteMixer(unsigned int num_models, const unsigned int& bit_context,
       const std::vector<bool>& vocab, unsigned int vocab_size, Lstm* lstm);
   void SetInput(int index, float val);
-  // Replace the online LSTM output with one probability per vocabulary byte.
-  // Used only by the feature-gated pretrained transformer path.
-  void SetProbs(const float* vocab_probs);
   void ByteUpdate();
+  // Sets the byte-level probability distribution directly (one float per
+  // vocabulary byte, in vocabulary order) instead of running the lstm.
+  void SetProbs(const float* vocab_probs);
 
  private:
   std::unique_ptr<Lstm> lstm_;

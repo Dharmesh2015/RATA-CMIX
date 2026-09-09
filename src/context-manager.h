@@ -17,7 +17,6 @@
 #include <cmath>
 #include "ds/SmallVector.h"
 
-#include <cstdint>
 #include <vector>
 
 struct ContextManager {
@@ -59,11 +58,14 @@ struct ContextManager {
   void UpdateWords();
   void UpdateRecentBytes();
   void UpdateWRTContext();
-  void UpdateLineState(unsigned char c);
 
   unsigned int bit_context_ = 1, wrt_state_ = 0, bpos=0;
   unsigned long long long_bit_context_ = 1, zero_context_ = 0, history_pos_ = 0,
       line_break_ = 0, longest_match_ = 0, auxiliary_context_ = 0,
+      grammar_state_ = 0,   // GrammarMatch family x position, 0 when idle
+      scr2_state_ = 0,      // Scr2Match pattern bucket x matched length
+      morphology_state_ = 0,  // literal suffix family x confidence
+      causal_donor_state_ = 0,
       wrt_context_ = 0,
       b2stream=0,b2streamcxt=0, o2bState=0, n2bState=0, stream2bR=0,
       b3stream=0,b3streamcxt=0,o3bState=0, n3bState=0, stream3bR=0,
@@ -87,23 +89,15 @@ struct ContextManager {
       ind4=0,context1_ind4=0,
       ind5=0,context1_ind5=0,
       mx19cxt=0;
-#if FX4_GRAMMAR_MATCH
-  // Idle is zero; active values identify GrammarMatch family/position state.
-  unsigned long long grammar_state_ = 0;
-#endif
-  unsigned int line_class_ = 0, line_prefix_hash_ = 0;
   std::vector<unsigned char> history_, shared_map_;
   std::vector<unsigned long long> words_, recent_bytes_;
   llvm::SmallVector<ContextHash, 12> context_hash_contexts_;
   llvm::SmallVector<Sparse, 18> sparse_contexts_;
   llvm::SmallVector<BracketContext, 1> bracket_contexts_;
-  // Every stored value is explicitly masked to 32 bits or less (verified:
-  // ind1<=0xFF, ind2<=0xFFFFFFFF exactly, ind3<=0x1FFFFFF, ind5<=0x3FFFFFFF
-  // in context-manager.cpp), so 64-bit storage was pure unused headroom.
-  std::vector<std::uint32_t> hashes_ind1,hashes_ind2,hashes_ind3,
-      hashes_ind4,hashes_ind5;
+  std::vector<unsigned long long> hashes_ind1,hashes_ind2,hashes_ind3,hashes_ind4,hashes_ind5;
   RunMap run_map_;
   Nonstationary nonstationary_;
 };
 
 #endif
+

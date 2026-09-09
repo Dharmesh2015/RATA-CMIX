@@ -22,3 +22,4 @@ class ByteModel : public Model {
 };
 
 #endif
+

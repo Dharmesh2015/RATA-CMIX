@@ -1,7 +1,6 @@
 #include "lstm-layer.h"
 
 #include "sigmoid.h"
-
 #include <math.h>
 #include <algorithm>
 #include <numeric>
@@ -80,8 +79,9 @@ inline LstmLayer::LstmLayer(unsigned int input_size, unsigned int auxiliary_inpu
         output_size + auxiliary_input_size),
     output_gate_(input_size, output_size, num_cells, horizon,
         output_size + auxiliary_input_size) {
-  // Frozen helper-stream initialization used by the accepted release build.
-  float val = 0.5f * sqrt(6.0f / float(input_size_ + output_size_));
+  // combo_llif12 (env KH_LSTM_LLIF12): Xavier bound x init_scale. Disabled the
+  // scale is 1.0f, whose multiply is IEEE-exact -> identical golden init.
+  float val = sqrt(6.0f / float(input_size_ + output_size_));
   float low = -val;
   float range = 2 * val;
   // Same Rand() call order as before: (forget, input, output) per (i, j),
@@ -101,7 +101,9 @@ inline LstmLayer::LstmLayer(unsigned int input_size, unsigned int auxiliary_inpu
         output_gate_.wdense(i)[j - output_size_] = wo;
       }
     }
-    forget_gate_.wdense(i)[dense_width_ - 1] = 0.0f;
+    // combo_llif12: forget-gate dense bias init (1.0 golden, 0.0 with
+    // KH_LSTM_LLIF12).
+    forget_gate_.wdense(i)[dense_width_ - 1] = 1.0f;
   }
 #if SIMD_ACT_F16
   {

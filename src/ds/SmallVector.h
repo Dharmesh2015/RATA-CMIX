@@ -26,7 +26,6 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
-#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -1461,5 +1460,3 @@ inline void swap(llvm::SmallVector<T, N>& LHS, llvm::SmallVector<T, N>& RHS) {
 } // end namespace std
 
 #include "SmallVector.hpp"
-
-

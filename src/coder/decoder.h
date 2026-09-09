@@ -7,18 +7,16 @@
 
 class Decoder {
  public:
-  Decoder(std::ifstream* input, Predictor* predictor);
+  Decoder(std::ifstream* is, Predictor* p);
   int Decode();
 
  private:
   int ReadByte();
-  unsigned int Discretize(float probability);
+  unsigned int Discretize(float p);
 
-  std::ifstream* input_;
-  unsigned int low_;
-  unsigned int high_;
-  unsigned int code_;
-  Predictor* predictor_;
+  std::ifstream* is_;
+  unsigned int x1_, x2_, x_;
+  Predictor* p_;
 };
 
 #endif
