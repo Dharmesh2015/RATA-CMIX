@@ -8,7 +8,7 @@ research bundle:
   fx2-cmix-transformer by Vladimer Ivanov, July 24, 2026
 
   src/third_party/fx2_transformer/
-  models/transformer6m/6m-q4-fp32.tfwc2
+  models/6m-q4-fp32.tfwc2
 
 The `target93` build uses the published architecture: the transformer
 replaces the online byte LSTM while PPMd, FXCM and the final mixers remain
