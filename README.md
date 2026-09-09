@@ -29,26 +29,38 @@ project for the full mechanism-level description of each item below.
   - disk-backed PPM (`ppm.temp`, `MADV_DONTNEED`/`MADV_RANDOM` discipline)
     so the order-25 model's 14 GB sub-allocator fits the judging memory
     limit;
-  - lossless v5 recompression of the transformer weights -- entropy-coded
-    Q4 symbols against per-tensor histograms and a causal column-local
-    count derived from the tensor's own shape, no side table stored;
-    2,930,652 -> 2,902,452 bytes (28,200 saved), via `pysrc/weights_compress`;
+  - recompressed transformer weights (below);
   - Scr2Match, a derived pattern table used as a probability expert;
   - a zero-side-data morphology specialist for literal words the
     dictionary has not seen;
   - a zero-side-data causal donor specialist, matching already-decoded
     history without ever touching another model's state.
 - **trophy-v93** (Dharmesh Patel), layered additively on fx4-cmix's v22++
-  and predictor; validated there with a byte-exact round trip at every
-  scale from 1 MB to full enwik9:
+  and predictor:
   - MATCHTRUST -- an 8-bit shift register of recent match-outcome history,
     restoring evidence the match model destroys the instant a candidate
     mispredicts, as a 4th StateMap context;
   - SPECIALIST -- a small context-gated corrector applied after the SSE
     chain, trained on its own error against the ppmd/byte-mixer/FXCM
     logits.
-  - FDIGIT, also explored there, measured negative at every scale tried
-    and was not ported.
+  - FDIGIT, also explored there, measured negative and not ported.
+
+**Recompressed transformer weights.** The shipped model moves to the v5
+tensor container, which entropy-codes the Q4 symbols against per-tensor
+histograms and a causal column-local count derived from the tensor's own
+shape. No side table is stored: the decoder reconstructs that state from
+the shape and the symbols it has already read.
+
+| File | Bytes |
+| --- | ---: |
+| `6m-q4-fp32.tfwc2` (previous) | 2,930,652 |
+| `6m-q4-fp32.tfwc5` (shipped) | 2,902,452 |
+| Saved | 28,200 |
+
+Recompressed with the tooling in `pysrc/`:
+
+    python -m pysrc.weights_compress decompress 6m-q4-fp32.tfwc2 tmp.bin
+    python -m pysrc.weights_compress compress5   tmp.bin 6m-q4-fp32.tfwc5
 
 The checked-in configuration is exactly:
 
