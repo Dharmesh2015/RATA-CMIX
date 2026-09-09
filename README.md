@@ -10,11 +10,12 @@ developed with assistance from AI coding tools.
 A summary, not a repeat of fx4-cmix's own technical writeup -- see that
 project for the full mechanism-level description of each item below.
 
-- **cmix-lex** (Kaido Orav, Byron Knoll, Ibrahim Marcouch): the base codec --
-  PHDA9 preprocessing, article reordering, WRT, PPMd/FXCM/mixer/SSE, the
+- **fx2-cmix** (Kaido Orav, Byron Knoll): the base codec -- PHDA9
+  preprocessing, article reordering, WRT, PPMd/FXCM/mixer/SSE, the
   self-extracting `archive9` design.
-- **fx2-cmix-transformer** (Vladimer Ivanov): the frozen 6M-parameter CPU
-  transformer that replaces the online byte LSTM on the main stream.
+- **fx2-cmix-transformer** (Vladimer Ivanov), an extension of fx2-cmix: the
+  frozen 6M-parameter CPU transformer that replaces the online byte LSTM on
+  the main stream.
 - **fx-deepmix** (Halvor Yttredal): GrammarMatch, predicting Wikipedia
   structural patterns (piped-link labels, title recurrences) directly from
   the post-WRT stream.
