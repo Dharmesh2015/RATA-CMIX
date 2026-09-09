@@ -29,9 +29,9 @@ REM and ends with FINAL plus the delta against both completed references.
 REM
 REM About 100 minutes for the full 1%%. Blocks on purpose -- WSL2 tears its VM
 REM down once no client is attached, so keep this window open.
-set REPO=/mnt/d/mywork/myideas/latestcompressor/fx4-cmix
+set REPO=/mnt/d/mywork/myideas/latestcompressor/RATA-CMIX
 set STREAM=/root/fx4donor/ready.pre_r1.bin
-set BRANCH=release/google-cloud-hutter
+set BRANCH=main
 if "%CKPT%"=="" set CKPT=65536
 if "%LIMIT%"=="" set LIMIT=5871388
 if "%BENCH_LTO%"=="" set BENCH_LTO=1

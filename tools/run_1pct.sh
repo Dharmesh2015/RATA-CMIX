@@ -6,7 +6,7 @@
 # 5,871,388 bytes of the post-WRT stream, against the two completed reference
 # numbers this project has.
 #
-#   BRANCH=<ref>   what to build      (default release/google-cloud-hutter)
+#   BRANCH=<ref>   what to build      (default main)
 #   LIMIT=<n>      bytes to code      (default 5871388, the full 1%)
 #   CPU=<n>        core to pin to     (default 7)
 #   CKPT=<n>       checkpoint stride  (default 65536)
@@ -19,8 +19,8 @@
 # first, then run this -- there is no mode that tests uncommitted work.
 set -uo pipefail
 
-repo=/mnt/d/mywork/myideas/latestcompressor/fx4-cmix
-branch="${BRANCH:-release/google-cloud-hutter}"
+repo=/mnt/d/mywork/myideas/latestcompressor/RATA-CMIX
+branch="${BRANCH:-main}"
 stream="${STREAM:-/root/fx4donor/ready.pre_r1.bin}"
 limit="${LIMIT:-5871388}"
 cpu="${CPU:-7}"

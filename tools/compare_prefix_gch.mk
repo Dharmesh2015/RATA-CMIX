@@ -1,4 +1,4 @@
-# 1% benchmark build for release/google-cloud-hutter and its descendants.
+# 1% benchmark build for this branch.
 #
 # Builds tools/compare_prefix.cpp against this branch's model objects and links
 # a prefix_bench that codes a prefix of the post-WRT stream and reports the
@@ -57,3 +57,34 @@ prefix-bench: fast slow cold transformer_objects
 		-o prefix_driver.o
 	$(CXX) $(LDFLAGS) prefix_driver.o \
 		$(filter-out runner.o prefix_driver.o,$(wildcard *.o)) -o prefix_bench
+
+# Decode counterpart to prefix-bench, for round-trip verification: reads the
+# archive prefix-bench wrote, rebuilds the identical Predictor from its
+# header, and diffs the decoded bytes against the source. See
+# tools/compare_prefix_decode.cpp.
+prefix-bench-decode: fast slow cold transformer_objects
+	$(CXX) $(FAST_FLAGS) -DPREFIX_FX2 -Isrc -c tools/compare_prefix_decode.cpp \
+		-o prefix_decode_driver.o
+	$(CXX) $(LDFLAGS) prefix_decode_driver.o \
+		$(filter-out runner.o prefix_driver.o prefix_decode_driver.o,$(wildcard *.o)) \
+		-o prefix_bench_decode
+
+# Builds both binaries from one invocation. fast/slow/cold/transformer_objects
+# have no timestamp-based prerequisite tracking -- each unconditionally
+# recompiles its sources whenever invoked -- so this does NOT call the
+# prefix-bench / prefix-bench-decode targets separately (that would trigger
+# the expensive model compilation twice); it lists them as its own
+# prerequisites once, then links both drivers against the one resulting
+# object pool.
+.PHONY: prefix-bench-roundtrip
+prefix-bench-roundtrip: fast slow cold transformer_objects
+	$(CXX) $(FAST_FLAGS) -DPREFIX_FX2 -Isrc -c tools/compare_prefix.cpp \
+		-o prefix_driver.o
+	$(CXX) $(FAST_FLAGS) -DPREFIX_FX2 -Isrc -c tools/compare_prefix_decode.cpp \
+		-o prefix_decode_driver.o
+	$(CXX) $(LDFLAGS) prefix_driver.o \
+		$(filter-out runner.o prefix_driver.o prefix_decode_driver.o,$(wildcard *.o)) \
+		-o prefix_bench
+	$(CXX) $(LDFLAGS) prefix_decode_driver.o \
+		$(filter-out runner.o prefix_driver.o prefix_decode_driver.o,$(wildcard *.o)) \
+		-o prefix_bench_decode
