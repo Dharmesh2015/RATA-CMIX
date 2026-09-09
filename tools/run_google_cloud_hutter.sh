@@ -3,7 +3,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 input="${1:-}"
-run_dir="${2:-$HOME/fx4run}"
+run_dir="${2:-$HOME/ratarun}"
 cpu="${3:-0}"
 
 if [[ -z "$input" || ! -s "$input" ]]; then

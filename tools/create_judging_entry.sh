@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 archive="${1:-}"
 output_root="${2:-$root/dist}"
-entry_name="${3:-FX4}"
+entry_name="${3:-RATA}"
 
 # archive9 is optional: pass "" (or omit it) to stage entry.env and the
 # source tarball before compression has finished, then re-run with the
@@ -27,7 +27,7 @@ fi
 
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
-source_dir="$stage/fx4-cmix-source"
+source_dir="$stage/rata-cmix-source"
 mkdir -p "$source_dir/cpp_infer/src/opt"
 mkdir -p "$source_dir/src/readalike_prepr/data"
 mkdir -p "$source_dir/models"
@@ -96,7 +96,7 @@ fi
 
 mkdir -p "$entry_dir"
 tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
-  -czf "$entry_dir/fx4-cmix-source.tar.gz" -C "$stage" fx4-cmix-source
+  -czf "$entry_dir/rata-cmix-source.tar.gz" -C "$stage" rata-cmix-source
 if [[ -n "$archive" ]]; then
   install -m 0555 "$archive" "$entry_dir/archive9"
 fi
@@ -105,13 +105,13 @@ cp -a "$root/submission/entry.env" "$entry_dir/entry.env"
 # Captured once and grepped in-memory: piping a full tar -tzf listing into
 # `grep -q` lets grep exit the instant it matches, which SIGPIPEs tar and
 # (under set -o pipefail) aborts the script even though the check passed.
-tar_listing="$(tar -tzf "$entry_dir/fx4-cmix-source.tar.gz")"
+tar_listing="$(tar -tzf "$entry_dir/rata-cmix-source.tar.gz")"
 top_count="$(printf '%s\n' "$tar_listing" |
   cut -d/ -f1 | LC_ALL=C sort -u | wc -l)"
 [[ "$top_count" -eq 1 ]]
-grep -qx 'fx4-cmix-source/install.sh' <<<"$tar_listing"
-grep -qx 'fx4-cmix-source/build.sh' <<<"$tar_listing"
-grep -qx 'fx4-cmix-source/comp9.args' <<<"$tar_listing"
+grep -qx 'rata-cmix-source/install.sh' <<<"$tar_listing"
+grep -qx 'rata-cmix-source/build.sh' <<<"$tar_listing"
+grep -qx 'rata-cmix-source/comp9.args' <<<"$tar_listing"
 
 printf 'Entry directory: %s\n' "$entry_dir"
 if [[ -n "$archive" ]]; then
@@ -122,5 +122,5 @@ else
   printf 'archive9:       not yet provided -- re-run with a real archive9 to add it\n'
 fi
 printf 'source package: %s bytes  %s\n' \
-  "$(stat -c%s "$entry_dir/fx4-cmix-source.tar.gz")" \
-  "$(sha256sum "$entry_dir/fx4-cmix-source.tar.gz" | cut -d' ' -f1)"
+  "$(stat -c%s "$entry_dir/rata-cmix-source.tar.gz")" \
+  "$(sha256sum "$entry_dir/rata-cmix-source.tar.gz" | cut -d' ' -f1)"

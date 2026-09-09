@@ -157,11 +157,11 @@ Then, on the VM:
 
     sudo ./install.sh
     ./build_and_construct_comp.sh
-    ./tools/run_google_cloud_hutter.sh /data/enwik9 /data/fx4run 0
+    ./tools/run_google_cloud_hutter.sh /data/enwik9 /data/ratarun 0
 
 From a second SSH session:
 
-    ./tools/monitor_hutter_run.sh /data/fx4run 60
+    ./tools/monitor_hutter_run.sh /data/ratarun 60
 
 The run script pins the codec to one CPU, disables common GPU and threaded math
 runtimes, and refuses to reuse an existing run directory.
@@ -210,9 +210,9 @@ profile should be regenerated with the same toolchain `install.sh` installs.
 
 Run decompression in a clean directory that does not contain enwik9:
 
-    mkdir /data/fx4decode
-    cp /data/fx4run/archive9 /data/fx4decode/
-    cd /data/fx4decode
+    mkdir /data/ratadecode
+    cp /data/ratarun/archive9 /data/ratadecode/
+    cd /data/ratadecode
     /usr/bin/time -v taskset -c 0 ./archive9
     cmp /data/enwik9 enwik9_uncompressed
     sha256sum /data/enwik9 enwik9_uncompressed
@@ -222,14 +222,14 @@ Run decompression in a clean directory that does not contain enwik9:
 After a successful full round trip:
 
     ./tools/create_judging_entry.sh \
-      /data/fx4run/archive9 /data/fx4-entry FX4
+      /data/ratarun/archive9 /data/rata-entry RATA
 
 This creates:
 
-    /data/fx4-entry/Entries/FX4/
+    /data/rata-entry/Entries/RATA/
       entry.env
       archive9
-      fx4-cmix-source.tar.gz
+      rata-cmix-source.tar.gz
 
 The source archive has exactly one top-level directory and contains only the
 production C++ codec, required assets (dictionary, transformer weights, the
@@ -241,13 +241,13 @@ walk, so nothing else in a developer checkout can reach a submission.
 
     git clone https://github.com/jabowery/HutterPrizeJudgingAssistant.git
     cd HutterPrizeJudgingAssistant
-    cp -a /data/fx4-entry/Entries/FX4 Entries/
+    cp -a /data/rata-entry/Entries/RATA Entries/
     cp /data/enwik9 ./enwik9
     ./judging_assistance.sh \
       --serial \
       --runtime-exec-policy process-tree \
       --work-root /mnt/large-disk/HutterPrizeJudging \
-      Entries/FX4 ./enwik9
+      Entries/RATA ./enwik9
 
 process-tree is required because S1 and archive9 execute a helper image
 extracted from their own already-counted bytes to decode the embedded

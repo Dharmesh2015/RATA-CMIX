@@ -36,17 +36,17 @@ The build creates cmix, which is S1. Record its size and hash:
 
 Start the run from a persistent SSH multiplexer or service:
 
-    ./tools/run_google_cloud_hutter.sh /data/enwik9 /data/fx4run 0
+    ./tools/run_google_cloud_hutter.sh /data/enwik9 /data/ratarun 0
 
 The script copies both S1 and enwik9 into a fresh local run directory. It pins
-execution to one core and writes /data/fx4run/compression.log.
+execution to one core and writes /data/ratarun/compression.log.
 
 Do not set old FX4 discovery, model-selection or transformer environment
 variables. The release configuration is compiled in.
 
 ## Monitoring
 
-    ./tools/monitor_hutter_run.sh /data/fx4run 60
+    ./tools/monitor_hutter_run.sh /data/ratarun 60
 
 The monitor reads the entropy input file descriptor and reports:
 
@@ -61,9 +61,9 @@ the transformed stream, especially near structural boundaries.
 
 ## Clean Decompression Test
 
-    mkdir /data/fx4decode
-    cp /data/fx4run/archive9 /data/fx4decode/
-    cd /data/fx4decode
+    mkdir /data/ratadecode
+    cp /data/ratarun/archive9 /data/ratadecode/
+    cd /data/ratadecode
     env -i PATH=/usr/bin:/bin HOME="$HOME" \
       /usr/bin/time -v taskset -c 0 ./archive9
     cmp /data/enwik9 enwik9_uncompressed
@@ -77,12 +77,12 @@ self-contained.
 
     cd /path/to/fx4-cmix
     ./tools/create_judging_entry.sh \
-      /data/fx4run/archive9 /data/fx4-entry FX4
+      /data/ratarun/archive9 /data/rata-entry RATA
 
 Inspect it:
 
-    find /data/fx4-entry/Entries/FX4 -maxdepth 1 -type f -printf '%f %s\n'
-    tar -tzf /data/fx4-entry/Entries/FX4/fx4-cmix-source.tar.gz | head
+    find /data/rata-entry/Entries/RATA -maxdepth 1 -type f -printf '%f %s\n'
+    tar -tzf /data/rata-entry/Entries/RATA/rata-cmix-source.tar.gz | head
 
 The manifest declares:
 
@@ -107,13 +107,13 @@ then:
 
     git clone https://github.com/jabowery/HutterPrizeJudgingAssistant.git
     cd HutterPrizeJudgingAssistant
-    cp -a /data/fx4-entry/Entries/FX4 Entries/
+    cp -a /data/rata-entry/Entries/RATA Entries/
     cp /data/enwik9 ./enwik9
     ./judging_assistance.sh \
       --serial \
       --runtime-exec-policy process-tree \
       --work-root /mnt/large-disk/HutterPrizeJudging \
-      Entries/FX4 ./enwik9
+      Entries/RATA ./enwik9
 
 Use --serial for the final timing run. The default can overlap archive
 qualification and rebuilt compression.
