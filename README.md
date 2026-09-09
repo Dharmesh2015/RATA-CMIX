@@ -32,7 +32,7 @@ project for the full mechanism-level description of each item below.
   - lossless v5 recompression of the transformer weights -- entropy-coded
     Q4 symbols against per-tensor histograms and a causal column-local
     count derived from the tensor's own shape, no side table stored;
-    2,930,652 -> 2,902,452 bytes (28,200 saved), via `pysrc/weights_compress`;
+    2,930,652 -> 2,902,452 bytes (28,200 saved), via modified `pysrc/weights_compress`;
   - Scr2Match, a derived pattern table used as a probability expert;
   - a zero-side-data morphology specialist for literal words the
     dictionary has not seen;
