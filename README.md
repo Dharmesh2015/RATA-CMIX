@@ -39,16 +39,13 @@ project for the full mechanism-level description of each item below.
   - a zero-side-data causal donor specialist, matching already-decoded
     history without ever touching another model's state.
 - **trophy-v93** (Dharmesh Patel), layered additively on fx4-cmix's v22++
-  and predictor; validated there with a byte-exact round trip at every
-  scale from 1 MB to full enwik9:
+  and predictor; validated there with a byte-exact round trip:
   - MATCHTRUST -- an 8-bit shift register of recent match-outcome history,
     restoring evidence the match model destroys the instant a candidate
     mispredicts, as a 4th StateMap context;
   - SPECIALIST -- a small context-gated corrector applied after the SSE
     chain, trained on its own error against the ppmd/byte-mixer/FXCM
     logits.
-  - FDIGIT, also explored there, measured negative at every scale tried
-    and was not ported.
 
 The checked-in configuration is exactly:
 
