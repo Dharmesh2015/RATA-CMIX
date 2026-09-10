@@ -60,8 +60,7 @@ S1/S2 layout, and build details.
 
 ## Status
 
-- Branch: main. Tracks fx4-cmix's `release/google-cloud-hutter`;
-  see that project for its own development branches and in-progress work
+- Branch: main. Tracks fx4-cmix-transformer
 - Platform: Linux x86-64, Ubuntu 20.04 (focal)
 - Toolchain: clang++-17, LTO (`-flto=thin`), profile-guided (PGO), UPX 5.1.1
 - GPU: not used or linked
