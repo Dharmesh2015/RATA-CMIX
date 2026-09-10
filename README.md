@@ -2,8 +2,7 @@
 
 CPU-only enwik9 candidate. Built using fx4-cmix (Dharmesh Patel and Naveen
 Bijalwan) as its foundation -- this tree tracks fx4-cmix's
-`release/google-cloud-hutter` branch. Portions of the implementation were
-developed with assistance from AI coding tools.
+`release/google-cloud-hutter` branch.
 
 ## Ideas in this codec, by author
 
