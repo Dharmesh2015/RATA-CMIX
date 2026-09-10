@@ -262,3 +262,12 @@ starting the multiday run.
 - [HutterPrizeJudgingAssistant](https://github.com/jabowery/HutterPrizeJudgingAssistant)
 - [Entrant instructions](https://github.com/jabowery/HutterPrizeJudgingAssistant/blob/main/ENTRANT_INSTRUCTIONS.md)
 - [Hutter Prize detailed rules](https://www.hutter1.net/prize/hrules.htm)
+
+## Copyright and License
+
+Copyright (C) Dharmesh Patel and Naveen Bijalwan.
+
+Licensed under the GNU General Public License, version 3 -- see
+[LICENSE](LICENSE). This tree also incorporates GPLv3 code from other
+authors; see [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) for full
+attribution.
