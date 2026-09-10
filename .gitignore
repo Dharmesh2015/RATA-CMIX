@@ -1,7 +1,7 @@
 # Native build products
 *.o
 *.o.tmp
-cmix
+/cmix
 cmix_*
 # the 1% benchmark binary and its driver object -- build artifacts, and
 # prefix_bench was committed once at 427,952 bytes
