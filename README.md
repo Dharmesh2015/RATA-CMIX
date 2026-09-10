@@ -1,10 +1,9 @@
 # RATA-CMIX
 
 CPU-only enwik9 candidate. Built using fx4-cmix-transformer(https://github.com/naveenbijalwan/fx4-cmix-transformer) (Dharmesh Patel and Naveen
-Bijalwan) as its foundation -- this tree tracks fx4-cmix-transformer's
-`release/google-cloud-hutter` branch.
+Bijalwan) as its foundation.
 
-## Ideas in this codec, by author
+## Ideas in this codec, by authors
 
 A summary, not a repeat of fx4-cmix-transformer's own technical writeup -- see that
 project for the full mechanism-level description of each item below.
