@@ -38,7 +38,7 @@ project for the full mechanism-level description of each item below.
     dictionary has not seen;
   - a zero-side-data causal donor specialist, matching already-decoded
     history without ever touching another model's state.
-- **trophy-v93** (Dharmesh Patel), layered additively on fx4-cmix's v22++
+- **RATA-CMIX** (Dharmesh Patel), layered additively on fx4-cmix's v22++
   and predictor; validated there with a byte-exact round trip:
   - MATCHTRUST -- an 8-bit shift register of recent match-outcome history,
     restoring evidence the match model destroys the instant a candidate
@@ -129,7 +129,7 @@ Verified full decompression run:
       -> PHDA9
       -> WRT
       -> PPMd + FXCM + frozen transformer + 2x200 online LSTM expert
-         + GrammarMatch + Scr2Match + MorphologyMatch + CausalDonor
+         + GrammarMatch + Scr2Match + MorphologyMatch + CausalDonor + MATCHTRUST + SPECIALIST
       -> arithmetic coder
       -> self-extracting archive9
 
