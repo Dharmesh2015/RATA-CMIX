@@ -81,7 +81,6 @@ KdaSweep kda_get_sweep();
 //       (~9 B/c metering), so every sweep runs on an L2-warm state
 //   6 = like 5 with the t1 hint (measured equal to 5)
 void kda_set_pf_mode(int m);
-int kda_get_pf_mode();
 
 // Per-phase tick accumulators (lfence;rdtsc ticks — convert with the
 // caller's TSC->core-cycle ratio). Enabled only when a profile pointer is

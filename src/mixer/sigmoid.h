@@ -8,7 +8,6 @@ class Sigmoid {
   Sigmoid(int logit_size);
   float Logit(float p) const;
   static float Logistic(float p);
-  static float FastLogistic(float p);
   const float* Table() const { return logit_table_.data(); }
   int TableSize() const { return logit_size_; }
 

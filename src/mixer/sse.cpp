@@ -96,16 +96,6 @@ uint sq_i( uint p ) {
   return p;
 }
 
-double st_d( double p ) {
-  p = st(p/SCALE);
-  return p;
-}
-
-double sq_d( double p ) {
-  p = sq(p) * SCALE;
-  return p;
-}
-
 word t_st[SCALE];
 word t_sq[SCALE];
 
@@ -140,15 +130,6 @@ uint Extrap( int p1, int C ) {
   if( p1<1 ) p1=1;
   if( p1>mSCALE ) p1=mSCALE;
   return p1;
-}
-
-uint WExtrap( int _p1, int C ) {
-  double p1 = st_d(_p1-hSCALE);
-  p1 = (p1*C)/8192;
-  _p1 = sq_d(p1);
-  if( _p1<0 ) _p1=0;
-  if( _p1>SCALE ) _p1=SCALE;
-  return _p1+hSCALE;
 }
 
 struct Mixer {
@@ -233,8 +214,6 @@ struct M_T {
 
     M_j=1; M_pc=0; M_ffl=0;
 
-  }
-  void M_Quit( void ) {
   }
 };
 

@@ -260,7 +260,6 @@ void sweep_head_t(float* S, const float* decay, const float* kn,
 void kda_set_sweep(KdaSweep v) { g_sweep = v; }
 KdaSweep kda_get_sweep() { return g_sweep; }
 void kda_set_pf_mode(int m) { g_pf_mode = m; }
-int kda_get_pf_mode() { return g_pf_mode; }
 
 void kda_layer_reset(KdaState& st) { std::memset(&st, 0, sizeof(st)); }
 

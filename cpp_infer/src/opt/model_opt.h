@@ -44,8 +44,6 @@ struct TransformerOpt {
   // the 205 post-softcap logits of the last step (valid until the next step)
   const float* last_logits() const;
 
-  AttnKind attn_kind() const;
-
  private:
   std::unique_ptr<TransformerOptImpl> impl;
 };

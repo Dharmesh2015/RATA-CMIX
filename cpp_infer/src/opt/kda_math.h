@@ -12,10 +12,10 @@
 //                whose argument reaches -96.5 on the real g_raw range
 //                (exp256_ps would clamp; absolute error would still be
 //                < 1.2e-38 but the subnormal tail costs nothing).
-//   sum_squares64 / hsum256v : bit-identical reduction order to
-//                src/kernels.cpp sum_squares/hsum256 (one accumulator, 8
-//                sequential fmas, the same shuffle tree), so l2norm and
-//                gated-norm statistics match the naive path bit-for-bit.
+//   hsum256v     : bit-identical reduction order to src/kernels.cpp's
+//                hsum256 (one accumulator, 8 sequential fmas, the same
+//                shuffle tree), so l2norm and gated-norm statistics match
+//                the naive path bit-for-bit.
 #pragma once
 
 #include <immintrin.h>
@@ -33,17 +33,6 @@ static inline float hsum256v(__m256 v) {
   lo = _mm_add_ps(lo, _mm_movehl_ps(lo, lo));
   lo = _mm_add_ss(lo, _mm_movehdup_ps(lo));
   return _mm_cvtss_f32(lo);
-}
-
-// sum of squares of 64 floats, bit-identical to src/kernels.cpp
-// sum_squares(x, 64).
-static inline float sum_squares64(const float* x) {
-  __m256 acc = _mm256_setzero_ps();
-  for (int i = 0; i < 64; i += 8) {
-    __m256 v = _mm256_loadu_ps(x + i);
-    acc = _mm256_fmadd_ps(v, v, acc);
-  }
-  return hsum256v(acc);
 }
 
 // Full-range exp: exp256_ps's reduction + Estrin polynomial (mirrors the

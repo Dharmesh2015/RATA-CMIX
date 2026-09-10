@@ -216,19 +216,6 @@ qword GetUsedMemory() {
   return RetVal;
 }
 
-void StopSubAllocator() {
-  if (!SubAllocatorSize) return;
-  // delete[] on an mmap'd pointer is undefined. This function's only call
-  // site is commented out today, so the hazard is dormant rather than
-  // live -- but it is a landmine for whoever re-enables it.
-  if (mmap_to_disk) {
-    munmap(HeapStart, SubAllocatorSize);
-  } else {
-    delete[] HeapStart;
-  }
-  SubAllocatorSize = 0;
-}
-
 void GlueFreeBlocks() {
   uint i, k, sz;
   MEM_BLK s0;
@@ -1333,7 +1320,6 @@ void processSymbol2_T( PPM_CONTEXT& q, int ) {
   }
 
   ~ppmd_Model() {
-    //StopSubAllocator();
   }
 
 void ppmd_PrepareByte( void ) {

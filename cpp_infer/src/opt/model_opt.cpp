@@ -570,7 +570,5 @@ void TransformerOpt::step(uint8_t token, const float* prior205,
 
 const float* TransformerOpt::last_logits() const { return impl->logits; }
 
-AttnKind TransformerOpt::attn_kind() const { return impl->kind; }
-
 }  // namespace opt
 }  // namespace fx2

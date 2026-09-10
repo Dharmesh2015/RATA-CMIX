@@ -761,14 +761,6 @@ inline short clp(int z){
     }
     return z;
 }
-inline short clp1(int z){
-    if (z<0){
-        z=0;
-    }else if (z>4095){
-        z=4095;
-    }
-    return z;
-}
 // A RunContextMap maps a context into the next byte and a repeat
 // count up to M.  Size should be a power of 2.  Memory usage is 3M/4.
 struct RunContextMap {
@@ -2040,10 +2032,6 @@ int vec_at(vec<T,S> *o, const int index){
     return o->cxt[index];
 }
 template <typename T  = int,const int S>
-T &vec_ref(vec<T,S> *o, const int index){
-    return o->cxt[index];
-}
-template <typename T  = int,const int S>
 void vec_i(vec<T,S> *o, const int index){
     o->cxt[index]++;
 }
@@ -2372,19 +2360,6 @@ struct WordsContext {
         for (int i=j; i<num; i++){
            typ=Type(i);
            if (typ&t) return Word(i);
-        }
-        }
-        return 0;
-    }
-        U32  __attribute__ ((noinline)) LastIdx(int j=1, U32 t=0){
-        const int num=vec_size(&type);
-        if (t==0) return 0;
-        if (num>=j){
-        
-        U32 typ=0;
-        for (int i=j; i<num; i++){
-           typ=Type(i);
-           if (typ&t) return i;
         }
         }
         return 0;

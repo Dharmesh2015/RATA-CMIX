@@ -15,18 +15,11 @@ class MixerInput {
   // did; inline so per-bit marshaling keeps the limits and table pointer in
   // registers.
   void SetInput(int index, float p) { inputs_[index] = StretchChecked(p); }
-  // Batched form of SetInput(): convert a gathered run of model
-  // probabilities into consecutive input slots in one tight loop.
-  void SetInputsChecked(int base, const float* p, int count) {
-    float* dst = inputs_.get() + base;
-    for (int i = 0; i < count; ++i) dst[i] = StretchChecked(p[i]);
-  }
   void SetStretchedInput(int index, float p) {
     if (p > stretched_max_) p = stretched_max_;
     else if (p < stretched_min_) p = stretched_min_;
     inputs_[index] = p;
   }
-  void SetStretchedInputUnchecked(int index, float p) { inputs_[index] = p; }
   void SetZero(int index) { inputs_[index] = 0.0f; }
   void SetExtraInput(size_t index, float p) {
     if (p > stretched_max_) p = stretched_max_;

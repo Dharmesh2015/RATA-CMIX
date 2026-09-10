@@ -20,10 +20,6 @@ float Sigmoid::Logistic(float p) {
   return 1 / (1 + exp(-p));
 }
 
-float Sigmoid::FastLogistic(float p) {
-  return (0.5f * (p / (1.0f + abs(p)) + 1.0f));
-}
-
 float Sigmoid::SlowLogit(float p) {
   return log(p / (1 - p));
 }
