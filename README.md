@@ -19,7 +19,7 @@ project for the full mechanism-level description of each item below.
 - **fx-deepmix** (Halvor Yttredal): GrammarMatch, predicting Wikipedia
   structural patterns (piped-link labels, title recurrences) directly from
   the post-WRT stream.
-- **fx4-cmix** (Dharmesh Patel, Naveen Bijalwan), layered additively on the
+- **fx4-cmix-transformer** (Dharmesh Patel, Naveen Bijalwan), layered additively on the
   above:
   - a 2x200 online LSTM expert alongside the frozen transformer;
   - v22++, an additive-only enhancement of Kaido Orav's fxcm_v22 -- a
