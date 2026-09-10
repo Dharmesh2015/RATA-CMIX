@@ -1,12 +1,12 @@
 # RATA-CMIX
 
-CPU-only enwik9 candidate. Built using fx4-cmix (Dharmesh Patel and Naveen
-Bijalwan) as its foundation -- this tree tracks fx4-cmix's
+CPU-only enwik9 candidate. Built using fx4-cmix-transformer(https://github.com/naveenbijalwan/fx4-cmix-transformer) (Dharmesh Patel and Naveen
+Bijalwan) as its foundation -- this tree tracks fx4-cmix-transformer's
 `release/google-cloud-hutter` branch.
 
 ## Ideas in this codec, by author
 
-A summary, not a repeat of fx4-cmix's own technical writeup -- see that
+A summary, not a repeat of fx4-cmix-transformer's own technical writeup -- see that
 project for the full mechanism-level description of each item below.
 
 - **fx2-cmix** (Kaido Orav, Byron Knoll): the base codec -- PHDA9
@@ -37,7 +37,7 @@ project for the full mechanism-level description of each item below.
     dictionary has not seen;
   - a zero-side-data causal donor specialist, matching already-decoded
     history without ever touching another model's state.
-- **RATA-CMIX** (Dharmesh Patel), layered additively on fx4-cmix's v22++
+- **RATA-CMIX** (Dharmesh Patel), layered additively on fx4-cmix-transformer's v22++
   and predictor; validated there with a byte-exact round trip:
   - MATCHTRUST -- an 8-bit shift register of recent match-outcome history,
     restoring evidence the match model destroys the instant a candidate
