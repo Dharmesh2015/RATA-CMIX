@@ -260,6 +260,10 @@ starting the multiday run.
 - [Entrant instructions](https://github.com/jabowery/HutterPrizeJudgingAssistant/blob/main/ENTRANT_INSTRUCTIONS.md)
 - [Hutter Prize detailed rules](https://www.hutter1.net/prize/hrules.htm)
 
+## Acknowledgements
+
+Thanks to Matt Mahoney for creating and maintaining the Large Text Compression Benchmark (https://www.mattmahoney.net/dc/text.html) still after 20 years! as well as his online textbook Data Compression Explained (https://mattmahoney.net/dc/dce.html)!
+
 ## Copyright and License
 
 Copyright (C) Dharmesh Patel and Naveen Bijalwan.
