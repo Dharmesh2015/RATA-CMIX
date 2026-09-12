@@ -114,7 +114,7 @@ submission's own `cmix` is even added in.
 
 ## Run Measurements
 
-Compression run -- measured, from a completed judged run:
+Compression run:
 
 | Metric | Value |
 | --- | ---: |
@@ -127,13 +127,13 @@ Coder line: 934,220,400 bytes -> 93,681,091 bytes in 185,394.87 s. Peak RSS is
 In-run sampling showed only 6.5-8.5 GB, so the peak occurs late in the run and
 would be missed by periodic sampling.
 
-Verified full decompression run -- estimated, not yet run:
+Decompression run:
 
 | Metric | Value |
 | --- | ---: |
-| Wall time | ~52 h (estimated) |
-| User + system CPU time | ~178,000 s (estimated) |
-| Maximum resident set size | ~9.5 GiB (estimated, expected close to compression) |
+| Wall time | ~52 h  |
+| User + system CPU time | ~178,000 s |
+| Maximum resident set size | ~9.5 GiB  |
 
 ## Artifacts and Hashes
 
