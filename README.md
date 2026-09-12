@@ -11,7 +11,7 @@ project for the full mechanism-level description of each item below.
 - **fx2-cmix** (Kaido Orav, Byron Knoll): the base codec -- PHDA9
   preprocessing, article reordering, WRT, PPMd/FXCM/mixer/SSE, the
   self-extracting `archive9` design.
-- **fx2-cmix-transformer** (Vladimer Ivanov), an extension of fx2-cmix: the
+- **fx2-cmix-transformer** (Vladimir Ivanov), an extension of fx2-cmix: the
   frozen 6M-parameter CPU transformer that replaces the online byte LSTM on
   the main stream.
 - **fx-deepmix** (Halvor Yttredal): GrammarMatch, predicting Wikipedia
@@ -81,27 +81,34 @@ round trip.
 
 | Item | Value |
 | --- | ---: |
-| Previous record `L` | 96,994,188 bytes |
-| `archive9` | 96,849,689 bytes |
-| `cmix` | 3,369,432 bytes |
-| Total `S = archive9 + cmix` | 100,219,121 bytes |
-| Improvement `1 - S/L` | 0.001490 (0.1490%) |
-| Bytes below previous record | 144,499 bytes |
-| Margin above 1% threshold | -0.851 percentage points (below threshold) |
+| Previous LTCB best `archive9` (`fx2-cmix-transformer`, 21 Aug 2026) | 96,994,188 bytes |
+| RATA-CMIX `archive9` | **96,849,689 bytes** |
+| LTCB improvement | **144,499 bytes (0.14898%)** |
+| RATA-CMIX `cmix` | 3,369,432 bytes |
+| RATA-CMIX Hutter-style `S1 + S2` | **100,219,121 bytes** |
 
-`L` is the previous record holder's compressed-archive size; the Hutter Prize
-qualifying comparison (`Improvement`, `Bytes below previous record`, `Margin`)
-is `archive9` alone against `L`, not `Total S` -- `Total S` is shown above for
-the full submission size, not the qualifying figure. At 0.1490% this
-submission is smaller than the previous record but 0.851 percentage points
-short of the 1% improvement the prize rules require to qualify as a new
-record.
+For the **Large Text Compression Benchmark (LTCB)**, the relevant score for this
+self-extracting entry is `archive9`, because the decompressor is contained in
+the archive itself. On that basis, RATA-CMIX's `archive9` of **96,849,689
+bytes** is **144,499 bytes (0.14898%) smaller** than the 21 August 2026
+`fx2-cmix-transformer` result of **96,994,188 bytes**.
 
-For context against this project's own direct ancestor, not the current
-title holder: fx2-cmix-transformer (Vladimer Ivanov, Jul 24, 2026) measured
-`S1+S2 = 100,424,672` bytes; RATA-CMIX's `archive9` alone, 96,849,689 bytes,
-is 3,574,983 bytes smaller than that entire prior total -- before this
-submission's own `cmix` is even added in.
+For a separate Hutter-Prize-style size comparison, where the compressor is
+also counted, RATA-CMIX has:
+
+    96,849,689 + 3,369,432 = 100,219,121 bytes
+
+For context, its direct ancestor `fx2-cmix-transformer` by **Vladimir Ivanov**
+measured:
+
+- **24 July 2026:** `96,996,198 + 3,428,474 = 100,424,672 bytes`
+- **21 August 2026:** `96,994,188 + 3,426,642 = 100,420,830 bytes`
+
+Thus RATA-CMIX's Hutter-style total is **205,551 bytes smaller than the
+original 24 July version** and **201,709 bytes smaller than the 21 August
+version**.
+
+This version is intended for **LTCB listing rather than a Hutter Prize claim**.
 
 ## Platform
 
