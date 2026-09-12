@@ -131,8 +131,8 @@ Verified full decompression run -- estimated, not yet run:
 
 | Metric | Value |
 | --- | ---: |
-| Wall time | ~47.9 h (estimated) |
-| User + system CPU time | ~164,000 s (estimated) |
+| Wall time | ~52 h (estimated) |
+| User + system CPU time | ~178,000 s (estimated) |
 | Maximum resident set size | ~9.5 GiB (estimated, expected close to compression) |
 
 ## Artifacts and Hashes
