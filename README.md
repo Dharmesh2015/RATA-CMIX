@@ -71,24 +71,37 @@ S1/S2 layout, and build details.
 - Frozen transformer: 6M CPU model, embedded in both S1 and archive9
 - Hutter form: self-extracting
 
-target93 is the candidate name and research target. This repository does not
-claim a measured 93 MB archive. A complete judged compression and decompression
-run is still required before making a score claim.
+target93 is the candidate name and research target. Compression against the
+real enwik9 has been run and judged; decompression has not yet been run, so
+the figures below for it are estimated, not measured. No score claim is final
+until the decompression run completes and `cmp` confirms a byte-exact
+round trip.
 
 ## Result
 
-Not yet measured. Update after a complete, judged compression and
-decompression run against the real enwik9.
-
 | Item | Value |
 | --- | ---: |
-| Previous record `L` | `TBD` bytes |
-| `archive9` | `TBD` bytes |
-| `cmix` | `TBD` bytes |
-| Total `S = archive9 + cmix` | `TBD` bytes |
-| Improvement `1 - S/L` | `TBD` |
-| Bytes below previous record | `TBD` |
-| Margin above 1% threshold | `TBD` |
+| Previous record `L` | 96,994,188 bytes |
+| `archive9` | 96,849,689 bytes |
+| `cmix` | 3,369,432 bytes |
+| Total `S = archive9 + cmix` | 100,219,121 bytes |
+| Improvement `1 - S/L` | 0.001490 (0.1490%) |
+| Bytes below previous record | 144,499 bytes |
+| Margin above 1% threshold | -0.851 percentage points (below threshold) |
+
+`L` is the previous record holder's compressed-archive size; the Hutter Prize
+qualifying comparison (`Improvement`, `Bytes below previous record`, `Margin`)
+is `archive9` alone against `L`, not `Total S` -- `Total S` is shown above for
+the full submission size, not the qualifying figure. At 0.1490% this
+submission is smaller than the previous record but 0.851 percentage points
+short of the 1% improvement the prize rules require to qualify as a new
+record.
+
+For context against this project's own direct ancestor, not the current
+title holder: fx2-cmix-transformer (Vladimer Ivanov, Jul 24, 2026) measured
+`S1+S2 = 100,424,672` bytes; RATA-CMIX's `archive9` alone, 96,849,689 bytes,
+is 3,574,983 bytes smaller than that entire prior total -- before this
+submission's own `cmix` is even added in.
 
 ## Platform
 
@@ -97,27 +110,42 @@ decompression run against the real enwik9.
 | Machine type | `n4d-highmem-2` (2 vCPU, 16 GiB RAM) |
 | OS | Ubuntu 20.04.6 LTS (focal), `ubuntu-2004-focal-v20240731` |
 | Storage | GCE persistent disk, 100 GB |
-| Geekbench 5 `T` used for timing | `TBD` |
+| Geekbench 5 `T` used for timing | N/A |
 
 ## Run Measurements
 
-Compression run:
+Compression run -- measured, from a completed judged run:
 
 | Metric | Value |
 | --- | ---: |
-| Wall time | `TBD` |
-| User + system CPU time | `TBD` |
-| Maximum resident set size | `TBD` |
-| Exit status | `TBD` |
+| Wall time | 52:57:13 (190,633 s) |
+| User + system CPU time | 185,507.91 s (user 180,260.32 + system 5,247.59) |
+| Maximum resident set size | 9,537,136 kB (9.10 GiB) |
 
-Verified full decompression run:
+Coder line: 934,220,400 bytes -> 93,681,091 bytes in 185,394.87 s. Peak RSS is
+9.10 GiB against the 10 GB limit -- inside the rule, with roughly 9% margin.
+In-run sampling showed only 6.5-8.5 GB, so the peak occurs late in the run and
+would be missed by periodic sampling.
+
+Verified full decompression run -- estimated, not yet run:
 
 | Metric | Value |
 | --- | ---: |
-| Wall time | `TBD` |
-| User + system CPU time | `TBD` |
-| Maximum resident set size | `TBD` |
-| Exit status | `TBD` |
+| Wall time | ~47.9 h (estimated) |
+| User + system CPU time | ~164,000 s (estimated) |
+| Maximum resident set size | ~9.5 GiB (estimated, expected close to compression) |
+
+## Artifacts and Hashes
+
+| Item | Value |
+| --- | ---: |
+| `cmix` (S1) | 3,369,432 bytes |
+| `cmix` SHA-256 | `9b644dcaf37e03bc7803c07f0c36f7258d69a6e88043b6e61382712a4b88dc8d` |
+| `archive9` (S2) | 96,849,689 bytes |
+| `archive9` SHA-256 | `af1105ae1d11ced28b3b57e700b964a4f2969a8b7347cc65b039f1758b319a9a` |
+| `payload.bin` (kept separately) | 93,681,091 bytes |
+| `payload.bin` SHA-256 | `f4f960bf5c1460476fa6eb19f8c1357066d1eb1b8893867c7dd8beef710dbd31` |
+| `enwik9` input MD5 | `e206c3450ac99950df65bf70ef61a12d` |
 
 ## Production Pipeline
 
